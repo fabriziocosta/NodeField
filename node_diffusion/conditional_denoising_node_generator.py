@@ -337,23 +337,22 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self.transformer_attention_head_count = transformer_attention_head_count
         self.transformer_dropout = transformer_dropout
         self.learning_rate = learning_rate
-        self.sigma_min = float(sigma_min)
-        self.sigma_max = float(sigma_max)
-        if not self.sigma_min < self.sigma_max:
-            raise ValueError(f"sigma_min must be < sigma_max (got {self.sigma_min} >= {self.sigma_max})")
-        self.sampling_final_sigma = float(sampling_final_sigma)
-        if self.sampling_final_sigma < 0:
-            raise ValueError(f"sampling_final_sigma must be non-negative (got {self.sampling_final_sigma})")
-        if self.sampling_final_sigma > self.sigma_max:
-            raise ValueError(
-                f"sampling_final_sigma must be <= sigma_max "
-                f"(got {self.sampling_final_sigma} > {self.sigma_max})"
-            )
         self.verbose = verbose
         self.important_feature_index = important_feature_index
-        self.max_degree = max_degree
-        if self.max_degree is None:
+
+        if max_degree is None:
             raise ValueError("max_degree must be provided when initializing the diffusion model.")
+        if int(max_degree) < 0:
+            raise ValueError(f"max_degree must be non-negative (got {max_degree}).")
+        self.max_degree = int(max_degree)
+
+        # Centralise diffusion schedule metadata (backward-compatible defaults handled later)
+        self._set_schedule_metadata(
+            sigma_min=sigma_min,
+            sigma_max=sigma_max,
+            sampling_final_sigma=sampling_final_sigma,
+        )
+
         self.lambda_degree_importance = lambda_degree_importance
         self.noise_degree_factor = noise_degree_factor
         self.degree_temperature = degree_temperature
@@ -416,6 +415,81 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
                 dropout=transformer_dropout
             )
 
+    # -----------------------------------------------------------------------
+    # Diffusion schedule helpers
+    # -----------------------------------------------------------------------
+    def _set_schedule_metadata(
+        self,
+        *,
+        sigma_min: float,
+        sigma_max: float,
+        sampling_final_sigma: float,
+    ) -> None:
+        """
+        Store diffusion schedule parameters in a single metadata dict while
+        keeping legacy attributes in sync for checkpoints created with older
+        versions of the model.
+        """
+        sigma_min = float(sigma_min)
+        sigma_max = float(sigma_max)
+        sampling_final_sigma = float(sampling_final_sigma)
+
+        if not sigma_min < sigma_max:
+            raise ValueError(f"sigma_min must be < sigma_max (got {sigma_min} >= {sigma_max})")
+        if sampling_final_sigma < 0:
+            raise ValueError(f"sampling_final_sigma must be non-negative (got {sampling_final_sigma})")
+        if sampling_final_sigma > sigma_max:
+            raise ValueError(
+                f"sampling_final_sigma must be <= sigma_max "
+                f"(got {sampling_final_sigma} > {sigma_max})"
+            )
+
+        self._schedule_metadata = {
+            "sigma_min": sigma_min,
+            "sigma_max": sigma_max,
+            "sampling_final_sigma": sampling_final_sigma,
+        }
+        # Maintain legacy attributes for backwards compatibility with training loops / checkpoints.
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.sampling_final_sigma = sampling_final_sigma
+
+    def _ensure_schedule_metadata(self) -> None:
+        """
+        Ensure the diffusion schedule metadata exists and is internally consistent.
+        Older checkpoints might miss the dict (or even the attributes), so we seed
+        them with conservative defaults and clamp invalid values into legal ranges.
+        """
+        meta = getattr(self, "_schedule_metadata", None)
+        if not isinstance(meta, dict):
+            meta = {}
+
+        sigma_min = float(meta.get("sigma_min", getattr(self, "sigma_min", 0.1)))
+        sigma_max = float(meta.get("sigma_max", getattr(self, "sigma_max", 1.0)))
+        sampling_final_sigma = float(
+            meta.get("sampling_final_sigma", getattr(self, "sampling_final_sigma", 0.0))
+        )
+
+        # Clamp gracefully instead of failing hard when loading legacy weights.
+        if sigma_max <= sigma_min:
+            sigma_max = max(sigma_min + 1e-6, 1.0)
+        sampling_final_sigma = max(0.0, min(sampling_final_sigma, sigma_max))
+
+        self._set_schedule_metadata(
+            sigma_min=sigma_min,
+            sigma_max=sigma_max,
+            sampling_final_sigma=sampling_final_sigma,
+        )
+
+    def _build_sigma_schedule(self, total_steps: int, device: torch.device) -> torch.Tensor:
+        """
+        Create a linear sigma ladder shared between training and generation.
+        """
+        self._ensure_schedule_metadata()
+        if total_steps <= 1:
+            return torch.tensor([self.sigma_max], device=device)
+        return torch.linspace(self.sigma_max, self.sampling_final_sigma, total_steps, device=device)
+
     def forward(
         self,
         input_rows: torch.Tensor,
@@ -435,6 +509,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             add_noise: If True, sample fresh noise via the training schedule; if False,
                 assume `input_rows` already contains x_t and skip additional perturbation.
         """
+        self._ensure_schedule_metadata()
         if add_noise:
             noisy_input, eps, sigma_t = self.apply_noise_schedule(input_rows, diffusion_time_step)
         else:
@@ -468,10 +543,12 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
 
     def _sigma_from_t(self, t: torch.Tensor) -> torch.Tensor:
         """Convert normalized time steps to per-feature noise scales."""
+        self._ensure_schedule_metadata()
         return self.sigma_min + t * (self.sigma_max - self.sigma_min)
 
     def _t_from_sigma(self, sigma: torch.Tensor) -> torch.Tensor:
         """Map noise scales back to the normalized diffusion time domain."""
+        self._ensure_schedule_metadata()
         return ((sigma - self.sigma_min) / (self.sigma_max - self.sigma_min)).clamp(0.0, 1.0)
 
     def apply_noise_schedule(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -483,6 +560,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             eps      : The actual Gaussian noise added
             sigma_t  : The scalar noise level used at each step (B,1,1)
         """
+        self._ensure_schedule_metadata()
         # base Gaussian noise
         eps = torch.randn_like(x)
 
@@ -772,16 +850,12 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         Optionally projects the existence/degree channels using the auxiliary heads.
         """
         self.eval()
+        self._ensure_schedule_metadata()
         B = global_condition.size(0)
         device = global_condition.device
 
         # --- sigma schedule consistent with training metadata ---
-        sigmas = torch.linspace(
-            self.sigma_max,
-            self.sampling_final_sigma,
-            total_steps,
-            device=device
-        )  # (T,)
+        sigmas = self._build_sigma_schedule(total_steps=total_steps, device=device)  # (T,)
 
         # Start from pure noise at the largest sigma
         x = torch.randn(
@@ -832,7 +906,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
 
         # Optional: project existence/degree using the auxiliary heads once at (approx) t=0
         if use_heads_projection:
-            sigma_proj = torch.tensor(self.sampling_final_sigma, device=device)
+            sigma_proj = sigmas[-1]
             t0 = self._t_from_sigma(sigma_proj).expand(B, 1)
             with torch.no_grad():
                 _, logits_deg, logits_exist, _, _, _ = self.forward(
