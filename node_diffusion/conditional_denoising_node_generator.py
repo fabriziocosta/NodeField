@@ -297,6 +297,10 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         Upper bound of the diffusion noise schedule encountered during training.
     sampling_final_sigma : float, default=0.0
         Final noise level used during deterministic sampling; must not exceed sigma_max.
+    pool_condition_tokens : bool, default=False
+        When true, averages multiple conditioning tokens per graph into a single vector
+        before cross-attention, preserving backwards compatibility with single-token
+        setups while still accepting multi-token inputs.
     """
     def __init__(self,
                  number_of_rows_per_example: int,
@@ -323,7 +327,8 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
                  guidance_weight: float = 1.0,
                  sigma_min: float = 0.1,
                  sigma_max: float = 1.0,
-                 sampling_final_sigma: float = 0.0):
+                 sampling_final_sigma: float = 0.0,
+                 pool_condition_tokens: bool = False):
         super().__init__()
         self.save_hyperparameters(ignore=['verbose'])
         # Must set use_edge_supervision _before_ we refer to it below:
@@ -339,6 +344,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self.learning_rate = learning_rate
         self.verbose = verbose
         self.important_feature_index = important_feature_index
+        self.pool_condition_tokens = bool(pool_condition_tokens)
 
         if max_degree is None:
             raise ValueError("max_degree must be provided when initializing the diffusion model.")
@@ -521,9 +527,30 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         latent_tokens = self.linear_encoder_input_to_latent(x_norm)
 
         # Build memory (time + condition)
-        time_token = get_sinusoidal_time_embedding(diffusion_time_step, self.latent_embedding_dimension)
-        cond_token = self.linear_encoder_condition_to_latent(global_condition_vector)
-        mem = torch.stack([time_token, cond_token], dim=1)  # (B,2,D)
+        time_token = get_sinusoidal_time_embedding(
+            diffusion_time_step, self.latent_embedding_dimension
+        ).unsqueeze(1)  # (B,1,D)
+
+        if global_condition_vector.dim() == 2:
+            cond_tokens = global_condition_vector.unsqueeze(1)  # (B,1,C)
+        elif global_condition_vector.dim() == 3:
+            cond_tokens = global_condition_vector
+        else:
+            raise ValueError(
+                "global_condition_vector must have shape (B, C) or (B, M, C); "
+                f"received {tuple(global_condition_vector.shape)}"
+            )
+
+        if self.pool_condition_tokens and cond_tokens.size(1) > 1:
+            cond_tokens = cond_tokens.mean(dim=1, keepdim=True)
+
+        weight = self.linear_encoder_condition_to_latent.weight.transpose(0, 1)  # (C,D)
+        cond_proj = torch.matmul(cond_tokens, weight)
+        bias = self.linear_encoder_condition_to_latent.bias
+        if bias is not None:
+            cond_proj = cond_proj + bias
+
+        mem = torch.cat([time_token, cond_proj], dim=1)  # (B, 1+M, D)
 
         # Transformer with cross-attention
         for layer in self.shared_transformer:
@@ -786,7 +813,10 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             padded_feats.append(f[:max_rows])
 
         X = torch.tensor(np.stack(padded_feats), dtype=torch.float32)
-        Y = torch.tensor(cond_vecs, dtype=torch.float32)
+        cond_array = np.asarray(cond_vecs)
+        if cond_array.ndim == 1:
+            cond_array = cond_array[:, None]
+        Y = torch.tensor(cond_array, dtype=torch.float32)
         L = torch.tensor(labels, dtype=torch.long)
 
         # --- Split into train/val ---
@@ -1085,6 +1115,15 @@ class ConditionalNodeGenerator:
         Weight multiplier for the edge prediction loss term when using
         edge supervision.
     
+    use_guidance : bool, default=False
+        Enable/disable classifier guidance during sampling.
+
+    pool_condition_tokens : bool, default=False
+        When conditioning inputs are sets of multiple tokens, average them into a
+        single vector before feeding the diffusion model. This preserves backwards
+        compatibility with the original single-token workflow while still accepting
+        multi-token conditioning data.
+    
     Methods
     -------
     fit(node_encodings_list, conditional_graph_encodings, edge_pairs=None, ...)
@@ -1113,7 +1152,8 @@ class ConditionalNodeGenerator:
                  lambda_node_exist_importance: float = 1.0,
                  default_exist_pos_weight: float = 1.0,
                  lambda_edge_importance: float = 1.0,
-                 use_guidance: bool = False
+                 use_guidance: bool = False,
+                 pool_condition_tokens: bool = False
     ):
         self.latent_embedding_dimension = latent_embedding_dimension
         self.number_of_transformer_layers = number_of_transformer_layers
@@ -1132,6 +1172,7 @@ class ConditionalNodeGenerator:
         self.default_exist_pos_weight = default_exist_pos_weight
         self.lambda_edge_importance = lambda_edge_importance
         self.use_guidance = use_guidance
+        self.pool_condition_tokens = bool(pool_condition_tokens)
 
         self.number_of_rows_per_example = None
         self.input_feature_dimension = None
@@ -1140,6 +1181,8 @@ class ConditionalNodeGenerator:
         self.x_scaler = None # Scaler for node features
         self.y_scaler = None # Scaler for conditional features
         self.D_max = None
+        self.condition_token_count = 1
+        self.condition_feature_dimension = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # <-- FIXED
 
     def _fit_scalers(self, X_array, y_array):
@@ -1156,7 +1199,10 @@ class ConditionalNodeGenerator:
         self.x_scaler.fit(X_array.reshape(-1, num_features_x))
 
         # Fit scaler for Y (conditional features)
-        self.y_scaler.fit(y_array)
+        if y_array.ndim == 3:
+            self.y_scaler.fit(y_array.reshape(-1, y_array.shape[-1]))
+        else:
+            self.y_scaler.fit(y_array)
 
         # self.raw_degree_index is already set by __init__ (defaults to 1)
         # With MinMaxScaler, the important_feature_index (for scaled data)
@@ -1167,7 +1213,11 @@ class ConditionalNodeGenerator:
         X_scaled_flat = self.x_scaler.transform(X_array.reshape(-1, D_x))
         X_scaled = X_scaled_flat.reshape(B, N, D_x)
         
-        y_scaled = self.y_scaler.transform(y_array)
+        if y_array.ndim == 3:
+            Bc, M, Dy = y_array.shape
+            y_scaled = self.y_scaler.transform(y_array.reshape(-1, Dy)).reshape(Bc, M, Dy)
+        else:
+            y_scaled = self.y_scaler.transform(y_array)
         return X_scaled, y_scaled
 
     def _inverse_transform_input(self, X_array):
@@ -1224,6 +1274,19 @@ class ConditionalNodeGenerator:
             X_padded.append(x)
         X_array = np.stack(X_padded, axis=0)
         y_array = np.array(conditional_graph_encodings)
+        if y_array.ndim == 1:
+            y_array = y_array[:, None]
+        if y_array.ndim == 2:
+            self.condition_token_count = 1
+            self.condition_feature_dimension = y_array.shape[1]
+        elif y_array.ndim == 3:
+            self.condition_token_count = y_array.shape[1]
+            self.condition_feature_dimension = y_array.shape[2]
+        else:
+            raise ValueError(
+                "conditional_graph_encodings must be array-like of shape (B, C) or (B, M, C); "
+                f"received shape {y_array.shape}"
+            )
         
         self._fit_scalers(X_array, y_array)
 
@@ -1255,7 +1318,7 @@ class ConditionalNodeGenerator:
         
         X_scaled, y_scaled = self._transform_data(X_array, y_array)
         self.input_feature_dimension = X_scaled.shape[2]
-        cond_feature_dim = y_scaled.shape[1]
+        cond_feature_dim = self.condition_feature_dimension
         
         # Detect maximum degree from raw data
         raw_degrees = X_array[..., self.important_feature_index]  # shape (B, N)
@@ -1285,6 +1348,7 @@ class ConditionalNodeGenerator:
             exist_pos_weight=exist_pos_weight,
             use_guidance=self.use_guidance,      # NEW
             guidance_weight=1.0,                 # tweak as needed
+            pool_condition_tokens=self.pool_condition_tokens,
         )
         self.model.use_guidance = self.use_guidance
 
@@ -1324,6 +1388,8 @@ class ConditionalNodeGenerator:
         X_array = np.stack([np.pad(x, ((0, self.number_of_rows_per_example - x.shape[0]), (0, 0)), mode='constant', constant_values=0)
                            for x in node_encodings_list], axis=0)
         y_array = np.array(conditional_graph_encodings)
+        if y_array.ndim == 1:
+            y_array = y_array[:, None]
         X_scaled, y_scaled = self._transform_data(X_array, y_array)
 
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
@@ -1414,8 +1480,11 @@ class ConditionalNodeGenerator:
         # 1. Generate denoised node embeddings (scaled feature space)
         # ------------------------------------------------------------------
         with torch.no_grad():
+            cond_array = np.asarray(conditional_graph_encodings)
+            if cond_array.ndim == 1:
+                cond_array = cond_array[:, None]
             cond_tensor = torch.tensor(
-                np.asarray(conditional_graph_encodings), dtype=torch.float32, device=self.device
+                cond_array, dtype=torch.float32, device=self.device
             )
             generated = self.model.generate(
                 cond_tensor,

@@ -19,7 +19,7 @@ GraphGen is an experimental playground for conditional graph generation. It blen
 1. Create and activate a Python environment (Python ≥ 3.9 recommended).
 2. Install the core dependencies:
    ```bash
-   pip install torch pytorch-lightning numpy scipy pandas scikit-learn networkx matplotlib pulp dill
+   pip install "numpy<2" torch pytorch-lightning scipy pandas scikit-learn networkx matplotlib pulp dill
    ```
 3. Install project-specific extras:
    - `coco-grape` (available from the companion repository) for data processing helpers referenced in `decompositional_encoder_decoder.py`.
@@ -74,6 +74,8 @@ samples = generator.predict(conditional_graph_encodings[:4])
 ```
 `predict` returns denoised node feature tensors in the original scale. When edge supervision is enabled the diffusion sampler also projects node existence and degree channels using the auxiliary heads.
 
+> Notebook hint: the repo modules sit outside `notebooks/`, so either launch Jupyter from the project root or prepend the repository directory to `sys.path` (the notebook includes a helper cell that does this automatically).
+
 ### 4. Optional classifier guidance
 After training you can steer sampling toward specific graph classes:
 ```python
@@ -94,3 +96,7 @@ The notebook in `notebooks/` demonstrates how the diffusion generator hooks into
 
 ## Status
 This codebase is research-oriented and still evolving. Expect rapid changes, limited error handling, and a dependence on the surrounding `coco-grape` ecosystem. Contributions, issues, and experiment notes are welcome.
+
+## Troubleshooting
+- **NumPy / PyTorch mismatch** – Some prebuilt PyTorch wheels are compiled against NumPy 1.x. If you hit `_ARRAY_API not found` or similar import errors, ensure you install `numpy<2` (as shown above) or upgrade to a PyTorch build that officially supports NumPy ≥2.
+- **Degree collapse during sampling** – The sampler snaps the degree channel to the classifier head’s argmax. If you need the raw diffusion output instead, disable `use_heads_projection` when calling `ConditionalNodeGenerator.predict` or improve/temper the auxiliary classifier.
