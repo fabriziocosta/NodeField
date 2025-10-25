@@ -39,6 +39,7 @@ lightning_logs/
 **/.ipynb_checkpoints/
 *.nbconvert.ipynb
 *.nbconvert.html
+*.ckpt
 
 # ---- IDE / OS clutter ----
 .DS_Store
