@@ -1,0 +1,47 @@
+# ---- Python artifacts ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+*.dll
+
+# Packages / build results
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.cache/
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+
+# PyTorch Lightning logs
+lightning_logs/
+
+# ---- Notebook artifacts ----
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*.nbconvert.ipynb
+*.nbconvert.html
+
+# ---- IDE / OS clutter ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
