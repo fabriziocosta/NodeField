@@ -7,11 +7,11 @@ import networkx as nx
 import random
 import pulp
 import dill as pickle
-from coco_grape.utils.timeit import timeit
+from .timeit import timeit
 import torch
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union
-from coco_grape.data_processor.supervised.low_rank_mlp import LowRankMLP
-from coco_grape.data_processor.generative.conditional_node_generator_base import ConditionalNodeGeneratorBase
+from .low_rank_mlp import LowRankMLP
+from .conditional_node_generator_base import ConditionalNodeGeneratorBase
 
 def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
     """
@@ -103,7 +103,7 @@ class DecompositionalNodeEncoderDecoder(object):
         node_label_classifier: LowRankMLP,
         edge_label_classifier: LowRankMLP,       
         verbose: bool = True,
-        non_edges_factor: int = 1,
+        negative_sample_factor: int = 1,
         existence_threshold: float = 0.5,
         num_augmentation_iterations: int = 0,
         augmentation_noise: float = 1e-2,
@@ -117,9 +117,9 @@ class DecompositionalNodeEncoderDecoder(object):
         Parameters:
             adjacency_matrix_classifier: Classifier for predicting edge existence probabilities.
             node_label_classifier      : Classifier for node labels.
-            edge_label_classifier      : Classifier for edge labels.
-            verbose                    : Verbosity flag.
-            non_edges_factor           : Ratio for sampling negative edges per positive.
+        edge_label_classifier      : Classifier for edge labels.
+        verbose                    : Verbosity flag.
+        negative_sample_factor     : Ratio for sampling negative locality pairs per positive example.
             existence_threshold        : Threshold to consider a node existent.
             num_augmentation_iterations: Number of augmentation noise iterations.
             augmentation_noise         : Maximum noise amplitude for augmentation.
@@ -131,7 +131,7 @@ class DecompositionalNodeEncoderDecoder(object):
         self.node_label_classifier      = copy.deepcopy(node_label_classifier)
         self.edge_label_classifier      = copy.deepcopy(edge_label_classifier)
         self.verbose                    = verbose
-        self.non_edges_factor           = non_edges_factor
+        self.negative_sample_factor     = negative_sample_factor
         self.existence_threshold        = existence_threshold
         self.num_augmentation_iterations= num_augmentation_iterations
         self.augmentation_noise         = augmentation_noise
@@ -239,29 +239,41 @@ class DecompositionalNodeEncoderDecoder(object):
         self,
         adj_mtx_list: List[np.ndarray],
         node_encodings_list: List[np.ndarray],
-        use_edge_fraction: float, # <-- New parameter
+        locality_sample_fraction: float,
         force_bi_directional_edges: bool = True,
-        is_training: bool = False
+        is_training: bool = False,
+        horizon: int = 1
     ) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
         """
-        For each graph in adj_mtx_list, this function processes each node i.
-        Edge sampling is only performed during training.
+        Build supervised targets for node-pair relationships derived from adjacency matrices.
+        A pair is labelled 1 when the shortest-path distance between nodes is ≤ `horizon`
+        (with horizon ≥ 1); otherwise it is labelled 0. Optional subsampling is applied during
+        training according to `locality_sample_fraction`.
         
         Parameters:
             adj_mtx_list: List of adjacency matrices (numpy arrays) for graphs.
             node_encodings_list: List of corresponding node encodings.
+            locality_sample_fraction: Fraction of pairs to retain during training.
             force_bi_directional_edges: When True, adds both directions of each edge.
             is_training: Whether this is being called during training (controls edge sampling).
+            horizon: Positive integer describing the maximum graph distance that counts as a
+                positive locality relation.
         """
+        if horizon < 1:
+            raise ValueError("horizon must be >= 1")
+
         # Collect all targets and pairs first
         all_targets = []
         all_pairs = []
         
         for g_idx, (adj_mtx, encodings) in enumerate(zip(adj_mtx_list, node_encodings_list)):
             n_nodes = adj_mtx.shape[0]
+            # Treat graphs as simple, unweighted, undirected structures
+            G = nx.from_numpy_array(adj_mtx, create_using=nx.Graph)
             for i in range(n_nodes):
-                # Collect positive neighbors for node i
-                pos_neighbors = [j for j in range(n_nodes) if j != i and adj_mtx[i, j] == 1]
+                # Collect positive neighbours for node i up to the specified horizon
+                lengths = nx.single_source_shortest_path_length(G, i, cutoff=horizon)
+                pos_neighbors = [j for j, dist in lengths.items() if j != i and dist <= horizon]
                 
                 # Add positive examples (both directions if force_bi_directional_edges)
                 for j in pos_neighbors:
@@ -273,12 +285,12 @@ class DecompositionalNodeEncoderDecoder(object):
                 
                 # Determine number of negative samples
                 num_pos = len(pos_neighbors) * (2 if force_bi_directional_edges else 1)
-                num_neg_samples = int(round(self.non_edges_factor * num_pos))
+                num_neg_samples = int(round(self.negative_sample_factor * num_pos))
                 if num_neg_samples <= 0:
                     continue
                 
                 # Build candidate list for negative examples
-                candidate_indices = [k for k in range(n_nodes) if k != i and adj_mtx[i, k] == 0]
+                candidate_indices = [k for k in range(n_nodes) if k != i and k not in lengths]
                 if not candidate_indices:
                     continue
                 
@@ -295,13 +307,13 @@ class DecompositionalNodeEncoderDecoder(object):
                         all_targets.append(0)
                         all_pairs.append((g_idx, k, i))
         
-        # Apply edge sampling only if is_training is True and use_edge_fraction < 1.0
-        if is_training and use_edge_fraction < 1.0: # Check use_edge_fraction value
+        # Apply edge sampling only if is_training is True and locality_sample_fraction < 1.0
+        if is_training and locality_sample_fraction < 1.0: # Check locality_sample_fraction value
             num_edges = len(all_pairs)
-            num_edges_to_use = int(round(num_edges * use_edge_fraction)) # round to nearest int
+            num_edges_to_use = int(round(num_edges * locality_sample_fraction)) # round to nearest int
             
             if self.verbose and num_edges > 0 : # Add check for num_edges > 0
-                print(f"adj_mtx_to_targets: Sampling {num_edges_to_use} edges ({use_edge_fraction:.2%}) from {num_edges} total pairs.")
+                print(f"adj_mtx_to_targets: Sampling {num_edges_to_use} edges ({locality_sample_fraction:.2%}) from {num_edges} total pairs.")
             
             if num_edges_to_use < num_edges and num_edges_to_use > 0 : # Ensure sampling is meaningful
                 indices = np.random.choice(num_edges, num_edges_to_use, replace=False)
@@ -309,7 +321,7 @@ class DecompositionalNodeEncoderDecoder(object):
                 all_pairs = [all_pairs[i] for i in indices]
             elif num_edges_to_use == 0 and num_edges > 0:
                  if self.verbose:
-                    print(f"adj_mtx_to_targets: Warning - num_edges_to_use is 0 with use_edge_fraction={use_edge_fraction} and num_edges={num_edges}. No edges will be used.")
+                    print(f"adj_mtx_to_targets: Warning - num_edges_to_use is 0 with locality_sample_fraction={locality_sample_fraction} and num_edges={num_edges}. No edges will be used.")
                  return np.array([]), []
             elif num_edges_to_use == 0 and num_edges == 0: # No pairs to sample from
                 return np.array([]), []
@@ -320,20 +332,34 @@ class DecompositionalNodeEncoderDecoder(object):
         self, 
         graphs: List[nx.Graph], 
         node_encodings_list: List[np.ndarray],
-        use_edge_fraction: float  # <-- New parameter
+        locality_sample_fraction: float,
+        horizon: int = 1
     ) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
-        """Compute edge supervision for training."""
+        """Compute locality supervision pairs for training."""
         adj = self.graphs_to_adjacency_matrices(graphs)
-        return self.adj_mtx_to_targets(adj, node_encodings_list, use_edge_fraction=use_edge_fraction, is_training=True)
+        return self.adj_mtx_to_targets(
+            adj,
+            node_encodings_list,
+            locality_sample_fraction=locality_sample_fraction,
+            is_training=True,
+            horizon=horizon
+        )
 
     def encodings_and_adj_mtx_to_dataset(
         self,
         node_encodings_list: List[np.ndarray],
         adj_mtx_list: List[np.ndarray],
-        use_edge_fraction: float  # <-- New parameter
+        locality_sample_fraction: float,
+        horizon: int = 1
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Creates training dataset."""
-        y, pair_indices = self.adj_mtx_to_targets(adj_mtx_list, node_encodings_list, use_edge_fraction=use_edge_fraction, is_training=True)
+        y, pair_indices = self.adj_mtx_to_targets(
+            adj_mtx_list,
+            node_encodings_list,
+            locality_sample_fraction=locality_sample_fraction,
+            is_training=True,
+            horizon=horizon
+        )
         X = self.encodings_to_instances(node_encodings_list, pair_indices)
         return X, y
 
@@ -540,7 +566,7 @@ class DecompositionalNodeEncoderDecoder(object):
         self,
         node_encodings_list: List[np.ndarray],
         graphs: List[nx.Graph],
-        use_edge_fraction: float # <-- New parameter
+        locality_sample_fraction: float # <-- New parameter
     ) -> None:
         """
         Trains the adjacency matrix classifier using node encodings and graphs.
@@ -553,7 +579,12 @@ class DecompositionalNodeEncoderDecoder(object):
         # Convert graphs to corresponding adjacency matrices.
         adj_mtx_list = self.graphs_to_adjacency_matrices(graphs)
         # Build the training dataset.
-        X, y = self.encodings_and_adj_mtx_to_dataset(node_encodings_list, adj_mtx_list, use_edge_fraction=use_edge_fraction)
+        X, y = self.encodings_and_adj_mtx_to_dataset(
+            node_encodings_list,
+            adj_mtx_list,
+            locality_sample_fraction=locality_sample_fraction,
+            horizon=1
+        )
         if self.verbose:
             print('Training adjacency matrix predictor on {} instances with {} features'.format(X.shape[0], X.shape[1]))
         self.adjacency_matrix_classifier.fit(X, y)
@@ -563,7 +594,7 @@ class DecompositionalNodeEncoderDecoder(object):
         self,
         graphs: List[nx.Graph],
         node_encodings_list: List[np.ndarray],
-        use_edge_fraction_for_adj_mtx: float  # <-- New parameter (unchanged)
+        locality_sample_fraction_for_adj_mtx: float  # <-- New parameter (unchanged)
     ) -> 'DecompositionalNodeEncoderDecoder':
         """
         Fits the node-, edge- and adjacency-matrix classifiers.
@@ -577,7 +608,7 @@ class DecompositionalNodeEncoderDecoder(object):
             Original graphs.
         node_encodings_list : List[np.ndarray]
             Original node-level embeddings (one array per graph).
-        use_edge_fraction_for_adj_mtx : float
+        locality_sample_fraction_for_adj_mtx : float
             Fraction of edges to sample when training the adjacency-matrix predictor.
 
         Returns
@@ -613,7 +644,7 @@ class DecompositionalNodeEncoderDecoder(object):
         self.edge_label_classifier_fit(combined_encodings, combined_graphs)
         self.adjacency_matrix_classifier_fit(
             combined_encodings, combined_graphs,
-            use_edge_fraction=use_edge_fraction_for_adj_mtx
+            locality_sample_fraction=locality_sample_fraction_for_adj_mtx
         )
 
         return self
@@ -899,7 +930,7 @@ class ConditionalNodeGeneratorModel(object):
 
         if edge_pairs is not None and edge_targets is not None:
             if self.verbose:
-                print(f"Using edge supervision with {len(edge_pairs)} edge pairs.")
+                print(f"Using locality supervision with {len(edge_pairs)} labelled pairs.")
             self.conditional_node_generator.setup(
                 node_encodings_list=node_encodings_list,
                 conditional_graph_encodings=conditional_graph_encodings,
@@ -959,8 +990,9 @@ class DecompositionalEncoderDecoder(object):
             conditioning_to_node_embeddings_generator: Optional[ConditionalNodeGeneratorModel] = None,
             node_embeddings_to_graph_generator: Optional[DecompositionalNodeEncoderDecoder] = None,
             verbose: bool = True,
-            use_edge_supervision: bool = False,
-            use_edge_fraction: float = 1.0
+            use_locality_supervision: bool = False,
+            locality_sample_fraction: float = 1.0,
+            locality_horizon: int = 1
             ) -> None:
         """
         Initializes the DecompositionalEncoderDecoder instance.
@@ -972,18 +1004,23 @@ class DecompositionalEncoderDecoder(object):
             conditioning_to_node_embeddings_generator: Generator that maps conditioning vectors to node embeddings.
             node_embeddings_to_graph_generator: Generator that reconstructs graphs from node embeddings.
             verbose: Boolean flag to enable or disable verbose logging.
-            use_edge_supervision: Whether to use edge supervision during training.
-            use_edge_fraction: Fraction of edges to use for supervision (default=1.0).
+            use_locality_supervision: Whether to use locality supervision during training.
+            locality_sample_fraction: Fraction of edges to use for supervision (default=1.0).
+            locality_horizon: Positive integer specifying the maximum graph distance to treat
+                as a positive locality relation when preparing supervision for the conditional generator.
         """
         self.graph_vectorizer = graph_vectorizer
         self.node_graph_vectorizer = node_graph_vectorizer
         self.conditioning_to_node_embeddings_generator = conditioning_to_node_embeddings_generator
         self.node_embeddings_to_graph_generator = node_embeddings_to_graph_generator
         self.verbose = verbose
-        self.use_edge_supervision = use_edge_supervision
-        if not 0.0 < use_edge_fraction <= 1.0:
-            raise ValueError("use_edge_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
-        self.use_edge_fraction = use_edge_fraction
+        self.use_locality_supervision = use_locality_supervision
+        if not 0.0 < locality_sample_fraction <= 1.0:
+            raise ValueError("locality_sample_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
+        self.locality_sample_fraction = locality_sample_fraction
+        if locality_horizon < 1:
+            raise ValueError("locality_horizon must be >= 1")
+        self.locality_horizon = locality_horizon
 
     def toggle_verbose(self) -> None:
         """
@@ -1017,13 +1054,17 @@ class DecompositionalEncoderDecoder(object):
             edge_targets_for_cond_gen = None
             node_mask_for_cond_gen = None # Assuming node_mask might be needed by ConditionalNodeGeneratorModel
 
-            if self.use_edge_supervision:
+            if self.use_locality_supervision:
+                if self.node_embeddings_to_graph_generator is None:
+                    raise RuntimeError("Locality supervision requested but node_embeddings_to_graph_generator is None.")
                 if self.verbose:
-                    print(f"Using edge supervision for training the conditioning to node embeddings generator.")
+                    print(f"Using locality supervision (horizon={self.locality_horizon}) for training the conditioning→node generator.")
 
-                # Compute edge supervision
                 edge_targets_for_cond_gen, edge_pairs_for_cond_gen = self.node_embeddings_to_graph_generator.compute_edge_supervision(
-                    graphs, node_encodings_list, use_edge_fraction=self.use_edge_fraction
+                    graphs,
+                    node_encodings_list,
+                    locality_sample_fraction=self.locality_sample_fraction,
+                    horizon=self.locality_horizon
                 )
             
             self.conditioning_to_node_embeddings_generator.fit(
@@ -1035,7 +1076,7 @@ class DecompositionalEncoderDecoder(object):
             )
 
         if train_node_embeddings_to_graph_generator:
-            self.node_embeddings_to_graph_generator.fit(graphs, node_encodings_list, use_edge_fraction_for_adj_mtx=self.use_edge_fraction)
+            self.node_embeddings_to_graph_generator.fit(graphs, node_encodings_list, locality_sample_fraction_for_adj_mtx=self.locality_sample_fraction)
 
         return self
 

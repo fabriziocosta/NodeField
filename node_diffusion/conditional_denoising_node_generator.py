@@ -299,8 +299,10 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         Final noise level used during deterministic sampling; must not exceed sigma_max.
     pool_condition_tokens : bool, default=False
         When true, averages multiple conditioning tokens per graph into a single vector
-        before cross-attention, preserving backwards compatibility with single-token
-        setups while still accepting multi-token inputs.
+        before cross-attention, preserving backwards compatibility with single-token setups
+        while still accepting multi-token inputs.
+    use_locality_supervision : bool, default=False
+        Enable the auxiliary locality head when paired supervision is provided.
     """
     def __init__(self,
                  number_of_rows_per_example: int,
@@ -320,8 +322,8 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
                  degree_min_val: float = 0.0, # Changed from degree_median
                  degree_range_val: float = 1.0, # Changed from degree_iqr
                  lambda_node_exist_importance: float = 1.0,
-                 use_edge_supervision: bool = False,
-                 lambda_edge_importance: float = 1.0,
+                 use_locality_supervision: bool = False,
+                 lambda_locality_importance: float = 1.0,
                  exist_pos_weight: Union[torch.Tensor, float] = 1.0,
                  use_guidance: bool = False,
                  guidance_weight: float = 1.0,
@@ -331,8 +333,8 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
                  pool_condition_tokens: bool = False):
         super().__init__()
         self.save_hyperparameters(ignore=['verbose'])
-        # Must set use_edge_supervision _before_ we refer to it below:
-        self.use_edge_supervision = use_edge_supervision
+        # Must set use_locality_supervision _before_ we refer to it below:
+        self.use_locality_supervision = use_locality_supervision
 
         self.number_of_rows_per_example = number_of_rows_per_example
         self.input_feature_dimension = input_feature_dimension
@@ -389,7 +391,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self.val_exist      = []
         self.train_recon = []
         self.val_recon = []
-        if self.use_edge_supervision:
+        if self.use_locality_supervision:
             self.train_edge_loss = []
             self.val_edge_loss   = []
             self.train_edge_acc = []
@@ -412,9 +414,8 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self.linear_decoder_latent_to_output = nn.Linear(latent_embedding_dimension, input_feature_dimension)
         self.degree_head = nn.Linear(latent_embedding_dimension, max_degree + 1)
         self.exist_head = nn.Linear(latent_embedding_dimension, 1)
-        self.use_edge_supervision = use_edge_supervision
-        self.lambda_edge_importance = lambda_edge_importance
-        if self.use_edge_supervision:
+        self.lambda_locality_importance = lambda_locality_importance
+        if self.use_locality_supervision:
             self.edge_head = EdgeMLP(
                 latent_dim=latent_embedding_dimension,
                 hidden_dim=2 * latent_embedding_dimension,
@@ -655,16 +656,16 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
     # ---------------------------------------------------------------------------
     def training_step(self, batch, batch_idx):
         """
-        Perform a single training step with optional edge supervision.
+        Perform a single training step with optional locality supervision.
         """
-        if self.use_edge_supervision:
+        if self.use_locality_supervision:
             input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
         else:
             input_examples, global_condition = batch
 
         diffusion_time_step = torch.rand(input_examples.size(0), 1, device=self.device)
 
-        if self.use_edge_supervision:
+        if self.use_locality_supervision:
             pred_eps, logits_deg, logits_exist, latent_tokens, eps, sigma_t = \
                 self.forward(input_examples, global_condition, diffusion_time_step, return_latents=True)
         else:
@@ -676,15 +677,15 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         total_loss = losses["total"]
 
         # ───────────────────────────────
-        # Edge supervision (NEW MLP head)
+        # Locality supervision (auxiliary MLP head)
         # ───────────────────────────────
-        if self.use_edge_supervision and edge_idx.numel() > 0:
+        if self.use_locality_supervision and edge_idx.numel() > 0:
             b, i, j = edge_idx.unbind(1)  # each (E,)
             h_i = latent_tokens[b, i]
             h_j = latent_tokens[b, j]
             edge_logits = self.edge_head(h_i, h_j)
             edge_loss = F.binary_cross_entropy_with_logits(edge_logits, edge_labels)
-            total_loss = total_loss + self.lambda_edge_importance * edge_loss
+            total_loss = total_loss + self.lambda_locality_importance * edge_loss
 
             with torch.no_grad():
                 edge_pred = (torch.sigmoid(edge_logits) > 0.5).float()
@@ -704,16 +705,16 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         """
-        Perform a single validation step with optional edge supervision.
+        Perform a single validation step with optional locality supervision.
         """
-        if self.use_edge_supervision:
+        if self.use_locality_supervision:
             input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
         else:
             input_examples, global_condition = batch
 
         diffusion_time_step = torch.rand(input_examples.size(0), 1, device=self.device)
 
-        if self.use_edge_supervision:
+        if self.use_locality_supervision:
             pred_eps, logits_deg, logits_exist, latent_tokens, eps, sigma_t = \
                 self.forward(input_examples, global_condition, diffusion_time_step, return_latents=True)
         else:
@@ -724,15 +725,15 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         total_loss = losses["total"]
 
         # ───────────────────────────────
-        # Edge supervision (NEW MLP head)
+        # Locality supervision (auxiliary MLP head)
         # ───────────────────────────────
-        if self.use_edge_supervision and edge_idx.numel() > 0:
+        if self.use_locality_supervision and edge_idx.numel() > 0:
             b, i, j = edge_idx.unbind(1)
             h_i = latent_tokens[b, i]
             h_j = latent_tokens[b, j]
             edge_logits = self.edge_head(h_i, h_j)
             edge_loss = F.binary_cross_entropy_with_logits(edge_logits, edge_labels)
-            total_loss = total_loss + self.lambda_edge_importance * edge_loss
+            total_loss = total_loss + self.lambda_locality_importance * edge_loss
 
             with torch.no_grad():
                 edge_pred = (torch.sigmoid(edge_logits) > 0.5).float()
@@ -760,14 +761,14 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
                 "deg_ce": self.train_deg_ce,
                 "recon": self.train_recon,   # updated
                 "exist": self.train_exist,
-                **({"edge": self.train_edge_loss} if self.use_edge_supervision else {})
+                **({"locality": self.train_edge_loss} if self.use_locality_supervision else {})
             },
             val_metrics={
                 "total": self.val_losses,
                 "deg_ce": self.val_deg_ce,
                 "recon": self.val_recon,     # updated
                 "exist": self.val_exist,
-                **({"edge": self.val_edge_loss} if self.use_edge_supervision else {})
+                **({"locality": self.val_edge_loss} if self.use_locality_supervision else {})
             },
             window=10,
             alpha=0.1
@@ -1111,23 +1112,26 @@ class ConditionalNodeGenerator:
         Class weight for positive examples in node existence prediction.
         Useful for handling class imbalance.
     
-    lambda_edge_importance : float, default=1.0
-        Weight multiplier for the edge prediction loss term when using
-        edge supervision.
+    lambda_locality_importance : float, default=1.0
+        Weight multiplier for the locality prediction loss term when locality
+        supervision is enabled.
     
     use_guidance : bool, default=False
         Enable/disable classifier guidance during sampling.
 
     pool_condition_tokens : bool, default=False
-        When conditioning inputs are sets of multiple tokens, average them into a
-        single vector before feeding the diffusion model. This preserves backwards
-        compatibility with the original single-token workflow while still accepting
+        When true, averages multiple conditioning tokens per graph into a single vector
+        before cross-attention, preserving backwards compatibility with single-token setups
+        while still accepting multi-token inputs.
         multi-token conditioning data.
+    
+    use_locality_supervision : bool, default=False
+        Enable the auxiliary locality head when paired supervision is provided.
     
     Methods
     -------
     fit(node_encodings_list, conditional_graph_encodings, edge_pairs=None, ...)
-        Fit the model to training data, optionally with edge supervision.
+        Fit the model to training data, optionally with locality supervision.
     
     predict(y)
         Generate samples conditioned on the given conditional encodings.
@@ -1151,9 +1155,10 @@ class ConditionalNodeGenerator:
                  degree_temperature: Optional[float] = None,
                  lambda_node_exist_importance: float = 1.0,
                  default_exist_pos_weight: float = 1.0,
-                 lambda_edge_importance: float = 1.0,
+                 lambda_locality_importance: float = 1.0,
                  use_guidance: bool = False,
-                 pool_condition_tokens: bool = False
+                 pool_condition_tokens: bool = False,
+                 use_locality_supervision: bool = False
     ):
         self.latent_embedding_dimension = latent_embedding_dimension
         self.number_of_transformer_layers = number_of_transformer_layers
@@ -1170,9 +1175,10 @@ class ConditionalNodeGenerator:
         self.degree_temperature = degree_temperature
         self.lambda_node_exist_importance = lambda_node_exist_importance
         self.default_exist_pos_weight = default_exist_pos_weight
-        self.lambda_edge_importance = lambda_edge_importance
+        self.lambda_locality_importance = lambda_locality_importance
         self.use_guidance = use_guidance
         self.pool_condition_tokens = bool(pool_condition_tokens)
+        self.use_locality_supervision = bool(use_locality_supervision)
 
         self.number_of_rows_per_example = None
         self.input_feature_dimension = None
@@ -1254,15 +1260,21 @@ class ConditionalNodeGenerator:
             Array of conditional graph encodings, where each encoding
             represents a graph-level condition.
         edge_pairs : Optional[List[Tuple[int, int, int]]], default=None
-            Optional list of edge pairs for edge supervision. Each tuple
-            represents an edge (graph_index, node_i, node_j).
+            Optional list of locality supervision pairs (graph_index, node_i, node_j).
+            Only used when `use_locality_supervision=True`.
         edge_targets : Optional[np.ndarray], default=None
-            Optional array of edge targets for edge supervision. Each value
-            represents the target for the corresponding edge pair.
+            Optional array of locality targets aligned with `edge_pairs`.
         node_mask : Optional[np.ndarray], default=None
             Optional boolean mask indicating valid nodes in each graph.
-            Used to exclude padded nodes from edge supervision.
+            Used to exclude padded nodes from locality supervision.
         """
+        effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
+        if self.use_locality_supervision and not effective_locality and self.verbose:
+            print("Locality supervision requested but edge_pairs/edge_targets not provided; continuing without it.")
+        if not effective_locality:
+            edge_pairs = None
+            edge_targets = None
+
         max_num_rows = max(x.shape[0] for x in node_encodings_list)
         self.number_of_rows_per_example = max_num_rows
         X_padded = []
@@ -1324,7 +1336,7 @@ class ConditionalNodeGenerator:
         raw_degrees = X_array[..., self.important_feature_index]  # shape (B, N)
         self.D_max = int(raw_degrees.max())  # global max
         
-        # Initialize the model with updated flags for edge supervision
+        # Initialize the model with updated flags for locality supervision
         self.model = IterativeDenoisingAutoencoderTransformerModel(
             number_of_rows_per_example=self.number_of_rows_per_example,
             input_feature_dimension=self.input_feature_dimension,
@@ -1343,14 +1355,15 @@ class ConditionalNodeGenerator:
             degree_min_val=deg_min_val,
             degree_range_val=deg_range_val,
             lambda_node_exist_importance=self.lambda_node_exist_importance,
-            use_edge_supervision=(edge_pairs is not None),
-            lambda_edge_importance=self.lambda_edge_importance,
+            use_locality_supervision=effective_locality,
+            lambda_locality_importance=self.lambda_locality_importance,
             exist_pos_weight=exist_pos_weight,
             use_guidance=self.use_guidance,      # NEW
             guidance_weight=1.0,                 # tweak as needed
             pool_condition_tokens=self.pool_condition_tokens,
         )
         self.model.use_guidance = self.use_guidance
+        self.model.use_locality_supervision = effective_locality
 
     def fit(
         self,
@@ -1361,7 +1374,7 @@ class ConditionalNodeGenerator:
         node_mask: Optional[np.ndarray] = None
     ):
         """
-        Fit the model to training data, optionally with edge supervision.
+        Fit the model to training data, optionally with locality supervision.
 
         This method prepares the data loaders and trains the initialized model
         using PyTorch Lightning. It assumes that the setup method has already
@@ -1376,14 +1389,12 @@ class ConditionalNodeGenerator:
             Array of conditional graph encodings, where each encoding
             represents a graph-level condition.
         edge_pairs : Optional[List[Tuple[int, int, int]]], default=None
-            Optional list of edge pairs for edge supervision. Each tuple
-            represents an edge (graph_index, node_i, node_j).
+            Optional list of locality supervision pairs (graph_index, node_i, node_j).
         edge_targets : Optional[np.ndarray], default=None
-            Optional array of edge targets for edge supervision. Each value
-            represents the target for the corresponding edge pair.
+            Optional array of locality targets aligned with `edge_pairs`.
         node_mask : Optional[np.ndarray], default=None
             Optional boolean mask indicating valid nodes in each graph.
-            Used to exclude padded nodes from edge supervision.
+            Used to exclude padded nodes from locality supervision.
         """
         X_array = np.stack([np.pad(x, ((0, self.number_of_rows_per_example - x.shape[0]), (0, 0)), mode='constant', constant_values=0)
                            for x in node_encodings_list], axis=0)
@@ -1394,7 +1405,12 @@ class ConditionalNodeGenerator:
 
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
         y_tensor = torch.tensor(y_scaled, dtype=torch.float32)
-        if edge_pairs is not None:
+        effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
+        if not effective_locality:
+            edge_pairs = None
+            edge_targets = None
+
+        if effective_locality:
             if node_mask is None:
                 B, N, _ = X_scaled.shape
                 node_mask_arr = np.ones((B, N), dtype=bool)
@@ -1541,14 +1557,14 @@ class ConditionalNodeGenerator:
                 "deg_ce": self.model.train_deg_ce,
                 "all": self.model.train_loss_all,
                 "exist": self.model.train_exist,
-                **({"edge": self.model.train_edge_loss} if self.model.use_edge_supervision else {})
+                **({"locality": self.model.train_edge_loss} if self.model.use_locality_supervision else {})
             },
             val_metrics = {
                 "total": self.model.val_losses,
                 "deg_ce": self.model.val_deg_ce,
                 "all": self.model.val_loss_all,
                 "exist": self.model.val_exist,
-                **({"edge": self.model.val_edge_loss} if self.model.use_edge_supervision else {})
+                **({"locality": self.model.val_edge_loss} if self.model.use_locality_supervision else {})
             },
             window=window,
             alpha=alpha
@@ -1575,7 +1591,7 @@ class MetricsLogger(pl.callbacks.Callback):
         pl_module.train_deg_ce.append(m.get("train_deg_ce", torch.tensor(0.0)).item())
         pl_module.train_recon.append(m.get("train_recon", torch.tensor(0.0)).item())
         pl_module.train_exist.append(m.get("train_exist", torch.tensor(0.0)).item())
-        if pl_module.use_edge_supervision:
+        if pl_module.use_locality_supervision:
             pl_module.train_edge_loss.append(m.get("train_edge_loss", torch.tensor(0.0)).item())
             pl_module.train_edge_acc.append(m.get("train_edge_acc", torch.tensor(0.0)).item())
 
@@ -1585,6 +1601,6 @@ class MetricsLogger(pl.callbacks.Callback):
         pl_module.val_deg_ce.append(m.get("val_deg_ce", torch.tensor(0.0)).item())
         pl_module.val_recon.append(m.get("val_recon", torch.tensor(0.0)).item())
         pl_module.val_exist.append(m.get("val_exist", torch.tensor(0.0)).item())
-        if pl_module.use_edge_supervision:
+        if pl_module.use_locality_supervision:
             pl_module.val_edge_loss.append(m.get("val_edge_loss", torch.tensor(0.0)).item())
             pl_module.val_edge_acc.append(m.get("val_edge_acc", torch.tensor(0.0)).item())

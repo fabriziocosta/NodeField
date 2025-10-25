@@ -5,7 +5,7 @@ GraphGen is an experimental playground for conditional graph generation. It blen
 ## Highlights
 - Cross-attention transformer backbone that conditions node embeddings on graph-level tokens and diffusion time embeddings.
 - Diffusion objective with auxiliary heads for node existence and discrete degree prediction, keeping generated graphs structurally plausible.
-- Optional edge supervision via a lightweight MLP head that learns pairwise connectivity when labelled edges are provided.
+- Optional locality supervision via a lightweight MLP head that learns pairwise connectivity when labelled edges are provided.
 - Classifier-guided sampling and metric logging utilities to steer the model toward desired graph attributes.
 - Low-rank MLP components for classical tasks (classification/regression) that can be reused inside broader pipelines.
 
@@ -32,7 +32,7 @@ GPU support is recommended for larger experiments but the code paths also run on
 ### 1. Prepare your data
 - `node_encodings_list`: list of `(num_nodes, num_features)` arrays. Column `0` is treated as a binary existence flag; column `1` is a (possibly scaled) node degree. Remaining columns can hold arbitrary continuous features.
 - `conditional_graph_encodings`: array of `(num_graphs, condition_dim)` graph-level descriptors the diffusion model will condition on.
-- Optional `edge_pairs`/`edge_targets`: tuples `(graph_index, i, j)` plus edge labels if you want the edge supervision head to learn connectivity.
+- Optional `edge_pairs`/`edge_targets`: tuples `(graph_index, i, j)` plus edge labels if you want the locality supervision head to learn connectivity.
 - Optional `node_mask`: boolean mask marking valid (unpadded) nodes per graph.
 
 Ensure the order of graphs matches across these collections.
@@ -72,7 +72,7 @@ generator.fit(
 ```python
 samples = generator.predict(conditional_graph_encodings[:4])
 ```
-`predict` returns denoised node feature tensors in the original scale. When edge supervision is enabled the diffusion sampler also projects node existence and degree channels using the auxiliary heads.
+`predict` returns denoised node feature tensors in the original scale. When locality supervision is enabled the diffusion sampler also projects node existence and degree channels using the auxiliary heads.
 
 > Notebook hint: the repo modules sit outside `notebooks/`, so either launch Jupyter from the project root or prepend the repository directory to `sys.path` (the notebook includes a helper cell that does this automatically).
 
