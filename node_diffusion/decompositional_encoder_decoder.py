@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Provides interface."""
+"""Graph encoder/decoder helpers used by the conditional diffusion pipeline."""
 
 import copy
 import numpy as np
@@ -14,22 +14,7 @@ from .low_rank_mlp import LowRankMLP
 from .conditional_node_generator_base import ConditionalNodeGeneratorBase
 
 def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
-    """
-    Spherical linear interpolation (slerp) between vectors v0 and v1,
-    with linear interpolation of their magnitudes.
-
-    Parameters
-    ----------
-    v0, v1 : np.ndarray
-        Input vectors to interpolate between.
-    t : float
-        Interpolation parameter (<0: extrapolate towards v0 beyond; >1: beyond v1).
-
-    Returns
-    -------
-    np.ndarray
-        The interpolated vector at fraction t of the way from v0 to v1.
-    """
+    """Interpolate between vectors on the hypersphere while blending magnitudes linearly."""
     # Compute magnitudes
     mag0 = np.linalg.norm(v0)
     mag1 = np.linalg.norm(v1)
@@ -61,10 +46,7 @@ def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
 
 
 def scaled_slerp_average(vectors: np.ndarray) -> np.ndarray:
-    """
-    Compute a spherical-style centroid of multiple vectors, preserving
-    average direction on the unit sphere while linearly averaging magnitudes.
-    """
+    """Compute a magnitude-aware mean direction for a batch of vectors."""
     vs = np.asarray(vectors, dtype=float)             # (B, D)
     mags = np.linalg.norm(vs, axis=1)                # (B,)
     unit_vs = np.zeros_like(vs)                      # (B, D)
@@ -88,14 +70,7 @@ np.seterr(invalid='ignore', divide='ignore')
 # =============================================================================
 
 class DecompositionalNodeEncoderDecoder(object):
-    """
-    DecompositionalNodeEncoderDecoder
-
-    Implements an encoder-decoder framework for processing graph nodes.
-    This class trains classifiers to predict node labels, edge labels, and the adjacency matrix.
-    It supports transforming graphs into training data, applying augmentation, and reconstructing graphs 
-    from predicted node embeddings.
-    """
+    """Trainable toolkit for vectorising graphs and decoding them back into structure."""
     
     def __init__(
         self,
@@ -111,22 +86,7 @@ class DecompositionalNodeEncoderDecoder(object):
         degree_slack_penalty: float = 1e6,
         warm_start_mst: bool = True
     ) -> None:
-        """
-        Initializes the encoder-decoder with classifiers and configuration options.
-        
-        Parameters:
-            adjacency_matrix_classifier: Classifier for predicting edge existence probabilities.
-            node_label_classifier      : Classifier for node labels.
-        edge_label_classifier      : Classifier for edge labels.
-        verbose                    : Verbosity flag.
-        negative_sample_factor     : Ratio for sampling negative locality pairs per positive example.
-            existence_threshold        : Threshold to consider a node existent.
-            num_augmentation_iterations: Number of augmentation noise iterations.
-            augmentation_noise         : Maximum noise amplitude for augmentation.
-            enforce_connectivity       : Whether to enforce a single connected component.
-            degree_slack_penalty       : Weight applied to slack variables for degree deviations.
-            warm_start_mst            : Whether to warm start solver using maximum spanning tree.
-        """
+        """Create deep copies of the supplied classifiers and store training hyper-parameters."""
         self.adjacency_matrix_classifier = copy.deepcopy(adjacency_matrix_classifier)
         self.node_label_classifier      = copy.deepcopy(node_label_classifier)
         self.edge_label_classifier      = copy.deepcopy(edge_label_classifier)
@@ -148,10 +108,7 @@ class DecompositionalNodeEncoderDecoder(object):
         alpha: float = 0.7,
         connectivity: Optional[bool] = None
     ) -> np.ndarray:
-        """
-        Uses PuLP+CBC to optimize edge selection under degree and connectivity constraints.
-        Can warm-start with an MST based on probabilities.
-        """
+        """Optimise a binary adjacency matrix subject to degree and connectivity targets."""
         n = prob_matrix.shape[0]
         # Smooth probabilities
         if alpha != 1.0:
@@ -219,15 +176,7 @@ class DecompositionalNodeEncoderDecoder(object):
         return adj
 
     def graphs_to_adjacency_matrices(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
-        """
-        Converts a list of NetworkX graphs into a list of corresponding adjacency matrices.
-        
-        Parameters:
-            graphs: List of NetworkX graph objects.
-        
-        Returns:
-            List of numpy arrays representing the adjacency matrices of the graphs.
-        """
+        """Convert each NetworkX graph into a dense adjacency array."""
         adj_mtx_list = []
         for graph in graphs:
             # Convert graph to a numpy array with integer type.
@@ -244,21 +193,7 @@ class DecompositionalNodeEncoderDecoder(object):
         is_training: bool = False,
         horizon: int = 1
     ) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
-        """
-        Build supervised targets for node-pair relationships derived from adjacency matrices.
-        A pair is labelled 1 when the shortest-path distance between nodes is ≤ `horizon`
-        (with horizon ≥ 1); otherwise it is labelled 0. Optional subsampling is applied during
-        training according to `locality_sample_fraction`.
-        
-        Parameters:
-            adj_mtx_list: List of adjacency matrices (numpy arrays) for graphs.
-            node_encodings_list: List of corresponding node encodings.
-            locality_sample_fraction: Fraction of pairs to retain during training.
-            force_bi_directional_edges: When True, adds both directions of each edge.
-            is_training: Whether this is being called during training (controls edge sampling).
-            horizon: Positive integer describing the maximum graph distance that counts as a
-                positive locality relation.
-        """
+        """Label node pairs as local or non-local using shortest-path distance within each graph."""
         if horizon < 1:
             raise ValueError("horizon must be >= 1")
 
@@ -307,23 +242,23 @@ class DecompositionalNodeEncoderDecoder(object):
                         all_targets.append(0)
                         all_pairs.append((g_idx, k, i))
         
-        # Apply edge sampling only if is_training is True and locality_sample_fraction < 1.0
-        if is_training and locality_sample_fraction < 1.0: # Check locality_sample_fraction value
-            num_edges = len(all_pairs)
-            num_edges_to_use = int(round(num_edges * locality_sample_fraction)) # round to nearest int
-            
-            if self.verbose and num_edges > 0 : # Add check for num_edges > 0
-                print(f"adj_mtx_to_targets: Sampling {num_edges_to_use} edges ({locality_sample_fraction:.2%}) from {num_edges} total pairs.")
-            
-            if num_edges_to_use < num_edges and num_edges_to_use > 0 : # Ensure sampling is meaningful
-                indices = np.random.choice(num_edges, num_edges_to_use, replace=False)
+        # Apply locality-pair sampling during training when requested
+        if is_training and locality_sample_fraction < 1.0:
+            num_pairs = len(all_pairs)
+            num_pairs_to_use = int(round(num_pairs * locality_sample_fraction))
+
+            if self.verbose and num_pairs > 0:
+                print(f"adj_mtx_to_targets: Sampling {num_pairs_to_use} locality pairs ({locality_sample_fraction:.2%}) from {num_pairs} total pairs.")
+
+            if 0 < num_pairs_to_use < num_pairs:
+                indices = np.random.choice(num_pairs, num_pairs_to_use, replace=False)
                 all_targets = [all_targets[i] for i in indices]
                 all_pairs = [all_pairs[i] for i in indices]
-            elif num_edges_to_use == 0 and num_edges > 0:
-                 if self.verbose:
-                    print(f"adj_mtx_to_targets: Warning - num_edges_to_use is 0 with locality_sample_fraction={locality_sample_fraction} and num_edges={num_edges}. No edges will be used.")
-                 return np.array([]), []
-            elif num_edges_to_use == 0 and num_edges == 0: # No pairs to sample from
+            elif num_pairs_to_use == 0 and num_pairs > 0:
+                if self.verbose:
+                    print(f"adj_mtx_to_targets: Warning - num_pairs_to_use is 0 with locality_sample_fraction={locality_sample_fraction} and num_pairs={num_pairs}. No locality pairs will be used.")
+                return np.array([]), []
+            elif num_pairs_to_use == 0 and num_pairs == 0:
                 return np.array([]), []
 
         return np.array(all_targets), all_pairs
@@ -352,7 +287,7 @@ class DecompositionalNodeEncoderDecoder(object):
         locality_sample_fraction: float,
         horizon: int = 1
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Creates training dataset."""
+        """Assemble feature/label pairs for the locality classifier derived from adjacencies."""
         y, pair_indices = self.adj_mtx_to_targets(
             adj_mtx_list,
             node_encodings_list,
@@ -369,24 +304,7 @@ class DecompositionalNodeEncoderDecoder(object):
         pair_indices: Optional[List[Tuple[int, int, int]]] = None,
         use_graph_encoding: bool = False
     ) -> np.ndarray:
-        """
-        Creates feature instances from a list of node encodings.
-        
-        If pair_indices is provided, then for each tuple (graph_index, i, j) in pair_indices, 
-        a graph-level encoding (sum of all node encodings) is computed and concatenated with 
-        the source node encoding (i) and target node encoding (j).
-        
-        If pair_indices is None, then for each graph all pairs of distinct nodes (i, j) are used.
-        Both directions (i, j) and (j, i) are evaluated.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays where each array contains node encodings for a graph.
-            pair_indices: (Optional) List of tuples (graph_index, i, j) specifying the node pairs for which 
-                        to create instances. Default is None, meaning that all distinct pairs are used.
-        
-        Returns:
-            A numpy array where each row is a feature instance for a given node pair.
-        """
+        """Stack node-pair feature vectors, optionally augmented with a graph-level summary."""
         instances = []
         if pair_indices is not None:
             # Use provided pair indices.
@@ -420,17 +338,7 @@ class DecompositionalNodeEncoderDecoder(object):
         node_encodings_list: List[np.ndarray],
         graphs: List[nx.Graph]
     ) -> Tuple[np.ndarray, List[Any]]:
-        """
-        Creates a dataset for training the node label classifier.
-        Extracts node encodings and corresponding node labels from the graphs.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays containing node encodings.
-            graphs         : List of NetworkX graph objects.
-        
-        Returns:
-            Tuple (X, node_labels) where X is the matrix of node encodings and node_labels is the list of labels.
-        """
+        """Produce node-level training examples paired with labels from the graphs."""
         instances = []
         node_labels = []
         # Process each graph and its corresponding encoding matrix.
@@ -446,17 +354,7 @@ class DecompositionalNodeEncoderDecoder(object):
         node_encodings_list: List[np.ndarray],
         graphs: List[nx.Graph]
     ) -> Tuple[np.ndarray, List[Any]]:
-        """
-        Creates a dataset for training the edge label classifier.
-        Extracts concatenated node encodings for each edge and the corresponding edge labels.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays containing node encodings.
-            graphs         : List of NetworkX graph objects.
-        
-        Returns:
-            Tuple (X, edge_labels) where X is the feature matrix for edges and edge_labels is the list of labels.
-        """
+        """Produce edge-level feature vectors paired with labels drawn from the graphs."""
         instances = []
         edge_labels = []
         for graph, encodings in zip(graphs, node_encodings_list):
@@ -477,17 +375,7 @@ class DecompositionalNodeEncoderDecoder(object):
         node_encodings_list: List[np.ndarray],
         adj_mtx_list: List[np.ndarray]
     ) -> np.ndarray:
-        """
-        Creates a dataset of edge instances based on node encodings and the corresponding adjacency matrices.
-        For each graph, every non-zero entry in the adjacency matrix (indicating an edge) is used to form an instance.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays containing node encodings.
-            adj_mtx_list  : List of adjacency matrices.
-        
-        Returns:
-            A numpy array of concatenated node encoding pairs for all detected edges.
-        """
+        """Collect node-pair feature vectors wherever the adjacency indicates a connection."""
         instances = []
         for encodings, adj_mtx in zip(node_encodings_list, adj_mtx_list):
             n_nodes = encodings.shape[0]
@@ -507,17 +395,7 @@ class DecompositionalNodeEncoderDecoder(object):
         node_encodings_list: List[np.ndarray],
         graphs: List[nx.Graph]
     ) -> None:
-        """
-        Trains the node label classifier using the provided node encodings and graphs.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays containing node encodings.
-            graphs         : List of NetworkX graph objects.
-        
-        Side Effects:
-            Sets self.single_node_label if only one unique label exists.
-            Trains self.node_label_classifier if multiple unique labels are present.
-        """
+        """Fit the node-label classifier or cache the constant label shortcut."""
         X, y = self.encodings_and_graphs_to_node_label_dataset(node_encodings_list, graphs)
         unique_labels = np.unique(y)
         # If only one label is present, skip training.
@@ -537,17 +415,7 @@ class DecompositionalNodeEncoderDecoder(object):
         node_encodings_list: List[np.ndarray],
         graphs: List[nx.Graph]
     ) -> None:
-        """
-        Trains the edge label classifier using the provided node encodings and graphs.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays containing node encodings.
-            graphs         : List of NetworkX graph objects.
-        
-        Side Effects:
-            Sets self.single_edge_label if only one unique label exists.
-            Trains self.edge_label_classifier if multiple unique labels are present.
-        """
+        """Fit the edge-label classifier or remember the sole label when degenerate."""
         X, y = self.encodings_and_graphs_to_edge_label_dataset(node_encodings_list, graphs)
         unique_labels = np.unique(y)
         # If only one edge label is found, store it and skip training.
@@ -653,15 +521,7 @@ class DecompositionalNodeEncoderDecoder(object):
         self,
         original_node_encodings_list: List[np.ndarray]
     ) -> List[np.ndarray]:
-        """
-        Constrains the node encodings to be non-negative.
-        
-        Parameters:
-            original_node_encodings_list: List of numpy arrays with raw node encodings.
-        
-        Returns:
-            A new list of numpy arrays where all negative values have been set to zero.
-        """
+        """Return copies of the encodings with negative entries clipped to zero."""
         constrained = []
         for encoding in original_node_encodings_list:
             new_enc = encoding.copy()
@@ -676,19 +536,7 @@ class DecompositionalNodeEncoderDecoder(object):
         n_nodes: int,
         threshold: float = 0.5
     ) -> List[int]:
-        """
-        Extracts target degrees from node encodings.
-        If a node's existence flag is below the threshold, its target degree is set to 0;
-        otherwise, the degree is rounded and enforced to be at least 1.
-        
-        Parameters:
-            encodings: Numpy array of node encodings.
-            n_nodes  : Number of nodes in the graph.
-            threshold: Float, nodes with an existence value < threshold are considered non-existent.
-        
-        Returns:
-            A list of integer degrees for each node.
-        """
+        """Derive integer degree targets from encodings while masking non-existent nodes."""
         degs = np.rint(encodings[:n_nodes, 1])
         existent = encodings[:n_nodes, 0] >= threshold
         # For existent nodes enforce at least 1, for non-existent nodes set to 0.
@@ -700,18 +548,7 @@ class DecompositionalNodeEncoderDecoder(object):
         original_node_encodings_list: List[np.ndarray],
         existence_threshold: float = 0.5
     ) -> List[np.ndarray]:
-        """
-        Predicts adjacency matrices for a list of node encoding matrices while accounting for node existence.
-        Nodes with an existence flag below the threshold will have their incident edge probabilities zeroed out
-        and their target degrees set to 0.
-        
-        Parameters:
-            original_node_encodings_list: List of numpy arrays with raw node encodings.
-            existence_threshold: Float threshold for determining if a node exists (default 0.5).
-        
-        Returns:
-            List of binary adjacency matrices (numpy arrays) after optimization.
-        """
+        """Project predicted adjacency probabilities onto valid binary graphs."""
         # Constrain encodings to be non-negative.
         node_encodings_list = self.constrained_node_encodings_list(original_node_encodings_list)
         
@@ -754,15 +591,7 @@ class DecompositionalNodeEncoderDecoder(object):
         self,
         node_encodings_list: List[np.ndarray]
     ) -> List[np.ndarray]:
-        """
-        Decodes node labels for each graph using the node label classifier.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays containing node encodings.
-        
-        Returns:
-            List of numpy arrays where each array contains predicted node labels for a graph.
-        """
+        """Predict node-level labels for each encoding matrix."""
         # If a single node label exists, return it for all nodes.
         if hasattr(self, 'single_node_label') and self.single_node_label is not None:
             predicted_node_labels_list = []
@@ -783,16 +612,7 @@ class DecompositionalNodeEncoderDecoder(object):
         node_encodings_list: List[np.ndarray],
         adj_mtx_list: List[np.ndarray]
     ) -> List[np.ndarray]:
-        """
-        Decodes edge labels for each graph using the edge label classifier.
-        
-        Parameters:
-            node_encodings_list: List of numpy arrays containing node encodings.
-            adj_mtx_list  : List of binary adjacency matrices.
-        
-        Returns:
-            List of numpy arrays where each array contains predicted edge labels for a graph.
-        """
+        """Predict edge labels for every edge present in the supplied adjacency matrices."""
         # If a single edge label exists, return it for all edges.
         if hasattr(self, 'single_edge_label') and self.single_edge_label is not None:
             predicted_edge_labels_list = []
@@ -815,16 +635,7 @@ class DecompositionalNodeEncoderDecoder(object):
         self,
         original_node_encodings_list: List[np.ndarray]
     ) -> List[nx.Graph]:
-        """
-        Decodes node encodings into complete graphs with predicted node and edge labels, while considering node existence.
-        Nodes with an existence flag (first feature) below the threshold are considered non-existent and are removed.
-        
-        Parameters:
-            original_node_encodings_list: List of numpy arrays with raw node encodings.
-            
-        Returns:
-            List of reconstructed NetworkX graph objects with predicted labels and filtered non-existent nodes.
-        """
+        """Reconstruct labelled graphs from node encodings, respecting existence masks."""
         # Step 1: Decode the adjacency matrices using the modified method that accounts for node existence.
         adj_mtx_list = self.decode_adjacency_matrix(original_node_encodings_list, existence_threshold=self.existence_threshold)
         
@@ -1005,7 +816,7 @@ class DecompositionalEncoderDecoder(object):
             node_embeddings_to_graph_generator: Generator that reconstructs graphs from node embeddings.
             verbose: Boolean flag to enable or disable verbose logging.
             use_locality_supervision: Whether to use locality supervision during training.
-            locality_sample_fraction: Fraction of edges to use for supervision (default=1.0).
+            locality_sample_fraction: Fraction of locality pairs to retain when supervision is enabled (default=1.0).
             locality_horizon: Positive integer specifying the maximum graph distance to treat
                 as a positive locality relation when preparing supervision for the conditional generator.
         """

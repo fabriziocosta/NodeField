@@ -27,15 +27,7 @@ def suppress_output():
 
 # --- Sinusoidal Time Embedding ---
 def get_sinusoidal_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
-    """
-    Convert diffusion timesteps t into sinusoidal embeddings.
-    
-    Args:
-        t: Tensor of shape (B,1) with values in [0,1]
-        dim: Desired embedding dimension (must be even)
-    Returns:
-        Tensor of shape (B,dim) containing time embeddings
-    """
+    """Encode diffusion time steps `t` into sinusoidal position embeddings."""
     half_dim = dim // 2
     inv_freq = torch.exp(
         torch.arange(0, half_dim, device=t.device).float() * (-math.log(10000) / (half_dim - 1))
@@ -47,26 +39,7 @@ def get_sinusoidal_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
 
 # --- Cross-Attention Transformer Layer ---
 class CrossTransformerEncoderLayer(nn.Module):
-    """
-    A transformer encoder layer with self-attention and cross-attention mechanisms.
-    
-    This layer implements a pre-norm architecture with three main components:
-    1. Self-attention: allows nodes to attend to each other
-    2. Cross-attention: allows nodes to attend to condition tokens
-    3. Feed-forward network: processes each node's features independently
-    
-    Each component is followed by residual connection, dropout, and layer normalization.
-    
-    Args:
-        embed_dim: Dimension of input and output embeddings
-        num_heads: Number of attention heads for both self and cross attention
-        dropout: Dropout probability for attention and feed-forward layers (default: 0.1)
-    
-    Notes:
-        - Uses pre-normalization for better training stability
-        - Feed-forward network expands features by 4x then projects back
-        - All attention modules use scaled dot-product attention
-    """
+    """Pre-norm transformer encoder layer with shared self- and cross-attention."""
     def __init__(self, 
                  embed_dim: int,
                  num_heads: int,
@@ -103,21 +76,7 @@ class CrossTransformerEncoderLayer(nn.Module):
         self.dropout3 = nn.Dropout(dropout)
         
     def forward(self, x: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        """
-        Process input sequence with self-attention and cross-attention.
-
-        Args:
-            x: Input tensor of shape (B, N, D) where:
-               B = batch size
-               N = sequence length (number of nodes)
-               D = embedding dimension
-            k: Key tensor for cross-attention (B, M, D) where:
-               M = number of memory/condition tokens
-            v: Value tensor for cross-attention (B, M, D)
-
-        Returns:
-            Output tensor of shape (B, N, D) with processed node features
-        """
+        """Mix node tokens with conditioning tokens via self- and cross-attention."""
         # Pre-norm architecture (more stable training)
         # Self attention
         x1 = self.norm1(x)
@@ -139,7 +98,7 @@ def plot_metrics(
     window: int = 10,
     alpha: float = 0.3
 ) -> None:
-    """Plot training metrics with geometric moving averages."""
+    """Visualise training and validation metrics with a geometric moving average."""
     def _moving_average(data: Sequence[float], window_size: int) -> np.ndarray:
         arr = np.asarray(data, dtype=float)
         if len(arr) < window_size:
@@ -193,16 +152,7 @@ def plot_metrics(
 # Revised IterativeDenoisingAutoencoderTransformerModel with Cross-Attention
 # =============================================================================
 class GuidanceMLP(nn.Module):
-    """
-    Two-hidden-layer MLP for classifier guidance.
-
-    Args
-    ----
-    input_dim  : int  – dimension of pooled transformer latents
-    hidden_dim : int  – width of *both* hidden layers
-    output_dim : int  – number of classes
-    dropout    : float, default 0.2 – drop probability after each activation
-    """
+    """Compact classifier used for guidance during sampling."""
     def __init__(
         self,
         input_dim: int,
@@ -227,10 +177,7 @@ class GuidanceMLP(nn.Module):
         return self.net(x)
 
 class EdgeMLP(nn.Module):
-    """
-    Simple one-hidden-layer MLP edge predictor.
-    Combines pairwise node features and learns a nonlinear mapping to edge logits.
-    """
+    """Single-hidden-layer MLP that scores locality between two node embeddings."""
     def __init__(self, latent_dim: int, hidden_dim: Optional[int] = None, dropout: float = 0.1):
         super().__init__()
         if hidden_dim is None:
@@ -243,11 +190,7 @@ class EdgeMLP(nn.Module):
         )
 
     def forward(self, h_i: torch.Tensor, h_j: torch.Tensor) -> torch.Tensor:
-        """
-        Compute edge logits given node embeddings.
-        h_i, h_j: (E, D)
-        Returns logits (E,) for BCEWithLogitsLoss.
-        """
+        """Return a scalar logit describing how strongly two nodes should connect."""
         diff = torch.abs(h_i - h_j)
         prod = h_i * h_j
         x = torch.cat([h_i, h_j, diff, prod], dim=-1)
@@ -255,55 +198,7 @@ class EdgeMLP(nn.Module):
 
 
 class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
-    """
-    PyTorch Lightning module implementing a transformer-based diffusion model for graph generation.
-    
-    This model combines a transformer architecture with noise scheduling and degree-specific 
-    handling for generating graph-like structures.
-
-    Parameters
-    ----------
-    number_of_rows_per_example : int
-        Maximum number of rows per input example.
-    input_feature_dimension : int
-        Number of features per row in the input.
-    condition_feature_dimension : int
-        Dimension of the conditioning vector.
-    latent_embedding_dimension : int
-        Dimension of the latent space embeddings.
-    number_of_transformer_layers : int
-        Number of transformer encoder layers.
-    transformer_attention_head_count : int
-        Number of attention heads in transformer layers.
-    transformer_dropout : float, default=0.1
-        Dropout rate in transformer layers.
-    learning_rate : float, default=1e-3
-        Learning rate for optimization.
-    verbose : bool, default=False
-        Whether to print additional information.
-    important_feature_index : int, default=1
-        Index of the feature to be treated specially (typically degree).
-    max_degree : int, default=None
-        Maximum degree value for classification.
-    lambda_degree_importance : float, default=1.0
-        Weight factor for degree classification loss.
-    noise_degree_factor : float, default=2.0
-        Factor by which to reduce noise on the degree feature.
-    degree_temperature : float | None, default=None
-        Temperature parameter for controlling the degree prediction distribution.
-    sigma_min : float, default=0.1
-        Lower bound of the diffusion noise schedule encountered during training.
-    sigma_max : float, default=1.0
-        Upper bound of the diffusion noise schedule encountered during training.
-    sampling_final_sigma : float, default=0.0
-        Final noise level used during deterministic sampling; must not exceed sigma_max.
-    pool_condition_tokens : bool, default=False
-        When true, averages multiple conditioning tokens per graph into a single vector
-        before cross-attention, preserving backwards compatibility with single-token setups
-        while still accepting multi-token inputs.
-    use_locality_supervision : bool, default=False
-        Enable the auxiliary locality head when paired supervision is provided.
-    """
+    """Cross-attentional diffusion model for conditional node generation."""
     def __init__(self,
                  number_of_rows_per_example: int,
                  input_feature_dimension: int,
@@ -432,11 +327,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         sigma_max: float,
         sampling_final_sigma: float,
     ) -> None:
-        """
-        Store diffusion schedule parameters in a single metadata dict while
-        keeping legacy attributes in sync for checkpoints created with older
-        versions of the model.
-        """
+        """Persist the diffusion schedule hyper-parameters and mirror legacy attributes."""
         sigma_min = float(sigma_min)
         sigma_max = float(sigma_max)
         sampling_final_sigma = float(sampling_final_sigma)
@@ -462,11 +353,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self.sampling_final_sigma = sampling_final_sigma
 
     def _ensure_schedule_metadata(self) -> None:
-        """
-        Ensure the diffusion schedule metadata exists and is internally consistent.
-        Older checkpoints might miss the dict (or even the attributes), so we seed
-        them with conservative defaults and clamp invalid values into legal ranges.
-        """
+        """Backfill missing schedule metadata so checkpoints without it remain usable."""
         meta = getattr(self, "_schedule_metadata", None)
         if not isinstance(meta, dict):
             meta = {}
@@ -489,9 +376,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         )
 
     def _build_sigma_schedule(self, total_steps: int, device: torch.device) -> torch.Tensor:
-        """
-        Create a linear sigma ladder shared between training and generation.
-        """
+        """Assemble the linear noise ladder used by both training and sampling loops."""
         self._ensure_schedule_metadata()
         if total_steps <= 1:
             return torch.tensor([self.sigma_max], device=device)
@@ -505,17 +390,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         return_latents: bool = False,
         add_noise: bool = True,
     ):
-        """
-        Forward pass: predict ε (noise) from a noisy input x_t.
-
-        Args:
-            input_rows: Clean inputs when `add_noise=True`, otherwise the already-noisy x_t.
-            global_condition_vector: Conditioning tokens (B, C).
-            diffusion_time_step: Normalized time steps t ∈ [0, 1].
-            return_latents: When True, also return intermediate latent tokens.
-            add_noise: If True, sample fresh noise via the training schedule; if False,
-                assume `input_rows` already contains x_t and skip additional perturbation.
-        """
+        """Predict the denoising target for a batch of node features at time step `t`."""
         self._ensure_schedule_metadata()
         if add_noise:
             noisy_input, eps, sigma_t = self.apply_noise_schedule(input_rows, diffusion_time_step)
@@ -570,24 +445,17 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
 
 
     def _sigma_from_t(self, t: torch.Tensor) -> torch.Tensor:
-        """Convert normalized time steps to per-feature noise scales."""
+        """Compute the noise amplitude associated with a normalized diffusion time."""
         self._ensure_schedule_metadata()
         return self.sigma_min + t * (self.sigma_max - self.sigma_min)
 
     def _t_from_sigma(self, sigma: torch.Tensor) -> torch.Tensor:
-        """Map noise scales back to the normalized diffusion time domain."""
+        """Invert the schedule by turning a noise level back into its normalized time."""
         self._ensure_schedule_metadata()
         return ((sigma - self.sigma_min) / (self.sigma_max - self.sigma_min)).clamp(0.0, 1.0)
 
     def apply_noise_schedule(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Apply a time-dependent Gaussian noise schedule.
-
-        Returns:
-            x_t      : Noisy version of x_0
-            eps      : The actual Gaussian noise added
-            sigma_t  : The scalar noise level used at each step (B,1,1)
-        """
+        """Perturb inputs with Gaussian noise sampled from the current schedule."""
         self._ensure_schedule_metadata()
         # base Gaussian noise
         eps = torch.randn_like(x)
@@ -611,9 +479,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         prediction: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         target: torch.Tensor
     ) -> dict:
-        """
-        Compute all weighted losses, with primary target = ε (predicted noise).
-        """
+        """Return the composite objective for diffusion, existence, and degree heads."""
         pred_eps, logits_deg, logits_exist, eps, sigma_t = prediction
 
         # --- ε-prediction loss for continuous channels ---
@@ -655,9 +521,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
     # TRAINING STEP – uses the dict
     # ---------------------------------------------------------------------------
     def training_step(self, batch, batch_idx):
-        """
-        Perform a single training step with optional locality supervision.
-        """
+        """Run one optimisation step, optionally including locality supervision."""
         if self.use_locality_supervision:
             input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
         else:
@@ -704,9 +568,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        """
-        Perform a single validation step with optional locality supervision.
-        """
+        """Evaluate a batch without gradient updates, mirroring the training step logic."""
         if self.use_locality_supervision:
             input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
         else:
@@ -781,7 +643,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
     #  Classifier-guidance utilities  
     # ───────────────────────────────────────────────────────────────────
     def set_guidance_classifier(self, num_classes: int) -> None:
-        """Create a small MLP that maps pooled transformer latents → class-logits."""
+        """Initialise the lightweight guidance head that scores latent representations."""
         self.guidance_classifier = GuidanceMLP(
             input_dim=self.latent_embedding_dimension,
             hidden_dim=2 * self.latent_embedding_dimension,
@@ -798,7 +660,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         lr: float = 1e-3,
         verbose: bool = True
     ):
-        """Train guidance classifier with internal validation and loss plotting."""
+        """Fit the guidance head on pooled latents and report its learning curve."""
         if self.guidance_classifier is None:
             raise RuntimeError("call set_guidance_classifier() first")
 
@@ -876,10 +738,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         use_heads_projection: bool = False,   # NEW: use exist/deg heads to “snap” outputs
         exist_threshold: float = 0.5,        # threshold in prob space
     ) -> torch.Tensor:
-        """
-        Deterministic sampler consistent with training: x_t = x0 + sigma(t)*eps.
-        Optionally projects the existence/degree channels using the auxiliary heads.
-        """
+        """Run deterministic sampling that mirrors the training diffusion schedule."""
         self.eval()
         self._ensure_schedule_metadata()
         B = global_condition.size(0)
@@ -982,20 +841,11 @@ class GraphWithEdgesDataset(Dataset):
             self.edge_lbl_by_graph[b].append(lbl)
 
     def __len__(self) -> int:
-        """Return the number of graphs in the dataset."""
+        """Return the number of graph instances bundled in the dataset."""
         return len(self.X)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Get a single graph with its associated data.
-        
-        Returns:
-            Tuple containing:
-            - x: Node features (N, D)
-            - y: Graph condition (C,)
-            - edge_idx: Edge indices (E, 2)
-            - edge_labels: Edge labels (E,)
-            - mask: Node mask (N,)
-        """
+        """Return node features, condition vector, locality pairs, and mask for one graph."""
         x = self.X[idx]  # (N, D)
         y = self.Y[idx]  # (C,)
         mask = self.node_mask[idx]  # (N,)
@@ -1007,15 +857,7 @@ class GraphWithEdgesDataset(Dataset):
         return x, y, edge_idxs, edge_lbls, mask
 
 def collate_graph_with_edges(batch):
-    """
-    Expects each sample as (X, Y, local_edge_idx, edge_lbl, mask).
-    Returns:
-      X: (B, N, D)
-      Y: (B, C)
-      edge_idx: (E, 3) with batch-index prefixed
-      edge_lbl: (E,)
-      mask: (B, N)
-    """
+    """Batch GraphWithEdgesDataset samples into tensors ready for Lightning loaders."""
     xs, ys, masks = [], [], []
     local_edge_idxs, local_edge_lbls = [], []
     for x, y, ei, el, mask in batch:
@@ -1045,100 +887,7 @@ def collate_graph_with_edges(batch):
     return X, Y, edge_idx, edge_lbl, M
 
 class ConditionalNodeGenerator:
-    """
-    A scikit-learn compatible diffusion generator that wraps a Transformer-based 
-    diffusion model for generating structured data. This model combines a transformer 
-    architecture with a diffusion process and conditional generation capabilities.
-
-    The model is particularly suited for generating graph-like structures where each
-    example consists of multiple rows (nodes/edges) and features, with special handling
-    for degree features and existence flags.
-
-    Parameters
-    ----------
-    latent_embedding_dimension : int, default=128
-        Dimension of the latent space embeddings used throughout the transformer.
-        Higher values allow for more complex node representations.
-    
-    number_of_transformer_layers : int, default=4
-        Number of stacked transformer encoder layers. Deeper networks can model
-        more complex dependencies but are harder to train.
-    
-    transformer_attention_head_count : int, default=4
-        Number of parallel attention heads in each transformer layer. Multiple 
-        heads allow the model to attend to different aspects simultaneously.
-    
-    transformer_dropout : float, default=0.1
-        Dropout probability in transformer layers to prevent overfitting.
-        Values between 0.1 and 0.3 typically work well.
-    
-    learning_rate : float, default=1e-3
-        Learning rate for the Adam optimizer. Critical for stable training.
-    
-    maximum_epochs : int, default=10
-        Maximum number of full passes through the training data.
-    
-    batch_size : int, default=32
-        Number of samples per training batch. Larger batches give more stable
-        gradients but require more memory.
-    
-    total_steps : int, default=1000
-        Number of steps in the diffusion process during generation.
-        More steps give finer control but slower generation.
-    
-    verbose : bool, default=False
-        Whether to print training progress and display metric plots.
-    
-    important_feature_index : int, default=1
-        Index of the feature to be treated with special importance (typically degree).
-        This feature receives less noise during diffusion.
-    
-    lambda_degree_importance : float, default=1.0
-        Weight multiplier for the degree prediction loss term.
-        Higher values prioritize accurate degree predictions.
-    
-    noise_degree_factor : float, default=2.0
-        Factor by which to reduce noise on the degree feature.
-        Higher values preserve degree information better during diffusion.
-    
-    degree_temperature : Optional[float], default=None
-        Temperature for degree sampling. None means deterministic (argmax),
-        while positive values enable exploration via softmax.
-    
-    lambda_node_exist_importance : float, default=1.0
-        Weight multiplier for the node existence prediction loss term.
-    
-    default_exist_pos_weight : float, default=1.0
-        Class weight for positive examples in node existence prediction.
-        Useful for handling class imbalance.
-    
-    lambda_locality_importance : float, default=1.0
-        Weight multiplier for the locality prediction loss term when locality
-        supervision is enabled.
-    
-    use_guidance : bool, default=False
-        Enable/disable classifier guidance during sampling.
-
-    pool_condition_tokens : bool, default=False
-        When true, averages multiple conditioning tokens per graph into a single vector
-        before cross-attention, preserving backwards compatibility with single-token setups
-        while still accepting multi-token inputs.
-        multi-token conditioning data.
-    
-    use_locality_supervision : bool, default=False
-        Enable the auxiliary locality head when paired supervision is provided.
-    
-    Methods
-    -------
-    fit(node_encodings_list, conditional_graph_encodings, edge_pairs=None, ...)
-        Fit the model to training data, optionally with locality supervision.
-    
-    predict(y)
-        Generate samples conditioned on the given conditional encodings.
-    
-    plot_metrics(window, alpha)
-        Plot training metrics with geometric moving averages.
-    """
+    """Scikit-learn friendly façade around the conditional diffusion pipeline."""
     def __init__(self,
                  latent_embedding_dimension: int = 128,
                  number_of_transformer_layers: int = 4,
@@ -1243,31 +992,7 @@ class ConditionalNodeGenerator:
         edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None
     ):
-        """
-        Setup the model for training.
-
-        This method prepares the data, initializes scalers, and sets up the
-        IterativeDenoisingAutoencoderTransformerModel. It computes scaling
-        parameters, determines class imbalance weights, and initializes the
-        model architecture.
-
-        Parameters
-        ----------
-        node_encodings_list : List[np.ndarray]
-            List of node encoding arrays, where each array represents a graph.
-            Each array should have shape (num_nodes, feature_dimension).
-        conditional_graph_encodings : Any
-            Array of conditional graph encodings, where each encoding
-            represents a graph-level condition.
-        edge_pairs : Optional[List[Tuple[int, int, int]]], default=None
-            Optional list of locality supervision pairs (graph_index, node_i, node_j).
-            Only used when `use_locality_supervision=True`.
-        edge_targets : Optional[np.ndarray], default=None
-            Optional array of locality targets aligned with `edge_pairs`.
-        node_mask : Optional[np.ndarray], default=None
-            Optional boolean mask indicating valid nodes in each graph.
-            Used to exclude padded nodes from locality supervision.
-        """
+        """Prepare scalers, metadata, and the underlying Lightning module for training."""
         effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
         if self.use_locality_supervision and not effective_locality and self.verbose:
             print("Locality supervision requested but edge_pairs/edge_targets not provided; continuing without it.")
@@ -1373,29 +1098,7 @@ class ConditionalNodeGenerator:
         edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None
     ):
-        """
-        Fit the model to training data, optionally with locality supervision.
-
-        This method prepares the data loaders and trains the initialized model
-        using PyTorch Lightning. It assumes that the setup method has already
-        been called to initialize scalers and the model architecture.
-
-        Parameters
-        ----------
-        node_encodings_list : List[np.ndarray]
-            List of node encoding arrays, where each array represents a graph.
-            Each array should have shape (num_nodes, feature_dimension).
-        conditional_graph_encodings : Any
-            Array of conditional graph encodings, where each encoding
-            represents a graph-level condition.
-        edge_pairs : Optional[List[Tuple[int, int, int]]], default=None
-            Optional list of locality supervision pairs (graph_index, node_i, node_j).
-        edge_targets : Optional[np.ndarray], default=None
-            Optional array of locality targets aligned with `edge_pairs`.
-        node_mask : Optional[np.ndarray], default=None
-            Optional boolean mask indicating valid nodes in each graph.
-            Used to exclude padded nodes from locality supervision.
-        """
+        """Train the diffusion model, optionally consuming locality supervision pairs."""
         X_array = np.stack([np.pad(x, ((0, self.number_of_rows_per_example - x.shape[0]), (0, 0)), mode='constant', constant_values=0)
                            for x in node_encodings_list], axis=0)
         y_array = np.array(conditional_graph_encodings)
@@ -1478,15 +1181,7 @@ class ConditionalNodeGenerator:
         conditional_graph_encodings: Any,
         desired_class: Optional[Union[int, Sequence[int]]] = None
     ) -> List[np.ndarray]:
-        """
-        Generate node-level latent matrices conditioned on global graph encodings.
-
-        Steps:
-        1. Calls the diffusion model's generate() to produce latent node embeddings.
-        2. Converts back to original (pre-scaled) feature space.
-        3. Overwrites existence and degree channels using the trained heads
-        for better stability and interpretability at inference.
-        """
+        """Sample node feature grids for each conditioning vector supplied."""
         if self.verbose:
             print(f"Predicting node matrices for {len(conditional_graph_encodings)} graphs...")
             
