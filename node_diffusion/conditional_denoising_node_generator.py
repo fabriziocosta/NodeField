@@ -27,7 +27,15 @@ def suppress_output():
 
 # --- Sinusoidal Time Embedding ---
 def get_sinusoidal_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
-    """Encode diffusion time steps `t` into sinusoidal position embeddings."""
+    """Encode diffusion time steps `t` into sinusoidal position embeddings.
+
+    Args:
+        t (torch.Tensor): Batch of diffusion step indices with shape `(B,)` or `(B, 1)`.
+        dim (int): Dimensionality of the resulting positional embedding; must be even.
+
+    Returns:
+        torch.Tensor: Sinusoidal embeddings with shape `(B, dim)`.
+    """
     half_dim = dim // 2
     inv_freq = torch.exp(
         torch.arange(0, half_dim, device=t.device).float() * (-math.log(10000) / (half_dim - 1))
@@ -39,7 +47,16 @@ def get_sinusoidal_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
 
 # --- Cross-Attention Transformer Layer ---
 class CrossTransformerEncoderLayer(nn.Module):
-    """Pre-norm transformer encoder layer with shared self- and cross-attention."""
+    """Pre-norm transformer encoder layer with shared self- and cross-attention.
+
+    Args:
+        embed_dim (int): Dimensionality of both the node and condition token
+            embeddings processed by the layer.
+        num_heads (int): Number of attention heads used for both self- and
+            cross-attention blocks.
+        dropout (float): Dropout probability applied to attention outputs and the
+            feed-forward network.
+    """
     def __init__(self, 
                  embed_dim: int,
                  num_heads: int,
@@ -98,7 +115,17 @@ def plot_metrics(
     window: int = 10,
     alpha: float = 0.3
 ) -> None:
-    """Visualise training and validation metrics with a geometric moving average."""
+    """Visualise training and validation metrics with a geometric moving average.
+
+    Args:
+        train_metrics (Dict[str, Sequence[float]]): History of metric values recorded
+            on the training split keyed by metric name.
+        val_metrics (Dict[str, Sequence[float]]): History of metric values recorded on
+            the validation split keyed by metric name.
+        window (int): Window size for the geometric moving average applied to the
+            curves.
+        alpha (float): Transparency used when plotting the raw metric traces.
+    """
     def _moving_average(data: Sequence[float], window_size: int) -> np.ndarray:
         arr = np.asarray(data, dtype=float)
         if len(arr) < window_size:
@@ -152,7 +179,14 @@ def plot_metrics(
 # Revised IterativeDenoisingAutoencoderTransformerModel with Cross-Attention
 # =============================================================================
 class GuidanceMLP(nn.Module):
-    """Compact classifier used for guidance during sampling."""
+    """Compact classifier used for guidance during sampling.
+
+    Args:
+        input_dim (int): Size of the pooled latent vectors fed into the MLP.
+        hidden_dim (int): Width of the hidden layer that projects latent features
+            before the output layer.
+        output_dim (int): Number of guidance classes to predict during sampling.
+    """
     def __init__(
         self,
         input_dim: int,
@@ -177,7 +211,15 @@ class GuidanceMLP(nn.Module):
         return self.net(x)
 
 class EdgeMLP(nn.Module):
-    """Single-hidden-layer MLP that scores locality between two node embeddings."""
+    """Single-hidden-layer MLP that scores locality between two node embeddings.
+
+    Args:
+        latent_dim (int): Width of the node latent representations concatenated and
+            compared by the network.
+        hidden_dim (Optional[int]): Size of the hidden layer; defaults to twice the
+            latent dimension when not provided.
+        dropout (float): Dropout probability applied to the hidden activations.
+    """
     def __init__(self, latent_dim: int, hidden_dim: Optional[int] = None, dropout: float = 0.1):
         super().__init__()
         if hidden_dim is None:
@@ -198,7 +240,57 @@ class EdgeMLP(nn.Module):
 
 
 class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
-    """Cross-attentional diffusion model for conditional node generation."""
+    """Cross-attentional diffusion model for conditional node generation.
+
+    Args:
+        number_of_rows_per_example (int): Number of node tokens each training sample
+            contains; effectively the maximum node count per graph.
+        input_feature_dimension (int): Width of the node feature vectors supplied to
+            the diffusion model.
+        condition_feature_dimension (int): Width of the conditioning vector appended
+            to every graph instance.
+        latent_embedding_dimension (int): Size of the latent space used by the
+            transformer blocks and decoder head.
+        number_of_transformer_layers (int): How many shared cross-attention encoder
+            layers to stack in the transformer backbone.
+        transformer_attention_head_count (int): Number of attention heads inside each
+            transformer layer.
+        transformer_dropout (float): Dropout probability applied within attention and
+            feed-forward sublayers.
+        learning_rate (float): Optimiser step size used by Lightning during training.
+        verbose (bool): Whether to emit additional logging such as sample previews.
+        important_feature_index (int): Column index of the feature that tracks node
+            degree and receives specialised scaling and losses.
+        max_degree (Optional[int]): Maximum discrete degree label expected by the
+            auxiliary classifier head.
+        lambda_degree_importance (float): Weight assigned to the degree prediction
+            loss when combining training objectives.
+        noise_degree_factor (float): Factor used to reduce noise applied to the degree
+            feature during diffusion.
+        degree_temperature (Optional[float]): Optional softmax temperature used when
+            calibrating the degree logits.
+        degree_min_val (float): Minimum degree value observed during scaling; stored
+            for inverse transformations.
+        degree_range_val (float): Range of the scaled degree feature used for
+            unnormalising predictions.
+        lambda_node_exist_importance (float): Weight assigned to the node existence
+            loss component.
+        use_locality_supervision (bool): Whether to train the optional locality edge
+            scoring head.
+        lambda_locality_importance (float): Scaling factor for the locality loss if
+            supervision is enabled.
+        exist_pos_weight (Union[torch.Tensor, float]): Positive class weight for the
+            node existence classifier head.
+        use_guidance (bool): Enable classifier guidance during sampling by training an
+            auxiliary MLP on latent representations.
+        guidance_weight (float): Multiplier applied to the guidance gradient injected
+            during sampling.
+        sigma_min (float): Lowest noise level used in the diffusion schedule.
+        sigma_max (float): Highest noise level used in the diffusion schedule.
+        sampling_final_sigma (float): Noise level to terminate the sampling loop at.
+        pool_condition_tokens (bool): Whether to average condition tokens before they
+            interact with node tokens in cross-attention layers.
+    """
     def __init__(self,
                  number_of_rows_per_example: int,
                  input_feature_dimension: int,
@@ -820,6 +912,19 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
 # Revised TransformerConditionalDiffusionGenerator with Piecewise Scheduling Parameters
 # =============================================================================
 class GraphWithEdgesDataset(Dataset):
+    """Tensor dataset that stores graph node features, conditions, and edge labels.
+
+    Args:
+        X (np.ndarray): Node feature tensor shaped `(B, N, D)` where `B` is batch size,
+            `N` the node count, and `D` the feature dimension.
+        Y (np.ndarray): Conditioning feature tensor shaped `(B, C)` or `(B, N, C)`
+            describing global context per graph.
+        edge_pairs (List[Tuple[int, int, int]]): Triplets of `(batch_index, src, dst)`
+            identifying locality-labelled node pairs.
+        edge_targets (np.ndarray): Locality labels aligned with `edge_pairs`.
+        node_mask (Optional[np.ndarray]): Boolean mask of shape `(B, N)` that flags
+            which node slots are valid for each graph.
+    """
     def __init__(
         self,
         X: np.ndarray,                    # (B, N, D)
@@ -857,7 +962,15 @@ class GraphWithEdgesDataset(Dataset):
         return x, y, edge_idxs, edge_lbls, mask
 
 def collate_graph_with_edges(batch):
-    """Batch GraphWithEdgesDataset samples into tensors ready for Lightning loaders."""
+    """Batch GraphWithEdgesDataset samples into tensors ready for Lightning loaders.
+
+    Args:
+        batch: Sequence of dataset items returned by `GraphWithEdgesDataset.__getitem__`.
+
+    Returns:
+        Tuple[torch.Tensor, ...]: Batched node features, conditions, edge indices,
+            edge labels, and node masks.
+    """
     xs, ys, masks = [], [], []
     local_edge_idxs, local_edge_lbls = [], []
     for x, y, ei, el, mask in batch:
@@ -887,7 +1000,46 @@ def collate_graph_with_edges(batch):
     return X, Y, edge_idx, edge_lbl, M
 
 class ConditionalNodeGenerator:
-    """Scikit-learn friendly façade around the conditional diffusion pipeline."""
+    """Scikit-learn friendly façade around the conditional diffusion pipeline.
+
+    Args:
+        latent_embedding_dimension (int): Width of the latent representation processed
+            by the transformer backbone.
+        number_of_transformer_layers (int): Number of cross-attention transformer
+            layers used inside the Lightning module.
+        transformer_attention_head_count (int): Number of attention heads allocated to
+            each transformer layer.
+        transformer_dropout (float): Dropout probability applied inside attention and
+            feed-forward sublayers.
+        learning_rate (float): Optimiser step size used when fitting the Lightning
+            module.
+        maximum_epochs (int): Maximum number of training epochs executed by the
+            Lightning trainer.
+        batch_size (int): Batch size for node graphs during training and evaluation.
+        total_steps (int): Number of diffusion time steps sampled when training or
+            drawing new graphs.
+        verbose (bool): Whether to produce additional logs, plots, and progress output.
+        important_feature_index (int): Column index of the degree feature in the input
+            tensors; drives specialised scaling and head losses.
+        lambda_degree_importance (float): Weight applied to the auxiliary degree loss
+            during optimisation.
+        noise_degree_factor (float): Divider that reduces injected noise on the degree
+            channel relative to other features.
+        degree_temperature (Optional[float]): Optional softmax temperature applied to
+            degree logits before computing losses.
+        lambda_node_exist_importance (float): Weight assigned to the node existence
+            classification loss.
+        default_exist_pos_weight (float): Positive class weight injected into the
+            existence loss when no dataset-specific weights are supplied.
+        lambda_locality_importance (float): Scaling factor for the optional locality
+            edge supervision loss.
+        use_guidance (bool): Train an auxiliary classifier on latent representations to
+            enable classifier guidance during sampling.
+        pool_condition_tokens (bool): Average condition tokens into a single vector
+            before cross-attention instead of keeping them separate.
+        use_locality_supervision (bool): Enable supervision for locality edge scores
+            when training data provides labelled node pairs.
+    """
     def __init__(self,
                  latent_embedding_dimension: int = 128,
                  number_of_transformer_layers: int = 4,

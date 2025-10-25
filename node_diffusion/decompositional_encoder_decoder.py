@@ -70,7 +70,31 @@ np.seterr(invalid='ignore', divide='ignore')
 # =============================================================================
 
 class DecompositionalNodeEncoderDecoder(object):
-    """Trainable toolkit for vectorising graphs and decoding them back into structure."""
+    """Trainable toolkit for vectorising graphs and decoding them back into structure.
+
+    Args:
+        adjacency_matrix_classifier (LowRankMLP): Model that predicts adjacency
+            probabilities between node pairs.
+        node_label_classifier (LowRankMLP): Model used to score categorical node
+            labels.
+        edge_label_classifier (LowRankMLP): Model that predicts edge label
+            distributions.
+        verbose (bool): Toggle for printing solver and optimisation diagnostics.
+        negative_sample_factor (int): Multiplier controlling how many non-edges to
+            sample when building training batches.
+        existence_threshold (float): Probability threshold above which edges or nodes
+            are treated as present.
+        num_augmentation_iterations (int): Number of noise augmentation passes applied
+            to training graphs.
+        augmentation_noise (float): Standard deviation of Gaussian noise injected
+            during augmentation.
+        enforce_connectivity (bool): Require the decoded graph to remain connected when
+            solving the adjacency optimisation.
+        degree_slack_penalty (float): Penalty weight for allowing slack in degree
+            constraints during optimisation.
+        warm_start_mst (bool): Whether to initialise the linear program with a maximum
+            spanning tree warm start.
+    """
     
     def __init__(
         self,
