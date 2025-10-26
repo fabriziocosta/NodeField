@@ -491,10 +491,62 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             eps = None
             sigma_t = None
 
-        x_norm = self.layernorm_in(noisy_input)
+        latent_tokens = self._encode_with_condition(
+            noisy_input,
+            global_condition_vector,
+            diffusion_time_step,
+        )
+
+        # Predict ε for continuous features
+        pred_eps = self.linear_decoder_latent_to_output(latent_tokens)
+
+        # Other prediction heads remain the same
+        logits_deg = self.degree_head(latent_tokens)
+        logits_exist = self.exist_head(latent_tokens).squeeze(-1)  # (B,N)
+
+        if return_latents:
+            return pred_eps, logits_deg, logits_exist, latent_tokens, eps, sigma_t
+        return pred_eps, logits_deg, logits_exist, eps, sigma_t
+
+
+    def _sigma_from_t(self, t: torch.Tensor) -> torch.Tensor:
+        """Compute the noise amplitude associated with a normalized diffusion time."""
+        self._ensure_schedule_metadata()
+        return self.sigma_min + t * (self.sigma_max - self.sigma_min)
+
+    def _t_from_sigma(self, sigma: torch.Tensor) -> torch.Tensor:
+        """Invert the schedule by turning a noise level back into its normalized time."""
+        self._ensure_schedule_metadata()
+        return ((sigma - self.sigma_min) / (self.sigma_max - self.sigma_min)).clamp(0.0, 1.0)
+
+    def _build_noise_scale(self, x: torch.Tensor, sigma_t: torch.Tensor) -> torch.Tensor:
+        """Construct feature-wise noise scales, reducing diffusion on the degree channel."""
+        noise_scale = torch.ones_like(x) * sigma_t
+        noise_scale[..., self.important_feature_index] /= self.noise_degree_factor
+        return noise_scale
+
+    def apply_noise_schedule(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Perturb inputs with Gaussian noise sampled from the current schedule."""
+        self._ensure_schedule_metadata()
+        # base Gaussian noise
+        eps = torch.randn_like(x)
+
+        sigma_t = self._sigma_from_t(t).unsqueeze(-1)  # (B,1,1)
+        noise_scale = self._build_noise_scale(x, sigma_t)
+
+        x_t = x + eps * noise_scale
+        return x_t, eps, sigma_t
+
+    def _encode_with_condition(
+        self,
+        input_rows: torch.Tensor,
+        global_condition_vector: torch.Tensor,
+        diffusion_time_step: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode node tokens with time and condition context via shared transformer."""
+        x_norm = self.layernorm_in(input_rows)
         latent_tokens = self.linear_encoder_input_to_latent(x_norm)
 
-        # Build memory (time + condition)
         time_token = get_sinusoidal_time_embedding(
             diffusion_time_step, self.latent_embedding_dimension
         ).unsqueeze(1)  # (B,1,D)
@@ -519,85 +571,63 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             cond_proj = cond_proj + bias
 
         mem = torch.cat([time_token, cond_proj], dim=1)  # (B, 1+M, D)
-
-        # Transformer with cross-attention
         for layer in self.shared_transformer:
             latent_tokens = layer(latent_tokens, k=mem, v=mem)
+        return latent_tokens
 
-        # Predict ε for continuous features
-        pred_eps = self.linear_decoder_latent_to_output(latent_tokens)
-
-        # Other prediction heads remain the same
-        logits_deg = self.degree_head(latent_tokens)
-        logits_exist = self.exist_head(latent_tokens).squeeze(-1)  # (B,N)
-
-        if return_latents:
-            return pred_eps, logits_deg, logits_exist, latent_tokens, eps, sigma_t
-        return pred_eps, logits_deg, logits_exist, eps, sigma_t
-
-
-    def _sigma_from_t(self, t: torch.Tensor) -> torch.Tensor:
-        """Compute the noise amplitude associated with a normalized diffusion time."""
-        self._ensure_schedule_metadata()
-        return self.sigma_min + t * (self.sigma_max - self.sigma_min)
-
-    def _t_from_sigma(self, sigma: torch.Tensor) -> torch.Tensor:
-        """Invert the schedule by turning a noise level back into its normalized time."""
-        self._ensure_schedule_metadata()
-        return ((sigma - self.sigma_min) / (self.sigma_max - self.sigma_min)).clamp(0.0, 1.0)
-
-    def apply_noise_schedule(self, x: torch.Tensor, t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Perturb inputs with Gaussian noise sampled from the current schedule."""
-        self._ensure_schedule_metadata()
-        # base Gaussian noise
-        eps = torch.randn_like(x)
-
-        sigma_t = self._sigma_from_t(t)    # (B,1)
-        sigma_t = sigma_t.unsqueeze(-1)                      # (B,1,1)
-
-        # featurewise scaling (reduce noise on degree column)
-        noise_scale = torch.ones_like(x) * sigma_t
-        noise_scale[..., self.important_feature_index] /= self.noise_degree_factor
-
-        x_t = x + eps * noise_scale
-        return x_t, eps, sigma_t
-
-  
     # ---------------------------------------------------------------------------
     # single-source loss computation – returns all partials
     # ---------------------------------------------------------------------------
     def compute_weighted_loss(
         self,
-        prediction: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-        target: torch.Tensor
+        prediction: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        target: torch.Tensor,
+        global_condition: torch.Tensor,
+        diffusion_time_step: torch.Tensor,
     ) -> dict:
         """Return the composite objective for diffusion, existence, and degree heads."""
-        pred_eps, logits_deg, logits_exist, eps, sigma_t = prediction
+        pred_eps, eps, sigma_t = prediction
 
         # --- ε-prediction loss for continuous channels ---
         loss_eps = F.mse_loss(pred_eps, eps, reduction='mean')
 
-        # --- Node existence head ---
+        # --- Clean reconstruction used for auxiliary heads ---
+        noise_scale = self._build_noise_scale(target, sigma_t)
+        x_t = target + noise_scale * eps
+        x_hat0 = x_t - noise_scale * pred_eps
+
+        clean_time = torch.zeros_like(diffusion_time_step)
+        clean_latent = self._encode_with_condition(
+            x_hat0,
+            global_condition,
+            clean_time,
+        )
+        logits_deg_clean = self.degree_head(clean_latent)
+        logits_exist_clean = self.exist_head(clean_latent).squeeze(-1)
+
+        # --- Node existence head (evaluated on the clean reconstruction) ---
         target_exist = (target[..., 0] >= 0.5).float()
         loss_exist = F.binary_cross_entropy_with_logits(
-            logits_exist,
+            logits_exist_clean,
             target_exist,
             pos_weight=self.exist_pos_weight
         )
 
-        # --- Degree classification head ---
+        # --- Degree classification head (evaluated on the clean reconstruction) ---
         target_degree_scaled = target[..., self.important_feature_index]
         deg_unscaled = target_degree_scaled * self.deg_range_val + self.deg_min_val
         true_deg_class = torch.clamp(torch.round(deg_unscaled), 0, self.max_degree).long()
         loss_deg_ce = F.cross_entropy(
-            logits_deg.reshape(-1, self.max_degree + 1),
+            logits_deg_clean.reshape(-1, self.max_degree + 1),
             true_deg_class.reshape(-1)
         )
 
         # total combined loss
-        total_loss = (loss_eps +
-                    self.lambda_node_exist_importance * loss_exist +
-                    self.lambda_degree_importance * loss_deg_ce)
+        total_loss = (
+            loss_eps
+            + self.lambda_node_exist_importance * loss_exist
+            + self.lambda_degree_importance * loss_deg_ce
+        )
 
         return {
             "total": total_loss,
@@ -622,14 +652,19 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         diffusion_time_step = torch.rand(input_examples.size(0), 1, device=self.device)
 
         if self.use_locality_supervision:
-            pred_eps, logits_deg, logits_exist, latent_tokens, eps, sigma_t = \
+            pred_eps, _, _, latent_tokens, eps, sigma_t = \
                 self.forward(input_examples, global_condition, diffusion_time_step, return_latents=True)
         else:
-            pred_eps, logits_deg, logits_exist, eps, sigma_t = \
+            pred_eps, _, _, eps, sigma_t = \
                 self.forward(input_examples, global_condition, diffusion_time_step)
 
         # Core diffusion + degree + existence losses
-        losses = self.compute_weighted_loss((pred_eps, logits_deg, logits_exist, eps, sigma_t), input_examples)
+        losses = self.compute_weighted_loss(
+            (pred_eps, eps, sigma_t),
+            input_examples,
+            global_condition,
+            diffusion_time_step,
+        )
         total_loss = losses["total"]
 
         # ───────────────────────────────
@@ -669,13 +704,18 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         diffusion_time_step = torch.rand(input_examples.size(0), 1, device=self.device)
 
         if self.use_locality_supervision:
-            pred_eps, logits_deg, logits_exist, latent_tokens, eps, sigma_t = \
+            pred_eps, _, _, latent_tokens, eps, sigma_t = \
                 self.forward(input_examples, global_condition, diffusion_time_step, return_latents=True)
         else:
-            pred_eps, logits_deg, logits_exist, eps, sigma_t = \
+            pred_eps, _, _, eps, sigma_t = \
                 self.forward(input_examples, global_condition, diffusion_time_step)
 
-        losses = self.compute_weighted_loss((pred_eps, logits_deg, logits_exist, eps, sigma_t), input_examples)
+        losses = self.compute_weighted_loss(
+            (pred_eps, eps, sigma_t),
+            input_examples,
+            global_condition,
+            diffusion_time_step,
+        )
         total_loss = losses["total"]
 
         # ───────────────────────────────
