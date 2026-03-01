@@ -92,20 +92,48 @@ class CrossTransformerEncoderLayer(nn.Module):
         )
         self.dropout3 = nn.Dropout(dropout)
         
-    def forward(self, x: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        self_key_padding_mask: Optional[torch.Tensor] = None,
+        cross_key_padding_mask: Optional[torch.Tensor] = None,
+        query_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Mix node tokens with conditioning tokens via self- and cross-attention."""
         # Pre-norm architecture (more stable training)
         # Self attention
         x1 = self.norm1(x)
-        x = x + self.dropout1(self.self_attn(x1, x1, x1)[0])
+        x = x + self.dropout1(
+            self.self_attn(
+                x1,
+                x1,
+                x1,
+                key_padding_mask=self_key_padding_mask,
+            )[0]
+        )
+        if query_mask is not None:
+            x = x * query_mask.unsqueeze(-1).to(dtype=x.dtype)
         
         # Cross attention with memory tokens
         x2 = self.norm2(x) 
-        x = x + self.dropout2(self.cross_attn(x2, k, v)[0])
+        x = x + self.dropout2(
+            self.cross_attn(
+                x2,
+                k,
+                v,
+                key_padding_mask=cross_key_padding_mask,
+            )[0]
+        )
+        if query_mask is not None:
+            x = x * query_mask.unsqueeze(-1).to(dtype=x.dtype)
         
         # Feed-forward
         x3 = self.norm3(x)
         x = x + self.dropout3(self.ff(x3))
+        if query_mask is not None:
+            x = x * query_mask.unsqueeze(-1).to(dtype=x.dtype)
         return x
 
 # --- Plotting Metrics ---
