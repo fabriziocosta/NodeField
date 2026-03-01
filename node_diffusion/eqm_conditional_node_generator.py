@@ -86,6 +86,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         self.pool_condition_tokens = bool(pool_condition_tokens)
         self.use_guidance = False
         self.noise_degree_factor = 1.0
+        self.use_existence_head = True
+        self.constant_existence_value = 1.0
 
         self.register_buffer(
             "exist_pos_weight",
@@ -241,17 +243,21 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         denoised = noisy_input + noise_scale.pow(2) * score
         latent_clean = self._encode_with_condition(denoised, global_condition, node_mask=node_mask)
         logits_deg = self.degree_head(latent_clean)
-        logits_exist = self.exist_head(latent_clean).squeeze(-1)
+        logits_exist = self.exist_head(latent_clean).squeeze(-1) if self.use_existence_head else None
 
-        target_exist = (input_examples[..., 0] >= 0.5).float()
-        exist_loss_map = F.binary_cross_entropy_with_logits(
-            logits_exist,
-            target_exist,
-            pos_weight=self.exist_pos_weight,
-            reduction="none",
-        )
-        exist_mask = node_mask.to(dtype=exist_loss_map.dtype) if node_mask is not None else torch.ones_like(exist_loss_map)
-        loss_exist = (exist_loss_map * exist_mask).sum() / exist_mask.sum().clamp_min(1.0)
+        if self.use_existence_head:
+            target_exist = (input_examples[..., 0] >= 0.5).float()
+            exist_loss_map = F.binary_cross_entropy_with_logits(
+                logits_exist,
+                target_exist,
+                pos_weight=self.exist_pos_weight,
+                reduction="none",
+            )
+            exist_mask = node_mask.to(dtype=exist_loss_map.dtype) if node_mask is not None else torch.ones_like(exist_loss_map)
+            loss_exist = (exist_loss_map * exist_mask).sum() / exist_mask.sum().clamp_min(1.0)
+        else:
+            exist_mask = node_mask.to(dtype=input_examples.dtype) if node_mask is not None else torch.ones_like(input_examples[..., 0])
+            loss_exist = input_examples.new_zeros(())
 
         target_degree_scaled = input_examples[..., self.important_feature_index]
         deg_unscaled = target_degree_scaled * self.deg_range_val + self.deg_min_val
@@ -272,9 +278,11 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
 
         total_loss = (
             loss_eqm
-            + self.lambda_node_exist_importance * loss_exist
             + self.lambda_degree_importance * loss_deg_ce
         )
+        if self.use_existence_head:
+            total_loss = total_loss + self.lambda_node_exist_importance * loss_exist
+
         return (
             {
                 "total": total_loss,
@@ -317,7 +325,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         self.log("train_total", total_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("train_recon", losses["eqm"], on_step=False, on_epoch=True)
         self.log("train_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
-        self.log("train_exist", losses["exist"], on_step=False, on_epoch=True)
+        if self.use_existence_head:
+            self.log("train_exist", losses["exist"], on_step=False, on_epoch=True)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
@@ -352,7 +361,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             self.log("val_total", total_loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("val_recon", losses["eqm"], on_step=False, on_epoch=True)
             self.log("val_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
-            self.log("val_exist", losses["exist"], on_step=False, on_epoch=True)
+            if self.use_existence_head:
+                self.log("val_exist", losses["exist"], on_step=False, on_epoch=True)
         return total_loss.detach()
 
     def on_train_end(self):
@@ -363,14 +373,14 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 "total": self.train_losses,
                 "deg_ce": self.train_deg_ce,
                 "eqm": self.train_recon,
-                "exist": self.train_exist,
+                **({"exist": self.train_exist} if self.use_existence_head else {}),
                 **({"locality": self.train_edge_loss} if self.use_locality_supervision else {}),
             },
             val_metrics={
                 "total": self.val_losses,
                 "deg_ce": self.val_deg_ce,
                 "eqm": self.val_recon,
-                "exist": self.val_exist,
+                **({"exist": self.val_exist} if self.use_existence_head else {}),
                 **({"locality": self.val_edge_loss} if self.use_locality_supervision else {}),
             },
             window=10,
@@ -433,10 +443,13 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 )
             with torch.no_grad():
                 logits_deg = self.degree_head(latent_tokens)
-                logits_exist = self.exist_head(latent_tokens).squeeze(-1)
+                logits_exist = self.exist_head(latent_tokens).squeeze(-1) if self.use_existence_head else None
 
-            exist_probs = torch.sigmoid(logits_exist)
-            x[..., 0] = (exist_probs >= exist_threshold).float()
+            if self.use_existence_head:
+                exist_probs = torch.sigmoid(logits_exist)
+                x[..., 0] = (exist_probs >= exist_threshold).float()
+            else:
+                x[..., 0] = self.constant_existence_value
             self._last_deg_classes = torch.argmax(logits_deg, dim=-1).detach().cpu()
 
         return x.detach()
@@ -494,6 +507,8 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps if sampling_steps is not None else total_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
+        self.use_existence_head = True
+        self.constant_existence_value = 1.0
 
         self.number_of_rows_per_example = None
         self.input_feature_dimension = None
@@ -579,6 +594,13 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
 
         self._fit_scalers(X_array, y_array)
 
+        if node_mask is None:
+            valid_mask = np.zeros((len(node_encodings_list), max_num_rows), dtype=bool)
+            for idx, x in enumerate(node_encodings_list):
+                valid_mask[idx, :x.shape[0]] = True
+        else:
+            valid_mask = np.asarray(node_mask, dtype=bool)
+
         exist_mask = X_array[..., 0] >= 0.5
         ones = int(exist_mask.sum())
         zeros = int(exist_mask.size) - ones
@@ -599,6 +621,23 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         X_scaled, y_scaled = self._transform_data(X_array, y_array)
         self.input_feature_dimension = X_scaled.shape[2]
         self.D_max = int(X_array[..., self.important_feature_index].max())
+        valid_exist_targets = (X_array[..., 0] >= 0.5)[valid_mask]
+        all_same_node_size = len(set(x.shape[0] for x in node_encodings_list)) == 1
+        disable_existence = (
+            all_same_node_size
+            and valid_exist_targets.size > 0
+            and np.all(valid_exist_targets == valid_exist_targets.flat[0])
+        )
+        self.use_existence_head = not disable_existence
+        if disable_existence:
+            self.constant_existence_value = float(valid_exist_targets.flat[0])
+            if self.verbose:
+                print(
+                    "Existence supervision disabled: all training graphs have the same node count "
+                    "and the valid existence target is constant."
+                )
+        else:
+            self.constant_existence_value = 1.0
 
         self.model = EqMConditionalNodeGeneratorModule(
             number_of_rows_per_example=self.number_of_rows_per_example,
@@ -627,6 +666,8 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
             pool_condition_tokens=self.pool_condition_tokens,
         )
         self.model.noise_degree_factor = self.noise_degree_factor
+        self.model.use_existence_head = self.use_existence_head
+        self.model.constant_existence_value = self.constant_existence_value
 
     def fit(
         self,
@@ -754,14 +795,14 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 "total": self.model.train_losses,
                 "deg_ce": self.model.train_deg_ce,
                 "eqm": self.model.train_recon,
-                "exist": self.model.train_exist,
+                **({"exist": self.model.train_exist} if self.model.use_existence_head else {}),
                 **({"locality": self.model.train_edge_loss} if self.model.use_locality_supervision else {}),
             },
             val_metrics={
                 "total": self.model.val_losses,
                 "deg_ce": self.model.val_deg_ce,
                 "eqm": self.model.val_recon,
-                "exist": self.model.val_exist,
+                **({"exist": self.model.val_exist} if self.model.use_existence_head else {}),
                 **({"locality": self.model.val_edge_loss} if self.model.use_locality_supervision else {}),
             },
             window=window,
