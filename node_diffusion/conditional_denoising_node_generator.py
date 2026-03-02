@@ -1505,7 +1505,10 @@ class MetricsLogger(pl.callbacks.Callback):
         pl_module.train_losses.append(m.get("train_total", torch.tensor(0.0)).item())
         pl_module.train_deg_ce.append(m.get("train_deg_ce", torch.tensor(0.0)).item())
         pl_module.train_recon.append(m.get("train_recon", torch.tensor(0.0)).item())
-        pl_module.train_exist.append(m.get("train_exist", torch.tensor(0.0)).item())
+        if hasattr(pl_module, "train_exist"):
+            pl_module.train_exist.append(m.get("train_exist", torch.tensor(0.0)).item())
+        if hasattr(pl_module, "train_label_ce"):
+            pl_module.train_label_ce.append(m.get("train_label_ce", torch.tensor(0.0)).item())
         if pl_module.use_locality_supervision:
             pl_module.train_edge_loss.append(m.get("train_edge_loss", torch.tensor(0.0)).item())
             pl_module.train_edge_acc.append(m.get("train_edge_acc", torch.tensor(0.0)).item())
@@ -1515,7 +1518,10 @@ class MetricsLogger(pl.callbacks.Callback):
         pl_module.val_losses.append(m.get("val_total", torch.tensor(0.0)).item())
         pl_module.val_deg_ce.append(m.get("val_deg_ce", torch.tensor(0.0)).item())
         pl_module.val_recon.append(m.get("val_recon", torch.tensor(0.0)).item())
-        pl_module.val_exist.append(m.get("val_exist", torch.tensor(0.0)).item())
+        if hasattr(pl_module, "val_exist"):
+            pl_module.val_exist.append(m.get("val_exist", torch.tensor(0.0)).item())
+        if hasattr(pl_module, "val_label_ce"):
+            pl_module.val_label_ce.append(m.get("val_label_ce", torch.tensor(0.0)).item())
         if pl_module.use_locality_supervision:
             pl_module.val_edge_loss.append(m.get("val_edge_loss", torch.tensor(0.0)).item())
             pl_module.val_edge_acc.append(m.get("val_edge_acc", torch.tensor(0.0)).item())

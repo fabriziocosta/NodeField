@@ -706,7 +706,8 @@ class ConditionalNodeGeneratorModel(object):
         conditional_graph_encodings: Any,
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
-        node_mask: Optional[np.ndarray] = None
+        node_mask: Optional[np.ndarray] = None,
+        node_label_targets: Optional[List[np.ndarray]] = None,
     ) -> 'ConditionalNodeGeneratorModel':
         if self.verbose:
             print(f"Training conditional model on {len(node_encodings_list)} graphs with {node_encodings_list[0].shape[0]} nodes each.")
@@ -719,25 +720,29 @@ class ConditionalNodeGeneratorModel(object):
                 conditional_graph_encodings=conditional_graph_encodings,
                 edge_pairs=edge_pairs,
                 edge_targets=edge_targets,
-                node_mask=node_mask
+                node_mask=node_mask,
+                node_label_targets=node_label_targets,
             )
             self.conditional_node_generator.fit(
                 node_encodings_list=node_encodings_list,
                 conditional_graph_encodings=conditional_graph_encodings,
                 edge_pairs=edge_pairs,
                 edge_targets=edge_targets,
-                node_mask=node_mask
+                node_mask=node_mask,
+                node_label_targets=node_label_targets,
             )
         else:
             self.conditional_node_generator.setup(
                 node_encodings_list=node_encodings_list,
                 conditional_graph_encodings=conditional_graph_encodings,
-                node_mask=node_mask
+                node_mask=node_mask,
+                node_label_targets=node_label_targets,
             )
             self.conditional_node_generator.fit(
                 node_encodings_list=node_encodings_list,
                 conditional_graph_encodings=conditional_graph_encodings,
-                node_mask=node_mask
+                node_mask=node_mask,
+                node_label_targets=node_label_targets,
             )
 
         return self
@@ -746,11 +751,14 @@ class ConditionalNodeGeneratorModel(object):
     def predict(
         self,
         conditional_graph_encodings: Any,
-        desired_class: Optional[Union[int, Sequence[int]]] = None
+        desired_class: Optional[Union[int, Sequence[int]]] = None,
     ) -> List[np.ndarray]:
         if self.verbose:
             print(f"Predicting node matrices for {len(conditional_graph_encodings)} graphs...")
-        predicted_node_encodings_list = self.conditional_node_generator.predict(conditional_graph_encodings, desired_class=desired_class)
+        predicted_node_encodings_list = self.conditional_node_generator.predict(
+            conditional_graph_encodings,
+            desired_class=desired_class,
+        )
         return predicted_node_encodings_list
     
 # =============================================================================
@@ -777,6 +785,9 @@ class DecompositionalEncoderDecoder(object):
         self.node_embeddings_to_graph_generator = node_embeddings_to_graph_generator
         self.verbose = verbose
         self.use_locality_supervision = use_locality_supervision
+        self.node_label_classes_ = None
+        self.node_label_to_index_ = None
+        self.node_label_histogram_dimension = 0
         if not 0.0 < locality_sample_fraction <= 1.0:
             raise ValueError("locality_sample_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
         self.locality_sample_fraction = locality_sample_fraction
@@ -805,6 +816,8 @@ class DecompositionalEncoderDecoder(object):
         # Fit vectorizers
         self.graph_vectorizer.fit(graphs)
         self.node_graph_vectorizer.fit(graphs)
+        node_label_targets = self.graphs_to_node_label_targets(graphs)
+        self._fit_node_label_vocab(node_label_targets)
 
         # Generate encodings
         node_encodings_list, conditional_graph_encodings = self.encode(graphs)
@@ -832,7 +845,8 @@ class DecompositionalEncoderDecoder(object):
                 conditional_graph_encodings=conditional_graph_encodings,
                 edge_pairs=edge_pairs_for_cond_gen,
                 edge_targets=edge_targets_for_cond_gen,
-                node_mask=node_mask_for_cond_gen # Pass if available/needed
+                node_mask=node_mask_for_cond_gen, # Pass if available/needed
+                node_label_targets=node_label_targets,
             )
 
         if train_node_embeddings_to_graph_generator:
@@ -852,7 +866,13 @@ class DecompositionalEncoderDecoder(object):
         """Transform graphs into global conditioning vectors."""
         if self.verbose:
             print(f"Encoding {len(graphs)} graphs")
-        return self.graph_vectorizer.transform(graphs)
+        cond_encodings = np.asarray(self.graph_vectorizer.transform(graphs))
+        if not self._should_use_node_label_histograms():
+            return cond_encodings
+        histograms = self.graphs_to_node_label_histograms(graphs)
+        if histograms is None:
+            return cond_encodings
+        return self._augment_condition_encodings(cond_encodings, histograms)
 
     def encode(self, graphs: List[nx.Graph]) -> Tuple[List[np.ndarray], Any]:
         """Produce both node-level encodings and their matching conditioning vectors."""
@@ -860,7 +880,74 @@ class DecompositionalEncoderDecoder(object):
         cond_encs = self.graph_encode(graphs)
         return node_encs, cond_encs
 
-    def decode(self, conditioning_vectors: Any, desired_class: Optional[Union[int, Sequence[int]]] = None) -> List[nx.Graph]:
+    def graphs_to_node_label_targets(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
+        """Extract per-node categorical labels in the node ordering used elsewhere."""
+        node_label_targets = []
+        for graph in graphs:
+            node_label_targets.append(np.asarray([graph.nodes[u]["label"] for u in graph.nodes()], dtype=object))
+        return node_label_targets
+
+    def _should_use_node_label_histograms(self) -> bool:
+        generator = getattr(self.conditioning_to_node_embeddings_generator, "conditional_node_generator", None)
+        if generator is None:
+            return False
+        return bool(getattr(generator, "require_embedded_node_label_histogram", False))
+
+    def _fit_node_label_vocab(self, node_label_targets: List[np.ndarray]) -> None:
+        if not self._should_use_node_label_histograms():
+            self.node_label_classes_ = None
+            self.node_label_to_index_ = None
+            self.node_label_histogram_dimension = 0
+            return
+        flat_labels = [label for labels in node_label_targets for label in np.asarray(labels, dtype=object).tolist()]
+        if len(flat_labels) == 0:
+            self.node_label_classes_ = np.asarray([], dtype=object)
+            self.node_label_to_index_ = {}
+            self.node_label_histogram_dimension = 0
+            return
+        self.node_label_classes_ = np.unique(np.asarray(flat_labels, dtype=object))
+        self.node_label_to_index_ = {label: idx for idx, label in enumerate(self.node_label_classes_)}
+        self.node_label_histogram_dimension = int(len(self.node_label_classes_))
+
+    def _augment_condition_encodings(self, cond_encodings: np.ndarray, histograms: np.ndarray) -> np.ndarray:
+        if histograms is None or self.node_label_histogram_dimension == 0:
+            return cond_encodings
+        if cond_encodings.ndim == 2:
+            return np.concatenate([cond_encodings, histograms], axis=1)
+        if cond_encodings.ndim == 3:
+            hist_tokens = np.repeat(histograms[:, None, :], cond_encodings.shape[1], axis=1)
+            return np.concatenate([cond_encodings, hist_tokens], axis=2)
+        raise ValueError(
+            "graph conditioning vectors must have shape (B, C) or (B, M, C); "
+            f"received {cond_encodings.shape}"
+        )
+
+    def graphs_to_node_label_histograms(self, graphs: List[nx.Graph]) -> Optional[np.ndarray]:
+        """Convert graphs into label histograms using the fitted graph-level label vocabulary."""
+        if not self._should_use_node_label_histograms():
+            return None
+        if self.node_label_to_index_ is None:
+            return None
+        histograms = []
+        num_classes = self.node_label_histogram_dimension
+        for labels in self.graphs_to_node_label_targets(graphs):
+            hist = np.zeros(num_classes, dtype=float)
+            if labels.size > 0:
+                for label in labels:
+                    class_idx = self.node_label_to_index_.get(label)
+                    if class_idx is not None:
+                        hist[class_idx] += 1.0
+                total = hist.sum()
+                if total > 0:
+                    hist /= total
+            histograms.append(hist)
+        return np.asarray(histograms, dtype=float)
+
+    def decode(
+        self,
+        conditioning_vectors: Any,
+        desired_class: Optional[Union[int, Sequence[int]]] = None,
+    ) -> List[nx.Graph]:
         """Decode conditioning vectors into reconstructed graphs."""
         if self.verbose:
             print(f"Decoding {len(conditioning_vectors)} conditioning vectors")
@@ -868,7 +955,8 @@ class DecompositionalEncoderDecoder(object):
                 print(f"Using classifier guidance toward class(es): {desired_class}")
         
         node_feats = self.conditioning_to_node_embeddings_generator.predict(
-            conditioning_vectors, desired_class=desired_class
+            conditioning_vectors,
+            desired_class=desired_class,
         )
         return self.node_embeddings_to_graph_generator.decode(node_feats)
 
@@ -881,7 +969,8 @@ class DecompositionalEncoderDecoder(object):
                 print(f"Using classifier guidance toward class(es): {desired_class}")
         
         node_feats = self.conditioning_to_node_embeddings_generator.predict(
-            self._sample_conditions(n_samples), desired_class=desired_class
+            self._sample_conditions(n_samples),
+            desired_class=desired_class,
         )
         return self.node_embeddings_to_graph_generator.decode(node_feats)
 
@@ -900,7 +989,8 @@ class DecompositionalEncoderDecoder(object):
         for i in range(len(graphs)):
             y_i = cond_encs[i]
             node_feats = self.conditioning_to_node_embeddings_generator.predict(
-                y_i, desired_class=desired_class
+                y_i,
+                desired_class=desired_class,
             )
             decoded = self.node_embeddings_to_graph_generator.decode(node_feats)
             results.append(decoded)
@@ -924,8 +1014,8 @@ class DecompositionalEncoderDecoder(object):
         """Interpolate between two graphs by SLERP-ing their condition vectors."""
         ts = np.linspace(t_start, t_end, n_steps)
         results = []
-        emb1 = self.graph_vectorizer.transform([G1])[0]
-        emb2 = self.graph_vectorizer.transform([G2])[0]
+        emb1 = self.graph_encode([G1])[0]
+        emb2 = self.graph_encode([G2])[0]
         for t in ts:
             emb_t = scaled_slerp(emb1, emb2, t)
             results.append(self.decode([emb_t])[0])
@@ -937,7 +1027,7 @@ class DecompositionalEncoderDecoder(object):
         graphs: List[nx.Graph]
     ) -> nx.Graph:
         """Compute a geometric mean graph via the SLERP barycentre of encodings."""
-        Y = np.vstack(self.graph_vectorizer.transform(graphs))
+        Y = np.vstack(self.graph_encode(graphs))
         centroid = scaled_slerp_average(Y)
         return self.decode([centroid])[0]
     

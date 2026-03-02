@@ -29,7 +29,8 @@ class ConditionalNodeGeneratorBase:
         conditional_graph_encodings: Any,
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
-        node_mask: Optional[np.ndarray] = None
+        node_mask: Optional[np.ndarray] = None,
+        node_label_targets: Optional[List[np.ndarray]] = None,
     ):
         raise NotImplementedError("fit() must be implemented by subclasses.")
 

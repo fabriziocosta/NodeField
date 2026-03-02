@@ -119,8 +119,35 @@ For a batch of graphs, the EqM module consumes:
   Shape $(B, N, D)$, padded node features.
 - `global_condition`
   Shape $(B, C)$ or $(B, M, C)$, graph-level conditioning vectors or tokens.
+- `node_label_histogram`
+  Shape $(B, K)$, a normalized histogram over the $K$ categorical node-label classes.
+  In this repository, the histogram is concatenated to the graph-level conditioning vector
+  before scaling, so the effective conditioning input becomes:
+
+$$
+c' = [c ; h]
+$$
+
+  where:
+
+$$
+h_k = \frac{1}{n} \sum_{i=1}^{n} \mathbf{1}[y_i^{\text{label}} = k]
+$$
+
+  and $n$ is the number of valid nodes in the graph.
 - `node_mask`
   Shape $(B, N)$, boolean mask indicating valid node slots.
+
+At training time, the histogram is computed from the true graph node labels.
+Once the label vocabulary is fitted, calling:
+
+```python
+decompositional_encoder_decoder.graph_encode(graphs)
+```
+
+returns conditioning vectors that already include the concatenated node-label histogram.
+The intended generation path is therefore to reuse conditioning vectors extracted from
+real graphs, with the histogram already embedded in them.
 
 ### Outputs
 
@@ -129,6 +156,16 @@ At inference time, the wrapper returns:
 - a list of generated node-feature matrices in original feature scale,
 - optionally with degree channel overwritten by the auxiliary degree head,
 - and node existence channel snapped using the existence head.
+
+Additionally, if node-label supervision is enabled, the wrapper stores the per-node
+predicted categorical labels from the final latent state in:
+
+```python
+eqm_generator.last_predicted_node_label_classes_
+```
+
+These labels are not written directly into the node-feature tensor because node labels
+are categorical metadata, not continuous feature channels in the EqM state.
 
 ## Data Preprocessing
 
@@ -349,6 +386,41 @@ $$
 \mathrm{MaskedCrossEntropy}(\ell^{\text{deg}}, y^{\text{deg}})
 $$
 
+### Node Label Loss
+
+Node labels are categorical and are supervised directly from the graph node attribute
+`label`.
+
+Let:
+
+$$
+y^{\text{label}}_{b,i} \in \{0, \dots, K-1\}
+$$
+
+be the encoded node-label class for node $i$ in graph $b$, and let the node-label
+head produce logits:
+
+$$
+\ell^{\text{label}}_{b,i} \in \mathbb{R}^{K}
+$$
+
+The masked classification loss is:
+
+$$
+\mathcal{L}_{\text{label}}
+=
+\mathrm{MaskedCrossEntropy}(\ell^{\text{label}}, y^{\text{label}})
+$$
+
+This loss is applied only on valid node positions, using the same node mask used by
+the EqM loss.
+
+The implementation logs this term as:
+
+$$
+\texttt{label\_ce}
+$$
+
 ### Locality Supervision Loss
 
 If edge supervision is enabled, pairs of node latents are scored by an edge MLP:
@@ -378,6 +450,8 @@ $$
 +
 \lambda_{\text{deg}} \mathcal{L}_{\text{deg}}
 +
+\lambda_{\text{label}} \mathcal{L}_{\text{label}}
++
 \lambda_{\text{local}} \mathcal{L}_{\text{edge}}
 $$
 
@@ -393,7 +467,13 @@ $$
 \lambda_{\text{exist}} \mathcal{L}_{\text{exist}}
 +
 \lambda_{\text{deg}} \mathcal{L}_{\text{deg}}
++
+\lambda_{\text{label}} \mathcal{L}_{\text{label}}
 $$
+
+If the dataset has a degenerate fixed-size existence target, the implementation disables
+the existence head automatically and drops $\mathcal{L}_{\text{exist}}$ from the
+effective objective.
 
 ## Sampling
 
@@ -449,8 +529,59 @@ After the iterative EqM updates, the model runs one final pass on the final samp
 
 - node existence logits are thresholded and overwrite channel 0,
 - degree logits are converted to class indices and used to overwrite the degree channel after inverse scaling.
+- node-label logits are converted to categorical predictions and stored separately.
 
 This is a practical post-processing step that helps enforce discrete structure.
+
+## Histogram Conditioning Behavior
+
+The important modeling idea is that node-label composition is exposed twice:
+
+1. globally, through the label histogram in the conditioning vector,
+2. locally, through the per-node categorical label head.
+
+So the EqM stage is trained to do both:
+
+- respond to a requested label mixture at graph level,
+- organize node latents so each valid node also carries a predictable discrete label.
+
+In the current code, the first two graph-level conditioning features are already:
+
+$$
+[\text{num\_nodes}, 2 \cdot \text{num\_edges}]
+$$
+
+and the label histogram is appended after those existing graph features, not used as a
+replacement for them.
+
+If the original graph encoding is:
+
+$$
+c \in \mathbb{R}^{C}
+$$
+
+and the histogram has width $K$, then the EqM model actually receives:
+
+$$
+c' \in \mathbb{R}^{C + K}
+$$
+
+or tokenwise:
+
+$$
+c'_{b,m} = [c_{b,m} ; h_b]
+$$
+
+if the conditioning input is tokenized.
+
+In other words, the supported path in the current code is:
+
+1. `graph_encode(graphs)`
+   This extracts graph features from a real graph and concatenates the corresponding
+   empirical node-label histogram automatically.
+
+`EqMConditionalNodeGenerator` no longer supports a separate user-specified histogram
+override at generation time. The histogram is part of the conditioning vector itself.
 
 ## Padding and Masking
 

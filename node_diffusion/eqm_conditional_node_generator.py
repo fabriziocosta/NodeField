@@ -1,5 +1,5 @@
 import contextlib
-from typing import Any, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pytorch_lightning as pl
@@ -7,18 +7,125 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
 
 from .conditional_denoising_node_generator import (
     CrossTransformerEncoderLayer,
     EdgeMLP,
-    GraphWithEdgesDataset,
     MetricsLogger,
-    collate_graph_with_edges,
     plot_metrics,
     suppress_output,
 )
 from .conditional_node_generator_base import ConditionalNodeGeneratorBase
+
+
+class EqMGraphDataset(Dataset):
+    """Dataset carrying graph node features, conditioning, masks, and label targets."""
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        node_mask: np.ndarray,
+        node_label_targets: Optional[np.ndarray] = None,
+    ):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.Y = torch.tensor(Y, dtype=torch.float32)
+        self.node_mask = torch.tensor(node_mask, dtype=torch.bool)
+        self.node_label_targets = None
+        if node_label_targets is not None:
+            self.node_label_targets = torch.tensor(node_label_targets, dtype=torch.long)
+
+    def __len__(self) -> int:
+        return len(self.X)
+
+    def __getitem__(self, idx: int):
+        if self.node_label_targets is None:
+            return self.X[idx], self.Y[idx], self.node_mask[idx]
+        return self.X[idx], self.Y[idx], self.node_mask[idx], self.node_label_targets[idx]
+
+
+class EqMGraphWithEdgesDataset(Dataset):
+    """Dataset carrying locality supervision plus optional node label targets."""
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        edge_pairs: List[Tuple[int, int, int]],
+        edge_targets: np.ndarray,
+        node_mask: np.ndarray,
+        node_label_targets: Optional[np.ndarray] = None,
+    ):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.Y = torch.tensor(Y, dtype=torch.float32)
+        self.node_mask = torch.tensor(node_mask, dtype=torch.bool)
+        self.node_label_targets = None
+        if node_label_targets is not None:
+            self.node_label_targets = torch.tensor(node_label_targets, dtype=torch.long)
+        self.edge_idx_by_graph: Dict[int, List[Tuple[int, int]]] = {b: [] for b in range(len(X))}
+        self.edge_lbl_by_graph: Dict[int, List[float]] = {b: [] for b in range(len(X))}
+        for (b, i, j), lbl in zip(edge_pairs, edge_targets):
+            self.edge_idx_by_graph[b].append((i, j))
+            self.edge_lbl_by_graph[b].append(lbl)
+
+    def __len__(self) -> int:
+        return len(self.X)
+
+    def __getitem__(self, idx: int):
+        edge_idxs = (
+            torch.tensor(self.edge_idx_by_graph[idx], dtype=torch.long)
+            if self.edge_idx_by_graph[idx]
+            else torch.empty((0, 2), dtype=torch.long)
+        )
+        edge_lbls = (
+            torch.tensor(self.edge_lbl_by_graph[idx], dtype=torch.float32)
+            if self.edge_lbl_by_graph[idx]
+            else torch.empty((0,), dtype=torch.float32)
+        )
+        if self.node_label_targets is None:
+            return self.X[idx], self.Y[idx], edge_idxs, edge_lbls, self.node_mask[idx]
+        return self.X[idx], self.Y[idx], edge_idxs, edge_lbls, self.node_mask[idx], self.node_label_targets[idx]
+
+
+def collate_eqm_graph_with_edges(batch):
+    """Batch EqMGraphWithEdgesDataset items into tensors with optional label targets."""
+    xs, ys, masks = [], [], []
+    local_edge_idxs, local_edge_lbls = [], []
+    label_targets = []
+    has_labels = len(batch[0]) == 6
+    for sample in batch:
+        if has_labels:
+            x, y, ei, el, mask, node_labels = sample
+            label_targets.append(node_labels)
+        else:
+            x, y, ei, el, mask = sample
+        xs.append(x)
+        ys.append(y)
+        masks.append(mask)
+        local_edge_idxs.append(ei)
+        local_edge_lbls.append(el)
+    X = torch.stack(xs)
+    Y = torch.stack(ys)
+    M = torch.stack(masks)
+    all_edge_idxs = []
+    all_edge_lbls = []
+    for b, (ei, el) in enumerate(zip(local_edge_idxs, local_edge_lbls)):
+        if ei.numel() == 0:
+            continue
+        b_col = torch.full((ei.size(0), 1), b, dtype=torch.long)
+        all_edge_idxs.append(torch.cat([b_col, ei], dim=1))
+        all_edge_lbls.append(el)
+    if all_edge_idxs:
+        edge_idx = torch.cat(all_edge_idxs, dim=0)
+        edge_lbl = torch.cat(all_edge_lbls, dim=0)
+    else:
+        edge_idx = torch.empty((0, 3), dtype=torch.long)
+        edge_lbl = torch.empty((0,), dtype=torch.float32)
+    if has_labels:
+        label_tensor = torch.stack(label_targets)
+        return X, Y, edge_idx, edge_lbl, M, label_tensor
+    return X, Y, edge_idx, edge_lbl, M
 
 
 class EqMConditionalNodeGeneratorModule(pl.LightningModule):
@@ -42,9 +149,12 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         degree_min_val: float = 0.0,
         degree_range_val: float = 1.0,
         lambda_node_exist_importance: float = 1.0,
+        lambda_node_label_importance: float = 1.0,
         use_locality_supervision: bool = False,
         lambda_locality_importance: float = 1.0,
         exist_pos_weight: Union[torch.Tensor, float] = 1.0,
+        num_node_label_classes: int = 0,
+        use_node_label_head: bool = False,
         eqm_sigma: float = 0.2,
         sampling_step_size: float = 0.05,
         sampling_steps: int = 100,
@@ -77,8 +187,11 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         self.lambda_degree_importance = lambda_degree_importance
         self.degree_temperature = degree_temperature
         self.lambda_node_exist_importance = lambda_node_exist_importance
+        self.lambda_node_label_importance = lambda_node_label_importance
         self.use_locality_supervision = bool(use_locality_supervision)
         self.lambda_locality_importance = lambda_locality_importance
+        self.num_node_label_classes = int(num_node_label_classes)
+        self.use_node_label_head = bool(use_node_label_head and num_node_label_classes > 0)
         self.eqm_sigma = float(eqm_sigma)
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps)
@@ -104,6 +217,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         self.val_loss_all = []
         self.train_exist = []
         self.val_exist = []
+        self.train_label_ce = []
+        self.val_label_ce = []
         self.train_recon = []
         self.val_recon = []
         if self.use_locality_supervision:
@@ -133,6 +248,11 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         )
         self.degree_head = nn.Linear(latent_embedding_dimension, self.max_degree + 1)
         self.exist_head = nn.Linear(latent_embedding_dimension, 1)
+        self.node_label_head = (
+            nn.Linear(latent_embedding_dimension, self.num_node_label_classes)
+            if self.use_node_label_head
+            else None
+        )
         if self.use_locality_supervision:
             self.edge_head = EdgeMLP(
                 latent_dim=latent_embedding_dimension,
@@ -218,6 +338,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         input_examples: torch.Tensor,
         global_condition: torch.Tensor,
         node_mask: Optional[torch.Tensor] = None,
+        node_label_targets: Optional[torch.Tensor] = None,
         *,
         create_graph: bool,
     ) -> Tuple[dict, torch.Tensor]:
@@ -244,6 +365,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         latent_clean = self._encode_with_condition(denoised, global_condition, node_mask=node_mask)
         logits_deg = self.degree_head(latent_clean)
         logits_exist = self.exist_head(latent_clean).squeeze(-1) if self.use_existence_head else None
+        logits_label = self.node_label_head(latent_clean) if self.use_node_label_head else None
 
         if self.use_existence_head:
             target_exist = (input_examples[..., 0] >= 0.5).float()
@@ -275,6 +397,18 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         )
         deg_mask = exist_mask.reshape(-1)
         loss_deg_ce = (deg_loss_map * deg_mask).sum() / deg_mask.sum().clamp_min(1.0)
+        if self.use_node_label_head and node_label_targets is not None:
+            label_valid_mask = node_mask if node_mask is not None else torch.ones_like(node_label_targets, dtype=torch.bool)
+            safe_targets = torch.where(label_valid_mask, node_label_targets, torch.zeros_like(node_label_targets))
+            label_loss_map = F.cross_entropy(
+                logits_label.reshape(-1, self.num_node_label_classes),
+                safe_targets.reshape(-1),
+                reduction="none",
+            ).reshape_as(safe_targets)
+            label_mask = label_valid_mask.to(dtype=label_loss_map.dtype)
+            loss_label_ce = (label_loss_map * label_mask).sum() / label_mask.sum().clamp_min(1.0)
+        else:
+            loss_label_ce = input_examples.new_zeros(())
 
         total_loss = (
             loss_eqm
@@ -282,6 +416,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         )
         if self.use_existence_head:
             total_loss = total_loss + self.lambda_node_exist_importance * loss_exist
+        if self.use_node_label_head:
+            total_loss = total_loss + self.lambda_node_label_importance * loss_label_ce
 
         return (
             {
@@ -289,20 +425,30 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 "eqm": loss_eqm,
                 "exist": loss_exist,
                 "deg_ce": loss_deg_ce,
+                "label_ce": loss_label_ce,
             },
             latent_clean if self.use_locality_supervision else latent_noisy,
         )
 
     def training_step(self, batch, batch_idx):
         if self.use_locality_supervision:
-            input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+            if self.use_node_label_head:
+                input_examples, global_condition, edge_idx, edge_labels, node_mask, node_label_targets = batch
+            else:
+                input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+                node_label_targets = None
         else:
-            input_examples, global_condition, node_mask = batch
+            if self.use_node_label_head:
+                input_examples, global_condition, node_mask, node_label_targets = batch
+            else:
+                input_examples, global_condition, node_mask = batch
+                node_label_targets = None
 
         losses, latent_tokens = self._eqm_loss(
             input_examples,
             global_condition,
             node_mask=node_mask,
+            node_label_targets=node_label_targets,
             create_graph=True,
         )
         total_loss = losses["total"]
@@ -327,19 +473,30 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         self.log("train_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
         if self.use_existence_head:
             self.log("train_exist", losses["exist"], on_step=False, on_epoch=True)
+        if self.use_node_label_head:
+            self.log("train_label_ce", losses["label_ce"], on_step=False, on_epoch=True)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
         with torch.enable_grad():
             if self.use_locality_supervision:
-                input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+                if self.use_node_label_head:
+                    input_examples, global_condition, edge_idx, edge_labels, node_mask, node_label_targets = batch
+                else:
+                    input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+                    node_label_targets = None
             else:
-                input_examples, global_condition, node_mask = batch
+                if self.use_node_label_head:
+                    input_examples, global_condition, node_mask, node_label_targets = batch
+                else:
+                    input_examples, global_condition, node_mask = batch
+                    node_label_targets = None
 
             losses, latent_tokens = self._eqm_loss(
                 input_examples,
                 global_condition,
                 node_mask=node_mask,
+                node_label_targets=node_label_targets,
                 create_graph=False,
             )
             total_loss = losses["total"]
@@ -363,6 +520,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             self.log("val_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
             if self.use_existence_head:
                 self.log("val_exist", losses["exist"], on_step=False, on_epoch=True)
+            if self.use_node_label_head:
+                self.log("val_label_ce", losses["label_ce"], on_step=False, on_epoch=True)
         return total_loss.detach()
 
     def on_train_end(self):
@@ -374,6 +533,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 "deg_ce": self.train_deg_ce,
                 "eqm": self.train_recon,
                 **({"exist": self.train_exist} if self.use_existence_head else {}),
+                **({"label_ce": self.train_label_ce} if self.use_node_label_head else {}),
                 **({"locality": self.train_edge_loss} if self.use_locality_supervision else {}),
             },
             val_metrics={
@@ -381,6 +541,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 "deg_ce": self.val_deg_ce,
                 "eqm": self.val_recon,
                 **({"exist": self.val_exist} if self.use_existence_head else {}),
+                **({"label_ce": self.val_label_ce} if self.use_node_label_head else {}),
                 **({"locality": self.val_edge_loss} if self.use_locality_supervision else {}),
             },
             window=10,
@@ -444,6 +605,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             with torch.no_grad():
                 logits_deg = self.degree_head(latent_tokens)
                 logits_exist = self.exist_head(latent_tokens).squeeze(-1) if self.use_existence_head else None
+                logits_label = self.node_label_head(latent_tokens) if self.use_node_label_head else None
 
             if self.use_existence_head:
                 exist_probs = torch.sigmoid(logits_exist)
@@ -451,6 +613,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             else:
                 x[..., 0] = self.constant_existence_value
             self._last_deg_classes = torch.argmax(logits_deg, dim=-1).detach().cpu()
+            if logits_label is not None:
+                self._last_node_label_classes = torch.argmax(logits_label, dim=-1).detach().cpu()
 
         return x.detach()
 
@@ -474,6 +638,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         noise_degree_factor: float = 2.0,
         degree_temperature: Optional[float] = None,
         lambda_node_exist_importance: float = 1.0,
+        lambda_node_label_importance: float = 1.0,
         default_exist_pos_weight: float = 1.0,
         lambda_locality_importance: float = 1.0,
         use_guidance: bool = False,
@@ -483,6 +648,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         sampling_step_size: float = 0.05,
         sampling_steps: Optional[int] = None,
         langevin_noise_scale: float = 0.0,
+        require_embedded_node_label_histogram: bool = True,
     ):
         self.latent_embedding_dimension = latent_embedding_dimension
         self.number_of_transformer_layers = number_of_transformer_layers
@@ -498,6 +664,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         self.noise_degree_factor = float(noise_degree_factor)
         self.degree_temperature = degree_temperature
         self.lambda_node_exist_importance = lambda_node_exist_importance
+        self.lambda_node_label_importance = lambda_node_label_importance
         self.default_exist_pos_weight = default_exist_pos_weight
         self.lambda_locality_importance = lambda_locality_importance
         self.use_guidance = bool(use_guidance)
@@ -507,8 +674,15 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps if sampling_steps is not None else total_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
+        self.require_embedded_node_label_histogram = bool(require_embedded_node_label_histogram)
         self.use_existence_head = True
         self.constant_existence_value = 1.0
+        self.use_node_label_head = False
+        self.node_label_classes_ = None
+        self.node_label_to_index_ = None
+        self.base_condition_feature_dimension = None
+        self.node_label_histogram_dimension = 0
+        self.last_predicted_node_label_classes_ = None
 
         self.number_of_rows_per_example = None
         self.input_feature_dimension = None
@@ -552,6 +726,74 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         )
         return X_orig
 
+    def _fit_node_label_vocab(self, node_label_targets: List[np.ndarray]) -> None:
+        flat_labels = [label for labels in node_label_targets for label in np.asarray(labels, dtype=object).tolist()]
+        if len(flat_labels) == 0:
+            self.node_label_classes_ = np.asarray([], dtype=object)
+            self.node_label_to_index_ = {}
+            self.use_node_label_head = False
+            self.node_label_histogram_dimension = 0
+            return
+        self.node_label_classes_ = np.unique(np.asarray(flat_labels, dtype=object))
+        self.node_label_to_index_ = {label: idx for idx, label in enumerate(self.node_label_classes_)}
+        self.node_label_histogram_dimension = int(len(self.node_label_classes_))
+        self.use_node_label_head = self.node_label_histogram_dimension > 1
+
+    def _encode_node_label_targets(
+        self,
+        node_label_targets: List[np.ndarray],
+        max_num_rows: int,
+    ) -> np.ndarray:
+        encoded = np.zeros((len(node_label_targets), max_num_rows), dtype=np.int64)
+        for graph_idx, labels in enumerate(node_label_targets):
+            labels = np.asarray(labels, dtype=object)
+            for node_idx, label in enumerate(labels[:max_num_rows]):
+                encoded[graph_idx, node_idx] = self.node_label_to_index_[label]
+        return encoded
+
+    def _compute_node_label_histograms(self, encoded_targets: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
+        histograms = np.zeros((encoded_targets.shape[0], self.node_label_histogram_dimension), dtype=float)
+        if self.node_label_histogram_dimension == 0:
+            return histograms
+        for graph_idx in range(encoded_targets.shape[0]):
+            valid_indices = encoded_targets[graph_idx][valid_mask[graph_idx]]
+            if valid_indices.size == 0:
+                continue
+            counts = np.bincount(valid_indices, minlength=self.node_label_histogram_dimension).astype(float)
+            total = counts.sum()
+            if total > 0:
+                histograms[graph_idx] = counts / total
+        return histograms
+
+    def _condition_encodings_include_histogram(
+        self,
+        y_array: np.ndarray,
+        node_label_histograms: np.ndarray,
+    ) -> bool:
+        if (
+            not self.require_embedded_node_label_histogram
+            or self.node_label_histogram_dimension == 0
+        ):
+            return False
+        if y_array.ndim == 2:
+            if y_array.shape[1] < self.node_label_histogram_dimension:
+                return False
+            return np.allclose(
+                y_array[:, -self.node_label_histogram_dimension :],
+                node_label_histograms,
+                atol=1e-8,
+            )
+        if y_array.ndim == 3:
+            if y_array.shape[2] < self.node_label_histogram_dimension:
+                return False
+            expected_hist = np.repeat(node_label_histograms[:, None, :], y_array.shape[1], axis=1)
+            return np.allclose(
+                y_array[:, :, -self.node_label_histogram_dimension :],
+                expected_hist,
+                atol=1e-8,
+            )
+        return False
+
     def setup(
         self,
         node_encodings_list: List[np.ndarray],
@@ -559,6 +801,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None,
+        node_label_targets: Optional[List[np.ndarray]] = None,
     ):
         effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
         if self.use_locality_supervision and not effective_locality and self.verbose:
@@ -580,19 +823,12 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         y_array = np.array(conditional_graph_encodings)
         if y_array.ndim == 1:
             y_array = y_array[:, None]
-        if y_array.ndim == 2:
-            self.condition_token_count = 1
-            self.condition_feature_dimension = y_array.shape[1]
-        elif y_array.ndim == 3:
-            self.condition_token_count = y_array.shape[1]
-            self.condition_feature_dimension = y_array.shape[2]
-        else:
+        if y_array.ndim not in (2, 3):
             raise ValueError(
                 "conditional_graph_encodings must be array-like of shape (B, C) or (B, M, C); "
                 f"received shape {y_array.shape}"
             )
-
-        self._fit_scalers(X_array, y_array)
+        self.condition_token_count = 1 if y_array.ndim == 2 else y_array.shape[1]
 
         if node_mask is None:
             valid_mask = np.zeros((len(node_encodings_list), max_num_rows), dtype=bool)
@@ -600,6 +836,36 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 valid_mask[idx, :x.shape[0]] = True
         else:
             valid_mask = np.asarray(node_mask, dtype=bool)
+
+        encoded_node_label_targets = None
+        if node_label_targets is not None:
+            self._fit_node_label_vocab(node_label_targets)
+            encoded_node_label_targets = self._encode_node_label_targets(node_label_targets, max_num_rows)
+            if self.node_label_histogram_dimension > 0:
+                histogram_array = self._compute_node_label_histograms(encoded_node_label_targets, valid_mask)
+                already_augmented = self._condition_encodings_include_histogram(y_array, histogram_array)
+                if not already_augmented:
+                    raise ValueError(
+                        "EqMConditionalNodeGenerator expects conditioning vectors that already include "
+                        "the node label histogram extracted from the real graph. Use "
+                        "DecompositionalEncoderDecoder.graph_encode(graphs) or encode(graphs)."
+                    )
+                self.base_condition_feature_dimension = y_array.shape[-1] - self.node_label_histogram_dimension
+            else:
+                self.base_condition_feature_dimension = y_array.shape[-1]
+        else:
+            self.base_condition_feature_dimension = y_array.shape[-1]
+            self.use_node_label_head = False
+            self.node_label_histogram_dimension = 0
+            self.node_label_classes_ = None
+            self.node_label_to_index_ = None
+
+        if y_array.ndim == 2:
+            self.condition_feature_dimension = y_array.shape[1]
+        else:
+            self.condition_feature_dimension = y_array.shape[2]
+
+        self._fit_scalers(X_array, y_array)
 
         exist_mask = X_array[..., 0] >= 0.5
         ones = int(exist_mask.sum())
@@ -656,9 +922,12 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
             degree_min_val=deg_min_val,
             degree_range_val=deg_range_val,
             lambda_node_exist_importance=self.lambda_node_exist_importance,
+            lambda_node_label_importance=self.lambda_node_label_importance,
             use_locality_supervision=effective_locality,
             lambda_locality_importance=self.lambda_locality_importance,
             exist_pos_weight=exist_pos_weight,
+            num_node_label_classes=self.node_label_histogram_dimension,
+            use_node_label_head=self.use_node_label_head,
             eqm_sigma=self.eqm_sigma,
             sampling_step_size=self.sampling_step_size,
             sampling_steps=self.sampling_steps,
@@ -676,6 +945,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None,
+        node_label_targets: Optional[List[np.ndarray]] = None,
     ):
         X_array = np.stack(
             [
@@ -687,25 +957,35 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         y_array = np.array(conditional_graph_encodings)
         if y_array.ndim == 1:
             y_array = y_array[:, None]
-        X_scaled, y_scaled = self._transform_data(X_array, y_array)
-
-        X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
-        y_tensor = torch.tensor(y_scaled, dtype=torch.float32)
         mask_array = np.zeros((len(node_encodings_list), self.number_of_rows_per_example), dtype=bool)
         for index, x in enumerate(node_encodings_list):
             mask_array[index, :x.shape[0]] = True
         if node_mask is not None:
             mask_array = np.asarray(node_mask, dtype=bool)
+        encoded_node_label_targets = None
+        if node_label_targets is not None and self.node_label_histogram_dimension > 0:
+            encoded_node_label_targets = self._encode_node_label_targets(node_label_targets, self.number_of_rows_per_example)
+            histogram_array = self._compute_node_label_histograms(encoded_node_label_targets, mask_array)
+            if not self._condition_encodings_include_histogram(y_array, histogram_array):
+                raise ValueError(
+                    "EqMConditionalNodeGenerator.fit() expects conditioning vectors that already include "
+                    "the node label histogram extracted from the real graph."
+                )
+        X_scaled, y_scaled = self._transform_data(X_array, y_array)
+
+        X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
+        y_tensor = torch.tensor(y_scaled, dtype=torch.float32)
         mask_tensor = torch.tensor(mask_array, dtype=torch.bool)
 
         effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
         if effective_locality:
-            dataset = GraphWithEdgesDataset(
+            dataset = EqMGraphWithEdgesDataset(
                 X_scaled,
                 y_scaled,
                 edge_pairs,
                 edge_targets,
                 mask_array,
+                encoded_node_label_targets,
             )
             dataset_size = len(node_encodings_list)
             train_size = int(0.9 * dataset_size)
@@ -719,16 +999,20 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 train_dataset,
                 batch_size=self.batch_size,
                 shuffle=True,
-                collate_fn=collate_graph_with_edges,
+                collate_fn=collate_eqm_graph_with_edges,
             )
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=self.batch_size,
                 shuffle=False,
-                collate_fn=collate_graph_with_edges,
+                collate_fn=collate_eqm_graph_with_edges,
             )
         else:
-            dataset = TensorDataset(X_tensor, y_tensor, mask_tensor)
+            if encoded_node_label_targets is None:
+                dataset = TensorDataset(X_tensor, y_tensor, mask_tensor)
+            else:
+                label_tensor = torch.tensor(encoded_node_label_targets, dtype=torch.long)
+                dataset = TensorDataset(X_tensor, y_tensor, mask_tensor, label_tensor)
             train_size = int(0.9 * len(dataset))
             val_size = len(dataset) - train_size
             train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
@@ -760,6 +1044,22 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         cond_array = np.asarray(conditional_graph_encodings)
         if cond_array.ndim == 1:
             cond_array = cond_array[:, None]
+        expected_aug_dim = None
+        if cond_array.ndim == 2:
+            expected_aug_dim = self.base_condition_feature_dimension + self.node_label_histogram_dimension
+        elif cond_array.ndim == 3:
+            expected_aug_dim = self.base_condition_feature_dimension + self.node_label_histogram_dimension
+        if (
+            self.require_embedded_node_label_histogram
+            and self.node_label_histogram_dimension > 0
+            and cond_array.shape[-1] != expected_aug_dim
+        ):
+            raise ValueError(
+                "EqMConditionalNodeGenerator.predict() expects conditioning vectors that already include "
+                "the node label histogram extracted from a real graph; "
+                f"expected feature dimension {expected_aug_dim}, "
+                f"received {cond_array.shape[-1]}"
+            )
         if cond_array.ndim == 3:
             cond_scaled = self.y_scaler.transform(
                 cond_array.reshape(-1, cond_array.shape[-1])
@@ -777,12 +1077,23 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
 
         gen_np = generated.detach().cpu().numpy()
         gen_orig = self._inverse_transform_input(gen_np)
+        if not self.model.use_existence_head:
+            for index in range(len(gen_orig)):
+                gen_orig[index][..., 0] = self.constant_existence_value
 
         deg_classes = getattr(self.model, "_last_deg_classes", None)
         if deg_classes is not None:
             deg_classes = deg_classes.cpu().numpy()
             for index in range(len(gen_orig)):
                 gen_orig[index][..., self.important_feature_index] = np.clip(deg_classes[index], 0, None)
+        label_classes = getattr(self.model, "_last_node_label_classes", None)
+        self.last_predicted_node_label_classes_ = None
+        if label_classes is not None and self.node_label_classes_ is not None:
+            label_classes = label_classes.cpu().numpy()
+            self.last_predicted_node_label_classes_ = [
+                self.node_label_classes_[label_classes[index]]
+                for index in range(label_classes.shape[0])
+            ]
 
         return gen_orig
 
@@ -796,6 +1107,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 "deg_ce": self.model.train_deg_ce,
                 "eqm": self.model.train_recon,
                 **({"exist": self.model.train_exist} if self.model.use_existence_head else {}),
+                **({"label_ce": self.model.train_label_ce} if self.model.use_node_label_head else {}),
                 **({"locality": self.model.train_edge_loss} if self.model.use_locality_supervision else {}),
             },
             val_metrics={
@@ -803,6 +1115,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 "deg_ce": self.model.val_deg_ce,
                 "eqm": self.model.val_recon,
                 **({"exist": self.model.val_exist} if self.model.use_existence_head else {}),
+                **({"label_ce": self.model.val_label_ce} if self.model.use_node_label_head else {}),
                 **({"locality": self.model.val_edge_loss} if self.model.use_locality_supervision else {}),
             },
             window=window,
