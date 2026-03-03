@@ -16,6 +16,7 @@ from .conditional_denoising_node_generator import (
     plot_metrics,
     suppress_output,
 )
+from .lightning_utils import run_trainer_fit
 from .conditional_node_generator_base import ConditionalNodeGeneratorBase
 
 
@@ -46,7 +47,7 @@ class EqMGraphDataset(Dataset):
 
 
 class EqMGraphWithEdgesDataset(Dataset):
-    """Dataset carrying locality supervision plus optional node label targets."""
+    """Dataset carrying edge supervision, auxiliary locality, and optional node labels."""
 
     def __init__(
         self,
@@ -54,6 +55,8 @@ class EqMGraphWithEdgesDataset(Dataset):
         Y: np.ndarray,
         edge_pairs: List[Tuple[int, int, int]],
         edge_targets: np.ndarray,
+        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]],
+        auxiliary_edge_targets: Optional[np.ndarray],
         node_mask: np.ndarray,
         node_label_targets: Optional[np.ndarray] = None,
     ):
@@ -68,6 +71,12 @@ class EqMGraphWithEdgesDataset(Dataset):
         for (b, i, j), lbl in zip(edge_pairs, edge_targets):
             self.edge_idx_by_graph[b].append((i, j))
             self.edge_lbl_by_graph[b].append(lbl)
+        self.aux_edge_idx_by_graph: Dict[int, List[Tuple[int, int]]] = {b: [] for b in range(len(X))}
+        self.aux_edge_lbl_by_graph: Dict[int, List[float]] = {b: [] for b in range(len(X))}
+        if auxiliary_edge_pairs is not None and auxiliary_edge_targets is not None:
+            for (b, i, j), lbl in zip(auxiliary_edge_pairs, auxiliary_edge_targets):
+                self.aux_edge_idx_by_graph[b].append((i, j))
+                self.aux_edge_lbl_by_graph[b].append(lbl)
 
     def __len__(self) -> int:
         return len(self.X)
@@ -83,49 +92,63 @@ class EqMGraphWithEdgesDataset(Dataset):
             if self.edge_lbl_by_graph[idx]
             else torch.empty((0,), dtype=torch.float32)
         )
+        aux_edge_idxs = (
+            torch.tensor(self.aux_edge_idx_by_graph[idx], dtype=torch.long)
+            if self.aux_edge_idx_by_graph[idx]
+            else torch.empty((0, 2), dtype=torch.long)
+        )
+        aux_edge_lbls = (
+            torch.tensor(self.aux_edge_lbl_by_graph[idx], dtype=torch.float32)
+            if self.aux_edge_lbl_by_graph[idx]
+            else torch.empty((0,), dtype=torch.float32)
+        )
         if self.node_label_targets is None:
-            return self.X[idx], self.Y[idx], edge_idxs, edge_lbls, self.node_mask[idx]
-        return self.X[idx], self.Y[idx], edge_idxs, edge_lbls, self.node_mask[idx], self.node_label_targets[idx]
+            return self.X[idx], self.Y[idx], edge_idxs, edge_lbls, aux_edge_idxs, aux_edge_lbls, self.node_mask[idx]
+        return self.X[idx], self.Y[idx], edge_idxs, edge_lbls, aux_edge_idxs, aux_edge_lbls, self.node_mask[idx], self.node_label_targets[idx]
 
 
 def collate_eqm_graph_with_edges(batch):
     """Batch EqMGraphWithEdgesDataset items into tensors with optional label targets."""
     xs, ys, masks = [], [], []
     local_edge_idxs, local_edge_lbls = [], []
+    aux_local_edge_idxs, aux_local_edge_lbls = [], []
     label_targets = []
-    has_labels = len(batch[0]) == 6
+    has_labels = len(batch[0]) == 8
     for sample in batch:
         if has_labels:
-            x, y, ei, el, mask, node_labels = sample
+            x, y, ei, el, aux_ei, aux_el, mask, node_labels = sample
             label_targets.append(node_labels)
         else:
-            x, y, ei, el, mask = sample
+            x, y, ei, el, aux_ei, aux_el, mask = sample
         xs.append(x)
         ys.append(y)
         masks.append(mask)
         local_edge_idxs.append(ei)
         local_edge_lbls.append(el)
+        aux_local_edge_idxs.append(aux_ei)
+        aux_local_edge_lbls.append(aux_el)
     X = torch.stack(xs)
     Y = torch.stack(ys)
     M = torch.stack(masks)
-    all_edge_idxs = []
-    all_edge_lbls = []
-    for b, (ei, el) in enumerate(zip(local_edge_idxs, local_edge_lbls)):
-        if ei.numel() == 0:
-            continue
-        b_col = torch.full((ei.size(0), 1), b, dtype=torch.long)
-        all_edge_idxs.append(torch.cat([b_col, ei], dim=1))
-        all_edge_lbls.append(el)
-    if all_edge_idxs:
-        edge_idx = torch.cat(all_edge_idxs, dim=0)
-        edge_lbl = torch.cat(all_edge_lbls, dim=0)
-    else:
-        edge_idx = torch.empty((0, 3), dtype=torch.long)
-        edge_lbl = torch.empty((0,), dtype=torch.float32)
+    def _pack_pairs(per_graph_idxs, per_graph_lbls):
+        all_edge_idxs = []
+        all_edge_lbls = []
+        for b, (ei, el) in enumerate(zip(per_graph_idxs, per_graph_lbls)):
+            if ei.numel() == 0:
+                continue
+            b_col = torch.full((ei.size(0), 1), b, dtype=torch.long)
+            all_edge_idxs.append(torch.cat([b_col, ei], dim=1))
+            all_edge_lbls.append(el)
+        if all_edge_idxs:
+            return torch.cat(all_edge_idxs, dim=0), torch.cat(all_edge_lbls, dim=0)
+        return torch.empty((0, 3), dtype=torch.long), torch.empty((0,), dtype=torch.float32)
+
+    edge_idx, edge_lbl = _pack_pairs(local_edge_idxs, local_edge_lbls)
+    aux_edge_idx, aux_edge_lbl = _pack_pairs(aux_local_edge_idxs, aux_local_edge_lbls)
     if has_labels:
         label_tensor = torch.stack(label_targets)
-        return X, Y, edge_idx, edge_lbl, M, label_tensor
-    return X, Y, edge_idx, edge_lbl, M
+        return X, Y, edge_idx, edge_lbl, aux_edge_idx, aux_edge_lbl, M, label_tensor
+    return X, Y, edge_idx, edge_lbl, aux_edge_idx, aux_edge_lbl, M
 
 
 class EqMConditionalNodeGeneratorModule(pl.LightningModule):
@@ -152,6 +175,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         lambda_node_label_importance: float = 1.0,
         use_locality_supervision: bool = False,
         lambda_locality_importance: float = 1.0,
+        use_auxiliary_locality_supervision: bool = False,
+        lambda_auxiliary_locality_importance: float = 1.0,
         exist_pos_weight: Union[torch.Tensor, float] = 1.0,
         num_node_label_classes: int = 0,
         use_node_label_head: bool = False,
@@ -190,6 +215,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         self.lambda_node_label_importance = lambda_node_label_importance
         self.use_locality_supervision = bool(use_locality_supervision)
         self.lambda_locality_importance = lambda_locality_importance
+        self.use_auxiliary_locality_supervision = bool(use_auxiliary_locality_supervision)
+        self.lambda_auxiliary_locality_importance = lambda_auxiliary_locality_importance
         self.num_node_label_classes = int(num_node_label_classes)
         self.use_node_label_head = bool(use_node_label_head and num_node_label_classes > 0)
         self.eqm_sigma = float(eqm_sigma)
@@ -226,6 +253,11 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             self.val_edge_loss = []
             self.train_edge_acc = []
             self.val_edge_acc = []
+        if self.use_auxiliary_locality_supervision:
+            self.train_aux_edge_loss = []
+            self.val_aux_edge_loss = []
+            self.train_aux_edge_acc = []
+            self.val_aux_edge_acc = []
 
         self.layernorm_in = nn.LayerNorm(input_feature_dimension, elementwise_affine=True)
         self.linear_encoder_input_to_latent = nn.Linear(input_feature_dimension, latent_embedding_dimension)
@@ -259,6 +291,26 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 hidden_dim=2 * latent_embedding_dimension,
                 dropout=transformer_dropout,
             )
+        if self.use_auxiliary_locality_supervision:
+            self.auxiliary_edge_head = EdgeMLP(
+                latent_dim=latent_embedding_dimension,
+                hidden_dim=2 * latent_embedding_dimension,
+                dropout=transformer_dropout,
+            )
+
+    def _compute_edge_probability_matrices(self, latent_tokens: torch.Tensor) -> torch.Tensor:
+        """Evaluate the edge head on every ordered node pair."""
+        batch_size, node_count, latent_dim = latent_tokens.shape
+        src = latent_tokens.unsqueeze(2).expand(batch_size, node_count, node_count, latent_dim)
+        dst = latent_tokens.unsqueeze(1).expand(batch_size, node_count, node_count, latent_dim)
+        edge_logits = self.edge_head(
+            src.reshape(-1, latent_dim),
+            dst.reshape(-1, latent_dim),
+        ).reshape(batch_size, node_count, node_count)
+        edge_probs = torch.sigmoid(edge_logits)
+        diagonal_mask = torch.eye(node_count, dtype=torch.bool, device=latent_tokens.device).unsqueeze(0)
+        edge_probs = edge_probs.masked_fill(diagonal_mask, 0.0)
+        return edge_probs
 
     def _encode_with_condition(
         self,
@@ -433,9 +485,9 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         if self.use_locality_supervision:
             if self.use_node_label_head:
-                input_examples, global_condition, edge_idx, edge_labels, node_mask, node_label_targets = batch
+                input_examples, global_condition, edge_idx, edge_labels, aux_edge_idx, aux_edge_labels, node_mask, node_label_targets = batch
             else:
-                input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+                input_examples, global_condition, edge_idx, edge_labels, aux_edge_idx, aux_edge_labels, node_mask = batch
                 node_label_targets = None
         else:
             if self.use_node_label_head:
@@ -443,6 +495,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             else:
                 input_examples, global_condition, node_mask = batch
                 node_label_targets = None
+            aux_edge_idx = torch.empty((0, 3), dtype=torch.long, device=input_examples.device)
+            aux_edge_labels = torch.empty((0,), dtype=torch.float32, device=input_examples.device)
 
         losses, latent_tokens = self._eqm_loss(
             input_examples,
@@ -468,6 +522,21 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             self.log("train_edge_loss", edge_loss, on_step=False, on_epoch=True)
             self.log("train_edge_acc", edge_acc, on_step=False, on_epoch=True)
 
+        if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
+            b, i, j = aux_edge_idx.unbind(1)
+            h_i = latent_tokens[b, i]
+            h_j = latent_tokens[b, j]
+            aux_edge_logits = self.auxiliary_edge_head(h_i, h_j)
+            aux_edge_loss = F.binary_cross_entropy_with_logits(aux_edge_logits, aux_edge_labels)
+            total_loss = total_loss + self.lambda_auxiliary_locality_importance * aux_edge_loss
+
+            with torch.no_grad():
+                aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
+                aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
+
+            self.log("train_aux_edge_loss", aux_edge_loss, on_step=False, on_epoch=True)
+            self.log("train_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True)
+
         self.log("train_total", total_loss, on_step=False, on_epoch=True, prog_bar=True)
         self.log("train_recon", losses["eqm"], on_step=False, on_epoch=True)
         self.log("train_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
@@ -481,9 +550,9 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         with torch.enable_grad():
             if self.use_locality_supervision:
                 if self.use_node_label_head:
-                    input_examples, global_condition, edge_idx, edge_labels, node_mask, node_label_targets = batch
+                    input_examples, global_condition, edge_idx, edge_labels, aux_edge_idx, aux_edge_labels, node_mask, node_label_targets = batch
                 else:
-                    input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+                    input_examples, global_condition, edge_idx, edge_labels, aux_edge_idx, aux_edge_labels, node_mask = batch
                     node_label_targets = None
             else:
                 if self.use_node_label_head:
@@ -491,6 +560,8 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 else:
                     input_examples, global_condition, node_mask = batch
                     node_label_targets = None
+                aux_edge_idx = torch.empty((0, 3), dtype=torch.long, device=input_examples.device)
+                aux_edge_labels = torch.empty((0,), dtype=torch.float32, device=input_examples.device)
 
             losses, latent_tokens = self._eqm_loss(
                 input_examples,
@@ -515,6 +586,20 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 self.log("val_edge_loss", edge_loss, on_step=False, on_epoch=True)
                 self.log("val_edge_acc", edge_acc, on_step=False, on_epoch=True)
 
+            if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
+                b, i, j = aux_edge_idx.unbind(1)
+                h_i = latent_tokens[b, i]
+                h_j = latent_tokens[b, j]
+                aux_edge_logits = self.auxiliary_edge_head(h_i, h_j)
+                aux_edge_loss = F.binary_cross_entropy_with_logits(aux_edge_logits, aux_edge_labels)
+                total_loss = total_loss + self.lambda_auxiliary_locality_importance * aux_edge_loss
+
+                aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
+                aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
+
+                self.log("val_aux_edge_loss", aux_edge_loss, on_step=False, on_epoch=True)
+                self.log("val_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True)
+
             self.log("val_total", total_loss, on_step=False, on_epoch=True, prog_bar=True)
             self.log("val_recon", losses["eqm"], on_step=False, on_epoch=True)
             self.log("val_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
@@ -535,6 +620,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 **({"exist": self.train_exist} if self.use_existence_head else {}),
                 **({"label_ce": self.train_label_ce} if self.use_node_label_head else {}),
                 **({"locality": self.train_edge_loss} if self.use_locality_supervision else {}),
+                **({"aux_locality": self.train_aux_edge_loss} if self.use_auxiliary_locality_supervision else {}),
             },
             val_metrics={
                 "total": self.val_losses,
@@ -543,6 +629,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
                 **({"exist": self.val_exist} if self.use_existence_head else {}),
                 **({"label_ce": self.val_label_ce} if self.use_node_label_head else {}),
                 **({"locality": self.val_edge_loss} if self.use_locality_supervision else {}),
+                **({"aux_locality": self.val_aux_edge_loss} if self.use_auxiliary_locality_supervision else {}),
             },
             window=10,
             alpha=0.1,
@@ -571,6 +658,7 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
         eta = self.sampling_step_size
         batch_size = global_condition.size(0)
         device = global_condition.device
+        self._last_edge_probability_matrices = None
 
         node_mask = None
         x = torch.randn(
@@ -615,6 +703,9 @@ class EqMConditionalNodeGeneratorModule(pl.LightningModule):
             self._last_deg_classes = torch.argmax(logits_deg, dim=-1).detach().cpu()
             if logits_label is not None:
                 self._last_node_label_classes = torch.argmax(logits_label, dim=-1).detach().cpu()
+            if self.use_locality_supervision:
+                edge_probs = self._compute_edge_probability_matrices(latent_tokens)
+                self._last_edge_probability_matrices = edge_probs.detach().cpu()
 
         return x.detach()
 
@@ -641,6 +732,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         lambda_node_label_importance: float = 1.0,
         default_exist_pos_weight: float = 1.0,
         lambda_locality_importance: float = 1.0,
+        lambda_auxiliary_locality_importance: float = 1.0,
         use_guidance: bool = False,
         pool_condition_tokens: bool = False,
         use_locality_supervision: bool = False,
@@ -667,6 +759,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         self.lambda_node_label_importance = lambda_node_label_importance
         self.default_exist_pos_weight = default_exist_pos_weight
         self.lambda_locality_importance = lambda_locality_importance
+        self.lambda_auxiliary_locality_importance = lambda_auxiliary_locality_importance
         self.use_guidance = bool(use_guidance)
         self.pool_condition_tokens = bool(pool_condition_tokens)
         self.use_locality_supervision = bool(use_locality_supervision)
@@ -683,6 +776,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         self.base_condition_feature_dimension = None
         self.node_label_histogram_dimension = 0
         self.last_predicted_node_label_classes_ = None
+        self.last_predicted_edge_probability_matrices_ = None
 
         self.number_of_rows_per_example = None
         self.input_feature_dimension = None
@@ -800,15 +894,23 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         conditional_graph_encodings: Any,
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
+        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        auxiliary_edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None,
         node_label_targets: Optional[List[np.ndarray]] = None,
     ):
         effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
+        effective_auxiliary_locality = (
+            auxiliary_edge_pairs is not None and auxiliary_edge_targets is not None
+        )
         if self.use_locality_supervision and not effective_locality and self.verbose:
             print("Locality supervision requested but edge_pairs/edge_targets not provided; continuing without it.")
         if not effective_locality:
             edge_pairs = None
             edge_targets = None
+        if not effective_auxiliary_locality:
+            auxiliary_edge_pairs = None
+            auxiliary_edge_targets = None
 
         max_num_rows = max(x.shape[0] for x in node_encodings_list)
         self.number_of_rows_per_example = max_num_rows
@@ -925,6 +1027,8 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
             lambda_node_label_importance=self.lambda_node_label_importance,
             use_locality_supervision=effective_locality,
             lambda_locality_importance=self.lambda_locality_importance,
+            use_auxiliary_locality_supervision=effective_auxiliary_locality,
+            lambda_auxiliary_locality_importance=self.lambda_auxiliary_locality_importance,
             exist_pos_weight=exist_pos_weight,
             num_node_label_classes=self.node_label_histogram_dimension,
             use_node_label_head=self.use_node_label_head,
@@ -944,6 +1048,8 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         conditional_graph_encodings: Any,
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
+        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        auxiliary_edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None,
         node_label_targets: Optional[List[np.ndarray]] = None,
     ):
@@ -978,12 +1084,17 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         mask_tensor = torch.tensor(mask_array, dtype=torch.bool)
 
         effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
+        effective_auxiliary_locality = (
+            auxiliary_edge_pairs is not None and auxiliary_edge_targets is not None
+        )
         if effective_locality:
             dataset = EqMGraphWithEdgesDataset(
                 X_scaled,
                 y_scaled,
                 edge_pairs,
                 edge_targets,
+                auxiliary_edge_pairs,
+                auxiliary_edge_targets,
                 mask_array,
                 encoded_node_label_targets,
             )
@@ -1028,9 +1139,21 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
         )
         if not self.verbose:
             with suppress_output():
-                trainer.fit(self.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+                run_trainer_fit(
+                    trainer,
+                    self.model,
+                    train_loader,
+                    val_loader,
+                    context=f"{self.__class__.__name__}.fit",
+                )
         else:
-            trainer.fit(self.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+            run_trainer_fit(
+                trainer,
+                self.model,
+                train_loader,
+                val_loader,
+                context=f"{self.__class__.__name__}.fit",
+            )
 
     def predict(
         self,
@@ -1094,6 +1217,14 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 self.node_label_classes_[label_classes[index]]
                 for index in range(label_classes.shape[0])
             ]
+        edge_probability_matrices = getattr(self.model, "_last_edge_probability_matrices", None)
+        self.last_predicted_edge_probability_matrices_ = None
+        if edge_probability_matrices is not None:
+            edge_probability_matrices = edge_probability_matrices.cpu().numpy()
+            self.last_predicted_edge_probability_matrices_ = [
+                edge_probability_matrices[index]
+                for index in range(edge_probability_matrices.shape[0])
+            ]
 
         return gen_orig
 
@@ -1109,6 +1240,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 **({"exist": self.model.train_exist} if self.model.use_existence_head else {}),
                 **({"label_ce": self.model.train_label_ce} if self.model.use_node_label_head else {}),
                 **({"locality": self.model.train_edge_loss} if self.model.use_locality_supervision else {}),
+                **({"aux_locality": self.model.train_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
             },
             val_metrics={
                 "total": self.model.val_losses,
@@ -1117,6 +1249,7 @@ class EqMConditionalNodeGenerator(ConditionalNodeGeneratorBase):
                 **({"exist": self.model.val_exist} if self.model.use_existence_head else {}),
                 **({"label_ce": self.model.val_label_ce} if self.model.use_node_label_head else {}),
                 **({"locality": self.model.val_edge_loss} if self.model.use_locality_supervision else {}),
+                **({"aux_locality": self.model.val_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
             },
             window=window,
             alpha=alpha,

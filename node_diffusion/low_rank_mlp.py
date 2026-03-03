@@ -13,6 +13,8 @@ from sklearn.preprocessing import MinMaxScaler # Import MinMaxScaler
 import contextlib
 import logging
 
+from .lightning_utils import run_trainer_fit
+
 ############################################
 # Custom low‐rank linear layer (LowRankLinear)
 ############################################
@@ -355,11 +357,23 @@ class LowRankMLP(BaseEstimator, ClassifierMixin):
             log = logging.getLogger('pytorch_lightning'); prev = log.level; log.setLevel(logging.ERROR)
             with open(os.devnull, 'w') as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
                 trainer = pl.Trainer(logger=False, **trainer_kwargs)
-                trainer.fit(self.module_, tr_ld, vl_ld)
+                run_trainer_fit(
+                    trainer,
+                    self.module_,
+                    tr_ld,
+                    vl_ld,
+                    context=f"{self.__class__.__name__}.fit",
+                )
             log.setLevel(prev)
         else:
             trainer = pl.Trainer(**trainer_kwargs)
-            trainer.fit(self.module_, tr_ld, vl_ld)
+            run_trainer_fit(
+                trainer,
+                self.module_,
+                tr_ld,
+                vl_ld,
+                context=f"{self.__class__.__name__}.fit",
+            )
 
         # 8. Record state & return
         self._epochs_trained_ = trainer.current_epoch

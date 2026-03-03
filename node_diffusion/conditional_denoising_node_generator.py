@@ -11,6 +11,8 @@ from typing import Dict, Sequence, Optional, Union, Tuple, List, Any
 import math
 from sklearn.model_selection import train_test_split
 
+from .lightning_utils import run_trainer_fit
+
 # --- Utility Context Manager ---
 @contextlib.contextmanager
 def suppress_output():
@@ -339,6 +341,8 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
                  lambda_node_exist_importance: float = 1.0,
                  use_locality_supervision: bool = False,
                  lambda_locality_importance: float = 1.0,
+                 use_auxiliary_locality_supervision: bool = False,
+                 lambda_auxiliary_locality_importance: float = 1.0,
                  exist_pos_weight: Union[torch.Tensor, float] = 1.0,
                  use_guidance: bool = False,
                  guidance_weight: float = 1.0,
@@ -350,6 +354,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self.save_hyperparameters(ignore=['verbose'])
         # Must set use_locality_supervision _before_ we refer to it below:
         self.use_locality_supervision = use_locality_supervision
+        self.use_auxiliary_locality_supervision = use_auxiliary_locality_supervision
 
         self.number_of_rows_per_example = number_of_rows_per_example
         self.input_feature_dimension = input_feature_dimension
@@ -411,6 +416,11 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             self.val_edge_loss   = []
             self.train_edge_acc = []
             self.val_edge_acc = []
+        if self.use_auxiliary_locality_supervision:
+            self.train_aux_edge_loss = []
+            self.val_aux_edge_loss = []
+            self.train_aux_edge_acc = []
+            self.val_aux_edge_acc = []
 
         # Model layers
         self.layernorm_in = nn.LayerNorm(input_feature_dimension, elementwise_affine=True)
@@ -430,12 +440,33 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self.degree_head = nn.Linear(latent_embedding_dimension, max_degree + 1)
         self.exist_head = nn.Linear(latent_embedding_dimension, 1)
         self.lambda_locality_importance = lambda_locality_importance
+        self.lambda_auxiliary_locality_importance = lambda_auxiliary_locality_importance
         if self.use_locality_supervision:
             self.edge_head = EdgeMLP(
                 latent_dim=latent_embedding_dimension,
                 hidden_dim=2 * latent_embedding_dimension,
                 dropout=transformer_dropout
             )
+        if self.use_auxiliary_locality_supervision:
+            self.auxiliary_edge_head = EdgeMLP(
+                latent_dim=latent_embedding_dimension,
+                hidden_dim=2 * latent_embedding_dimension,
+                dropout=transformer_dropout
+            )
+
+    def _compute_edge_probability_matrices(self, latent_tokens: torch.Tensor) -> torch.Tensor:
+        """Evaluate the edge head on every ordered node pair."""
+        batch_size, node_count, latent_dim = latent_tokens.shape
+        src = latent_tokens.unsqueeze(2).expand(batch_size, node_count, node_count, latent_dim)
+        dst = latent_tokens.unsqueeze(1).expand(batch_size, node_count, node_count, latent_dim)
+        edge_logits = self.edge_head(
+            src.reshape(-1, latent_dim),
+            dst.reshape(-1, latent_dim),
+        ).reshape(batch_size, node_count, node_count)
+        edge_probs = torch.sigmoid(edge_logits)
+        diagonal_mask = torch.eye(node_count, dtype=torch.bool, device=latent_tokens.device).unsqueeze(0)
+        edge_probs = edge_probs.masked_fill(diagonal_mask, 0.0)
+        return edge_probs
 
     # -----------------------------------------------------------------------
     # Diffusion schedule helpers
@@ -673,9 +704,11 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Run one optimisation step, optionally including locality supervision."""
         if self.use_locality_supervision:
-            input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+            input_examples, global_condition, edge_idx, edge_labels, aux_edge_idx, aux_edge_labels, node_mask = batch
         else:
             input_examples, global_condition = batch
+            aux_edge_idx = torch.empty((0, 3), dtype=torch.long, device=input_examples.device)
+            aux_edge_labels = torch.empty((0,), dtype=torch.float32, device=input_examples.device)
 
         diffusion_time_step = torch.rand(input_examples.size(0), 1, device=self.device)
 
@@ -713,6 +746,21 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             self.log("train_edge_loss", edge_loss, on_step=False, on_epoch=True)
             self.log("train_edge_acc", edge_acc, on_step=False, on_epoch=True)
 
+        if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
+            b, i, j = aux_edge_idx.unbind(1)
+            h_i = latent_tokens[b, i]
+            h_j = latent_tokens[b, j]
+            aux_edge_logits = self.auxiliary_edge_head(h_i, h_j)
+            aux_edge_loss = F.binary_cross_entropy_with_logits(aux_edge_logits, aux_edge_labels)
+            total_loss = total_loss + self.lambda_auxiliary_locality_importance * aux_edge_loss
+
+            with torch.no_grad():
+                aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
+                aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
+
+            self.log("train_aux_edge_loss", aux_edge_loss, on_step=False, on_epoch=True)
+            self.log("train_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True)
+
         # ───────────────────────────────
         # Log and return
         # ───────────────────────────────
@@ -725,9 +773,11 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """Evaluate a batch without gradient updates, mirroring the training step logic."""
         if self.use_locality_supervision:
-            input_examples, global_condition, edge_idx, edge_labels, node_mask = batch
+            input_examples, global_condition, edge_idx, edge_labels, aux_edge_idx, aux_edge_labels, node_mask = batch
         else:
             input_examples, global_condition = batch
+            aux_edge_idx = torch.empty((0, 3), dtype=torch.long, device=input_examples.device)
+            aux_edge_labels = torch.empty((0,), dtype=torch.float32, device=input_examples.device)
 
         diffusion_time_step = torch.rand(input_examples.size(0), 1, device=self.device)
 
@@ -764,6 +814,21 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             self.log("val_edge_loss", edge_loss, on_step=False, on_epoch=True)
             self.log("val_edge_acc", edge_acc, on_step=False, on_epoch=True)
 
+        if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
+            b, i, j = aux_edge_idx.unbind(1)
+            h_i = latent_tokens[b, i]
+            h_j = latent_tokens[b, j]
+            aux_edge_logits = self.auxiliary_edge_head(h_i, h_j)
+            aux_edge_loss = F.binary_cross_entropy_with_logits(aux_edge_logits, aux_edge_labels)
+            total_loss = total_loss + self.lambda_auxiliary_locality_importance * aux_edge_loss
+
+            with torch.no_grad():
+                aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
+                aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
+
+            self.log("val_aux_edge_loss", aux_edge_loss, on_step=False, on_epoch=True)
+            self.log("val_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True)
+
         # ───────────────────────────────
         # Log and return
         # ───────────────────────────────
@@ -783,14 +848,16 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
                 "deg_ce": self.train_deg_ce,
                 "recon": self.train_recon,   # updated
                 "exist": self.train_exist,
-                **({"locality": self.train_edge_loss} if self.use_locality_supervision else {})
+                **({"locality": self.train_edge_loss} if self.use_locality_supervision else {}),
+                **({"aux_locality": self.train_aux_edge_loss} if self.use_auxiliary_locality_supervision else {}),
             },
             val_metrics={
                 "total": self.val_losses,
                 "deg_ce": self.val_deg_ce,
                 "recon": self.val_recon,     # updated
                 "exist": self.val_exist,
-                **({"locality": self.val_edge_loss} if self.use_locality_supervision else {})
+                **({"locality": self.val_edge_loss} if self.use_locality_supervision else {}),
+                **({"aux_locality": self.val_aux_edge_loss} if self.use_auxiliary_locality_supervision else {}),
             },
             window=10,
             alpha=0.1
@@ -903,6 +970,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
         self._ensure_schedule_metadata()
         B = global_condition.size(0)
         device = global_condition.device
+        self._last_edge_probability_matrices = None
 
         # --- sigma schedule consistent with training metadata ---
         sigmas = self._build_sigma_schedule(total_steps=total_steps, device=device)  # (T,)
@@ -959,7 +1027,7 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
             sigma_proj = sigmas[-1]
             t0 = self._t_from_sigma(sigma_proj).expand(B, 1)
             with torch.no_grad():
-                _, logits_deg, logits_exist, _, _, _ = self.forward(
+                _, logits_deg, logits_exist, latent_tokens, _, _ = self.forward(
                     x, global_condition, t0, return_latents=True, add_noise=False
                 )
 
@@ -973,6 +1041,9 @@ class IterativeDenoisingAutoencoderTransformerModel(pl.LightningModule):
 
             # Store degree classes so the wrapper can apply them after inverse transform if desired.
             self._last_deg_classes = deg_classes.detach().cpu()
+            if self.use_locality_supervision:
+                edge_probs = self._compute_edge_probability_matrices(latent_tokens)
+                self._last_edge_probability_matrices = edge_probs.detach().cpu()
 
         return x
 
@@ -999,6 +1070,8 @@ class GraphWithEdgesDataset(Dataset):
         Y: np.ndarray,                    # (B, C)
         edge_pairs: List[Tuple[int, int, int]],
         edge_targets: np.ndarray,
+        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        auxiliary_edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None   # (B, N) boolean
     ):
         self.X = torch.tensor(X, dtype=torch.float32)
@@ -1012,12 +1085,18 @@ class GraphWithEdgesDataset(Dataset):
         for (b, i, j), lbl in zip(edge_pairs, edge_targets):
             self.edge_idx_by_graph[b].append((i, j))
             self.edge_lbl_by_graph[b].append(lbl)
+        self.aux_edge_idx_by_graph = {b: [] for b in range(len(X))}
+        self.aux_edge_lbl_by_graph = {b: [] for b in range(len(X))}
+        if auxiliary_edge_pairs is not None and auxiliary_edge_targets is not None:
+            for (b, i, j), lbl in zip(auxiliary_edge_pairs, auxiliary_edge_targets):
+                self.aux_edge_idx_by_graph[b].append((i, j))
+                self.aux_edge_lbl_by_graph[b].append(lbl)
 
     def __len__(self) -> int:
         """Return the number of graph instances bundled in the dataset."""
         return len(self.X)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return node features, condition vector, locality pairs, and mask for one graph."""
         x = self.X[idx]  # (N, D)
         y = self.Y[idx]  # (C,)
@@ -1026,8 +1105,10 @@ class GraphWithEdgesDataset(Dataset):
         # Get edges and labels for this graph
         edge_idxs = torch.tensor(self.edge_idx_by_graph[idx], dtype=torch.long) if self.edge_idx_by_graph[idx] else torch.empty((0, 2), dtype=torch.long)
         edge_lbls = torch.tensor(self.edge_lbl_by_graph[idx], dtype=torch.float32) if self.edge_lbl_by_graph[idx] else torch.empty((0,), dtype=torch.float32)
-        
-        return x, y, edge_idxs, edge_lbls, mask
+        aux_edge_idxs = torch.tensor(self.aux_edge_idx_by_graph[idx], dtype=torch.long) if self.aux_edge_idx_by_graph[idx] else torch.empty((0, 2), dtype=torch.long)
+        aux_edge_lbls = torch.tensor(self.aux_edge_lbl_by_graph[idx], dtype=torch.float32) if self.aux_edge_lbl_by_graph[idx] else torch.empty((0,), dtype=torch.float32)
+
+        return x, y, edge_idxs, edge_lbls, aux_edge_idxs, aux_edge_lbls, mask
 
 def collate_graph_with_edges(batch):
     """Batch GraphWithEdgesDataset samples into tensors ready for Lightning loaders.
@@ -1041,31 +1122,35 @@ def collate_graph_with_edges(batch):
     """
     xs, ys, masks = [], [], []
     local_edge_idxs, local_edge_lbls = [], []
-    for x, y, ei, el, mask in batch:
+    aux_local_edge_idxs, aux_local_edge_lbls = [], []
+    for x, y, ei, el, aux_ei, aux_el, mask in batch:
         xs.append(x)
         ys.append(y)
         masks.append(mask)
         local_edge_idxs.append(ei)
         local_edge_lbls.append(el)
+        aux_local_edge_idxs.append(aux_ei)
+        aux_local_edge_lbls.append(aux_el)
     X = torch.stack(xs)         # (B, N, D)
     Y = torch.stack(ys)         # (B, C)
     M = torch.stack(masks)      # (B, N)
-    all_edge_idxs = []
-    all_edge_lbls = []
-    for b, (ei, el) in enumerate(zip(local_edge_idxs, local_edge_lbls)):
-        if ei.numel() == 0:
-            continue
-        b_col = torch.full((ei.size(0), 1), b, dtype=torch.long)
-        global_idx = torch.cat([b_col, ei], dim=1)  # (E_b, 3)
-        all_edge_idxs.append(global_idx)
-        all_edge_lbls.append(el)
-    if all_edge_idxs:
-        edge_idx = torch.cat(all_edge_idxs, dim=0)
-        edge_lbl = torch.cat(all_edge_lbls, dim=0)
-    else:
-        edge_idx = torch.empty((0, 3), dtype=torch.long)
-        edge_lbl = torch.empty((0,), dtype=torch.float32)
-    return X, Y, edge_idx, edge_lbl, M
+    def _pack_pairs(per_graph_idxs, per_graph_lbls):
+        all_edge_idxs = []
+        all_edge_lbls = []
+        for b, (ei, el) in enumerate(zip(per_graph_idxs, per_graph_lbls)):
+            if ei.numel() == 0:
+                continue
+            b_col = torch.full((ei.size(0), 1), b, dtype=torch.long)
+            global_idx = torch.cat([b_col, ei], dim=1)
+            all_edge_idxs.append(global_idx)
+            all_edge_lbls.append(el)
+        if all_edge_idxs:
+            return torch.cat(all_edge_idxs, dim=0), torch.cat(all_edge_lbls, dim=0)
+        return torch.empty((0, 3), dtype=torch.long), torch.empty((0,), dtype=torch.float32)
+
+    edge_idx, edge_lbl = _pack_pairs(local_edge_idxs, local_edge_lbls)
+    aux_edge_idx, aux_edge_lbl = _pack_pairs(aux_local_edge_idxs, aux_local_edge_lbls)
+    return X, Y, edge_idx, edge_lbl, aux_edge_idx, aux_edge_lbl, M
 
 class ConditionalNodeGenerator:
     """Scikit-learn friendly façade around the conditional diffusion pipeline.
@@ -1125,6 +1210,7 @@ class ConditionalNodeGenerator:
                  lambda_node_exist_importance: float = 1.0,
                  default_exist_pos_weight: float = 1.0,
                  lambda_locality_importance: float = 1.0,
+                 lambda_auxiliary_locality_importance: float = 1.0,
                  use_guidance: bool = False,
                  pool_condition_tokens: bool = False,
                  use_locality_supervision: bool = False
@@ -1145,6 +1231,7 @@ class ConditionalNodeGenerator:
         self.lambda_node_exist_importance = lambda_node_exist_importance
         self.default_exist_pos_weight = default_exist_pos_weight
         self.lambda_locality_importance = lambda_locality_importance
+        self.lambda_auxiliary_locality_importance = lambda_auxiliary_locality_importance
         self.use_guidance = use_guidance
         self.pool_condition_tokens = bool(pool_condition_tokens)
         self.use_locality_supervision = bool(use_locality_supervision)
@@ -1158,6 +1245,7 @@ class ConditionalNodeGenerator:
         self.D_max = None
         self.condition_token_count = 1
         self.condition_feature_dimension = None
+        self.last_predicted_edge_probability_matrices_ = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # <-- FIXED
 
     def _fit_scalers(self, X_array, y_array):
@@ -1210,15 +1298,23 @@ class ConditionalNodeGenerator:
         conditional_graph_encodings: Any,
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
+        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        auxiliary_edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None
     ):
         """Prepare scalers, metadata, and the underlying Lightning module for training."""
         effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
+        effective_auxiliary_locality = (
+            auxiliary_edge_pairs is not None and auxiliary_edge_targets is not None
+        )
         if self.use_locality_supervision and not effective_locality and self.verbose:
             print("Locality supervision requested but edge_pairs/edge_targets not provided; continuing without it.")
         if not effective_locality:
             edge_pairs = None
             edge_targets = None
+        if not effective_auxiliary_locality:
+            auxiliary_edge_pairs = None
+            auxiliary_edge_targets = None
 
         max_num_rows = max(x.shape[0] for x in node_encodings_list)
         self.number_of_rows_per_example = max_num_rows
@@ -1302,6 +1398,8 @@ class ConditionalNodeGenerator:
             lambda_node_exist_importance=self.lambda_node_exist_importance,
             use_locality_supervision=effective_locality,
             lambda_locality_importance=self.lambda_locality_importance,
+            use_auxiliary_locality_supervision=effective_auxiliary_locality,
+            lambda_auxiliary_locality_importance=self.lambda_auxiliary_locality_importance,
             exist_pos_weight=exist_pos_weight,
             use_guidance=self.use_guidance,      # NEW
             guidance_weight=1.0,                 # tweak as needed
@@ -1316,6 +1414,8 @@ class ConditionalNodeGenerator:
         conditional_graph_encodings: Any,
         edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         edge_targets: Optional[np.ndarray] = None,
+        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        auxiliary_edge_targets: Optional[np.ndarray] = None,
         node_mask: Optional[np.ndarray] = None
     ):
         """Train the diffusion model, optionally consuming locality supervision pairs."""
@@ -1329,6 +1429,9 @@ class ConditionalNodeGenerator:
         X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
         y_tensor = torch.tensor(y_scaled, dtype=torch.float32)
         effective_locality = self.use_locality_supervision and edge_pairs is not None and edge_targets is not None
+        effective_auxiliary_locality = (
+            auxiliary_edge_pairs is not None and auxiliary_edge_targets is not None
+        )
         if not effective_locality:
             edge_pairs = None
             edge_targets = None
@@ -1345,7 +1448,9 @@ class ConditionalNodeGenerator:
                 y_scaled,
                 edge_pairs,
                 edge_targets,
-                node_mask_arr
+                auxiliary_edge_pairs=auxiliary_edge_pairs,
+                auxiliary_edge_targets=auxiliary_edge_targets,
+                node_mask=node_mask_arr,
             )
             
             # Split into train/val
@@ -1392,9 +1497,21 @@ class ConditionalNodeGenerator:
         )
         if not self.verbose:
             with suppress_output():
-                trainer.fit(self.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+                run_trainer_fit(
+                    trainer,
+                    self.model,
+                    train_loader,
+                    val_loader,
+                    context=f"{self.__class__.__name__}.fit",
+                )
         else:
-            trainer.fit(self.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+            run_trainer_fit(
+                trainer,
+                self.model,
+                train_loader,
+                val_loader,
+                context=f"{self.__class__.__name__}.fit",
+            )
 
     def predict(
         self,
@@ -1435,6 +1552,7 @@ class ConditionalNodeGenerator:
         try:
             # Fetch stored head outputs (set inside generate)
             deg_classes = getattr(self.model, "_last_deg_classes", None)
+            edge_probability_matrices = getattr(self.model, "_last_edge_probability_matrices", None)
 
             # Existence logits were already used inside generate (projected before inverse)
             # But if you prefer to re-compute existence probabilities here, uncomment below:
@@ -1452,6 +1570,14 @@ class ConditionalNodeGenerator:
                 for i in range(len(gen_orig)):
                     # Overwrite the degree channel (assumed channel index 1)
                     gen_orig[i][..., 1] = np.clip(deg_classes[i], 0, None)
+
+            self.last_predicted_edge_probability_matrices_ = None
+            if edge_probability_matrices is not None:
+                edge_probability_matrices = edge_probability_matrices.cpu().numpy()
+                self.last_predicted_edge_probability_matrices_ = [
+                    edge_probability_matrices[i]
+                    for i in range(edge_probability_matrices.shape[0])
+                ]
 
             if self.verbose:
                 print("Applied head-based projection for existence/degree channels.")
@@ -1472,14 +1598,16 @@ class ConditionalNodeGenerator:
                 "deg_ce": self.model.train_deg_ce,
                 "all": self.model.train_loss_all,
                 "exist": self.model.train_exist,
-                **({"locality": self.model.train_edge_loss} if self.model.use_locality_supervision else {})
+                **({"locality": self.model.train_edge_loss} if self.model.use_locality_supervision else {}),
+                **({"aux_locality": self.model.train_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
             },
             val_metrics = {
                 "total": self.model.val_losses,
                 "deg_ce": self.model.val_deg_ce,
                 "all": self.model.val_loss_all,
                 "exist": self.model.val_exist,
-                **({"locality": self.model.val_edge_loss} if self.model.use_locality_supervision else {})
+                **({"locality": self.model.val_edge_loss} if self.model.use_locality_supervision else {}),
+                **({"aux_locality": self.model.val_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
             },
             window=window,
             alpha=alpha
