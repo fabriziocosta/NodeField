@@ -11,8 +11,12 @@ import dill as pickle
 from .timeit import timeit
 import torch
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union
-from .low_rank_mlp import LowRankMLP
-from .conditional_node_generator_base import ConditionalNodeGeneratorBase
+from .conditional_node_generator_base import (
+    ConditionalNodeGeneratorBase,
+    GeneratedNodeBatch,
+    GraphConditioningBatch,
+    NodeGenerationBatch,
+)
 
 
 @dataclass(frozen=True)
@@ -97,62 +101,34 @@ def scaled_slerp_average(vectors: np.ndarray) -> np.ndarray:
 np.seterr(invalid='ignore', divide='ignore')
 
 # =============================================================================
-# DecompositionalNodeEncoderDecoder Class
+# GraphDecoder Class
 # =============================================================================
 
-class DecompositionalNodeEncoderDecoder(object):
-    """Trainable toolkit for vectorising graphs and decoding them back into structure.
-
-    Args:
-        adjacency_matrix_classifier (LowRankMLP): Model that predicts adjacency
-            probabilities between node pairs.
-        node_label_classifier (LowRankMLP): Model used to score categorical node
-            labels.
-        edge_label_classifier (LowRankMLP): Model that predicts edge label
-            distributions.
-        verbose (bool): Toggle for printing solver and optimisation diagnostics.
-        negative_sample_factor (int): Multiplier controlling how many non-edges to
-            sample when building training batches.
-        existence_threshold (float): Probability threshold above which edges or nodes
-            are treated as present.
-        num_augmentation_iterations (int): Number of noise augmentation passes applied
-            to training graphs.
-        augmentation_noise (float): Standard deviation of Gaussian noise injected
-            during augmentation.
-        enforce_connectivity (bool): Require the decoded graph to remain connected when
-            solving the adjacency optimisation.
-        degree_slack_penalty (float): Penalty weight for allowing slack in degree
-            constraints during optimisation.
-        warm_start_mst (bool): Whether to initialise the linear program with a maximum
-            spanning tree warm start.
-    """
+class GraphDecoder(object):
+    """Graph decoder that turns generator outputs into final NetworkX graphs."""
     
     def __init__(
         self,
-        adjacency_matrix_classifier: Optional[LowRankMLP] = None,
-        node_label_classifier: Optional[LowRankMLP] = None,
-        edge_label_classifier: Optional[LowRankMLP] = None,
         verbose: bool = True,
-        negative_sample_factor: int = 1,
         existence_threshold: float = 0.5,
-        num_augmentation_iterations: int = 0,
-        augmentation_noise: float = 1e-2,
         enforce_connectivity: bool = True,
         degree_slack_penalty: float = 1e6,
-        warm_start_mst: bool = True
+        warm_start_mst: bool = True,
     ) -> None:
-        """Create deep copies of the supplied classifiers and store training hyper-parameters."""
-        self.adjacency_matrix_classifier = copy.deepcopy(adjacency_matrix_classifier)
-        self.node_label_classifier      = copy.deepcopy(node_label_classifier)
-        self.edge_label_classifier      = copy.deepcopy(edge_label_classifier)
+        """Store graph decoding hyper-parameters."""
         self.verbose                    = verbose
-        self.negative_sample_factor     = negative_sample_factor
         self.existence_threshold        = existence_threshold
-        self.num_augmentation_iterations= num_augmentation_iterations
-        self.augmentation_noise         = augmentation_noise
         self.enforce_connectivity       = enforce_connectivity
         self.degree_slack_penalty       = degree_slack_penalty
         self.warm_start_mst             = warm_start_mst
+        self.supervision_plan_          = None
+
+    def _plan_channel(self, channel_name: str) -> Optional[SupervisionChannelPlan]:
+        """Return the named supervision channel when a plan is available."""
+        plan = getattr(self, "supervision_plan_", None)
+        if plan is None:
+            return None
+        return getattr(plan, channel_name, None)
 
     def optimize_adjacency_matrix(
         self,
@@ -239,11 +215,74 @@ class DecompositionalNodeEncoderDecoder(object):
             adj_mtx_list.append(adj_mtx)
         return adj_mtx_list
 
+    def _target_stats(self, targets: List[int]) -> Tuple[int, int]:
+        """Count positive and negative supervision pairs."""
+        positive = int(sum(1 for target in targets if int(target) == 1))
+        negative = int(len(targets) - positive)
+        return positive, negative
+
+    def _sample_pair_indices(
+        self,
+        targets: List[int],
+        sample_count: int,
+        locality_sampling_strategy: str,
+        locality_target_positive_ratio: Optional[float],
+    ) -> np.ndarray:
+        """Sample supervision indices using the configured class-balancing strategy."""
+        num_pairs = len(targets)
+        if sample_count <= 0:
+            return np.asarray([], dtype=int)
+        if sample_count >= num_pairs:
+            return np.arange(num_pairs, dtype=int)
+
+        targets_array = np.asarray(targets, dtype=int)
+        if locality_sampling_strategy == "uniform":
+            return np.random.choice(num_pairs, sample_count, replace=False)
+
+        pos_indices = np.flatnonzero(targets_array == 1)
+        neg_indices = np.flatnonzero(targets_array == 0)
+        if len(pos_indices) == 0 or len(neg_indices) == 0:
+            return np.random.choice(num_pairs, sample_count, replace=False)
+
+        if locality_sampling_strategy == "stratified_target":
+            target_positive_ratio = locality_target_positive_ratio
+            if target_positive_ratio is None:
+                raise ValueError(
+                    "locality_sampling_strategy='stratified_target' requires locality_target_positive_ratio."
+                )
+        else:
+            target_positive_ratio = len(pos_indices) / float(num_pairs)
+
+        num_pos = int(round(sample_count * target_positive_ratio))
+        num_pos = max(0, min(num_pos, sample_count))
+        num_neg = sample_count - num_pos
+
+        num_pos = min(num_pos, len(pos_indices))
+        num_neg = min(num_neg, len(neg_indices))
+
+        remaining = sample_count - (num_pos + num_neg)
+        if remaining > 0:
+            extra_pos = min(remaining, len(pos_indices) - num_pos)
+            num_pos += extra_pos
+            remaining -= extra_pos
+        if remaining > 0:
+            extra_neg = min(remaining, len(neg_indices) - num_neg)
+            num_neg += extra_neg
+
+        sampled_pos = np.random.choice(pos_indices, num_pos, replace=False) if num_pos > 0 else np.asarray([], dtype=int)
+        sampled_neg = np.random.choice(neg_indices, num_neg, replace=False) if num_neg > 0 else np.asarray([], dtype=int)
+        sampled = np.concatenate([sampled_pos, sampled_neg])
+        np.random.shuffle(sampled)
+        return sampled
+
     def adj_mtx_to_targets(
         self,
         adj_mtx_list: List[np.ndarray],
         node_encodings_list: List[np.ndarray],
         locality_sample_fraction: float,
+        negative_sample_factor: int = 1,
+        locality_sampling_strategy: str = "stratified_preserve",
+        locality_target_positive_ratio: Optional[float] = None,
         force_bi_directional_edges: bool = True,
         is_training: bool = False,
         horizon: int = 1,
@@ -252,6 +291,14 @@ class DecompositionalNodeEncoderDecoder(object):
         """Label node pairs as local or non-local using shortest-path distance within each graph."""
         if horizon < 1:
             raise ValueError("horizon must be >= 1")
+        valid_sampling_strategies = {"uniform", "stratified_preserve", "stratified_target"}
+        if locality_sampling_strategy not in valid_sampling_strategies:
+            raise ValueError(
+                f"locality_sampling_strategy must be one of {sorted(valid_sampling_strategies)} "
+                f"(got {locality_sampling_strategy!r})."
+            )
+        if locality_target_positive_ratio is not None and not 0.0 < locality_target_positive_ratio < 1.0:
+            raise ValueError("locality_target_positive_ratio must be between 0 and 1 when provided.")
 
         # Collect all targets and pairs first
         all_targets = []
@@ -276,7 +323,7 @@ class DecompositionalNodeEncoderDecoder(object):
                 
                 # Determine number of negative samples
                 num_pos = len(pos_neighbors) * (2 if force_bi_directional_edges else 1)
-                num_neg_samples = int(round(self.negative_sample_factor * num_pos))
+                num_neg_samples = int(round(negative_sample_factor * num_pos))
                 if num_neg_samples <= 0:
                     continue
                 
@@ -299,6 +346,7 @@ class DecompositionalNodeEncoderDecoder(object):
                         all_pairs.append((g_idx, k, i))
         
         # Apply locality-pair sampling during training when requested
+        pos_before, neg_before = self._target_stats(all_targets)
         if is_training and locality_sample_fraction < 1.0:
             num_pairs = len(all_pairs)
             num_pairs_to_use = int(round(num_pairs * locality_sample_fraction))
@@ -307,11 +355,20 @@ class DecompositionalNodeEncoderDecoder(object):
                 print(
                     f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
                     f"sampling {num_pairs_to_use} pairs ({locality_sample_fraction:.2%}) "
-                    f"from {num_pairs} total pairs."
+                    f"from {num_pairs} total pairs "
+                    f"(pos={pos_before}, neg={neg_before}, "
+                    f"negative_sample_factor={negative_sample_factor}, "
+                    f"sampling_strategy={locality_sampling_strategy}"
+                    f"{'' if locality_target_positive_ratio is None else f', target_positive_ratio={locality_target_positive_ratio:.3f}'})."
                 )
 
             if 0 < num_pairs_to_use < num_pairs:
-                indices = np.random.choice(num_pairs, num_pairs_to_use, replace=False)
+                indices = self._sample_pair_indices(
+                    all_targets,
+                    num_pairs_to_use,
+                    locality_sampling_strategy=locality_sampling_strategy,
+                    locality_target_positive_ratio=locality_target_positive_ratio,
+                )
                 all_targets = [all_targets[i] for i in indices]
                 all_pairs = [all_pairs[i] for i in indices]
             elif num_pairs_to_use == 0 and num_pairs > 0:
@@ -325,6 +382,14 @@ class DecompositionalNodeEncoderDecoder(object):
             elif num_pairs_to_use == 0 and num_pairs == 0:
                 return np.array([]), []
 
+        if self.verbose and len(all_targets) > 0:
+            pos_after, neg_after = self._target_stats(all_targets)
+            ratio_after = pos_after / float(pos_after + neg_after)
+            print(
+                f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
+                f"using pos={pos_after}, neg={neg_after}, positive_ratio={ratio_after:.3f}."
+            )
+
         return np.array(all_targets), all_pairs
 
     def compute_edge_supervision(
@@ -332,6 +397,9 @@ class DecompositionalNodeEncoderDecoder(object):
         graphs: List[nx.Graph], 
         node_encodings_list: List[np.ndarray],
         locality_sample_fraction: float,
+        negative_sample_factor: int = 1,
+        locality_sampling_strategy: str = "stratified_preserve",
+        locality_target_positive_ratio: Optional[float] = None,
         horizon: int = 1,
         supervision_name: str = "locality",
     ) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
@@ -341,6 +409,9 @@ class DecompositionalNodeEncoderDecoder(object):
             adj,
             node_encodings_list,
             locality_sample_fraction=locality_sample_fraction,
+            negative_sample_factor=negative_sample_factor,
+            locality_sampling_strategy=locality_sampling_strategy,
+            locality_target_positive_ratio=locality_target_positive_ratio,
             is_training=True,
             horizon=horizon,
             supervision_name=supervision_name,
@@ -398,179 +469,6 @@ class DecompositionalNodeEncoderDecoder(object):
                             instances.append(instance)
         return np.vstack(instances)
         
-    @timeit
-    def encodings_and_graphs_to_node_label_dataset(
-        self,
-        node_encodings_list: List[np.ndarray],
-        graphs: List[nx.Graph]
-    ) -> Tuple[np.ndarray, List[Any]]:
-        """Produce node-level training examples paired with labels from the graphs."""
-        instances = []
-        node_labels = []
-        # Process each graph and its corresponding encoding matrix.
-        for graph, encodings in zip(graphs, node_encodings_list):
-            for i, u in enumerate(list(graph.nodes())):
-                instances.append(encodings[i])
-                # Assume node label is stored under the key 'label'.
-                node_labels.append(graph.nodes[u]['label'])
-        return np.vstack(instances), node_labels
-
-    def encodings_and_graphs_to_edge_label_dataset(
-        self,
-        node_encodings_list: List[np.ndarray],
-        graphs: List[nx.Graph]
-    ) -> Tuple[np.ndarray, List[Any]]:
-        """Produce edge-level feature vectors paired with labels drawn from the graphs."""
-        instances = []
-        edge_labels = []
-        for graph, encodings in zip(graphs, node_encodings_list):
-            # Iterate over nodes to consider each potential edge.
-            for i, u in enumerate(list(graph.nodes())):
-                for j, v in enumerate(list(graph.nodes())):
-                    # If an edge exists between the nodes, create an instance.
-                    if graph.has_edge(u, v) and "label" in graph.edges[u, v]:
-                        instance = np.hstack([encodings[i], encodings[j]])
-                        instances.append(instance)
-                        edge_labels.append(graph.edges[u, v]['label'])
-        if instances:
-            instances = np.vstack(instances)
-        return instances, edge_labels
-
-    def encodings_and_adj_mtx_to_edge_dataset(
-        self,
-        node_encodings_list: List[np.ndarray],
-        adj_mtx_list: List[np.ndarray]
-    ) -> np.ndarray:
-        """Collect node-pair feature vectors wherever the adjacency indicates a connection."""
-        instances = []
-        for encodings, adj_mtx in zip(node_encodings_list, adj_mtx_list):
-            n_nodes = encodings.shape[0]
-            # Iterate over all pairs of nodes.
-            for i in range(n_nodes):
-                for j in range(n_nodes):
-                    if adj_mtx[i, j] != 0:
-                        instance = np.hstack([encodings[i], encodings[j]])
-                        instances.append(instance)
-        if instances:
-            instances = np.vstack(instances)
-        return instances
-    
-    @timeit
-    def node_label_classifier_fit(
-        self,
-        node_encodings_list: List[np.ndarray],
-        graphs: List[nx.Graph]
-    ) -> None:
-        """Fit the node-label classifier when the target is not constant."""
-        X, y = self.encodings_and_graphs_to_node_label_dataset(node_encodings_list, graphs)
-        unique_labels = np.unique(y)
-        # If only one label is present, skip training.
-        if len(unique_labels) == 1:
-            if self.verbose:
-                print("Node-label channel is constant in the training data: {}.".format(unique_labels[0]))
-            return
-
-        if self.node_label_classifier is None:
-            return
-
-        if self.verbose:
-            print('Training node label predictor on {} instances with {} features'.format(X.shape[0], X.shape[1]))
-        self.node_label_classifier.fit(X, y)
-
-    @timeit
-    def edge_label_classifier_fit(
-        self,
-        node_encodings_list: List[np.ndarray],
-        graphs: List[nx.Graph]
-    ) -> None:
-        """Fit the edge-label classifier when the target is not constant."""
-        X, y = self.encodings_and_graphs_to_edge_label_dataset(node_encodings_list, graphs)
-        if len(y) == 0:
-            if self.verbose:
-                print("Edge-label channel is disabled: no usable edge labels were found in the training data.")
-            return
-        unique_labels = np.unique(y)
-        # If only one edge label is found, store it and skip training.
-        if len(unique_labels) == 1:
-            if self.verbose:
-                print("Edge-label channel is constant in the training data: {}.".format(unique_labels[0]))
-            return
-
-        if self.edge_label_classifier is None:
-            return
-
-        if self.verbose:
-            print('Training edge label predictor on {} instances with {} features'.format(X.shape[0], X.shape[1]))
-        self.edge_label_classifier.fit(X, y)
-
-    @timeit    
-    def adjacency_matrix_classifier_fit(
-        self,
-        node_encodings_list: List[np.ndarray],
-        graphs: List[nx.Graph],
-        locality_sample_fraction: float # <-- New parameter
-    ) -> None:
-        """Train the adjacency classifier on features derived from the provided graphs."""
-        if self.adjacency_matrix_classifier is None:
-            return
-        # Convert graphs to corresponding adjacency matrices.
-        adj_mtx_list = self.graphs_to_adjacency_matrices(graphs)
-        # Build the training dataset.
-        X, y = self.encodings_and_adj_mtx_to_dataset(
-            node_encodings_list,
-            adj_mtx_list,
-            locality_sample_fraction=locality_sample_fraction,
-            horizon=1
-        )
-        if self.verbose:
-            print('Training adjacency matrix predictor on {} instances with {} features'.format(X.shape[0], X.shape[1]))
-        self.adjacency_matrix_classifier.fit(X, y)
-
-    @timeit
-    def fit(
-        self,
-        graphs: List[nx.Graph],
-        node_encodings_list: List[np.ndarray],
-        locality_sample_fraction_for_adj_mtx: float,
-        train_adjacency_matrix_classifier: bool = True,
-    ) -> 'DecompositionalNodeEncoderDecoder':
-        """Train the node, edge, and adjacency predictors on the supplied dataset."""
-
-        # ------------------------------------------------------------------
-        # 1. Build augmented dataset
-        # ------------------------------------------------------------------
-        combined_graphs: List[nx.Graph] = list(graphs)                 # shallow copy is fine
-        combined_encodings: List[np.ndarray] = list(node_encodings_list)
-
-        if self.num_augmentation_iterations > 0:
-            noise_list = np.linspace(0, self.augmentation_noise, self.num_augmentation_iterations + 1).tolist()
-
-            for noise in noise_list:
-                if self.verbose:
-                    print(f'<<Generating noisy encodings (noise={noise})>>')
-
-                for enc in node_encodings_list:
-                    perturbed = enc + np.random.rand(*enc.shape) * noise
-                    combined_encodings.append(perturbed)
-
-                # Point to the same graphs for every new encoding set
-                combined_graphs.extend(graphs)
-
-        # ------------------------------------------------------------------
-        # 2. Train once on the enlarged dataset
-        # ------------------------------------------------------------------
-        self.node_label_classifier_fit(combined_encodings, combined_graphs)
-        self.edge_label_classifier_fit(combined_encodings, combined_graphs)
-        if train_adjacency_matrix_classifier:
-            self.adjacency_matrix_classifier_fit(
-                combined_encodings, combined_graphs,
-                locality_sample_fraction=locality_sample_fraction_for_adj_mtx
-            )
-        elif self.verbose:
-            print("Adjacency channel delegated to generator-owned direct-edge prediction.")
-
-        return self
-
     def constrained_node_encodings_list(
         self,
         original_node_encodings_list: List[np.ndarray]
@@ -586,56 +484,50 @@ class DecompositionalNodeEncoderDecoder(object):
 
     def get_degrees(
         self,
-        encodings: np.ndarray,
-        n_nodes: int,
-        threshold: float = 0.5
+        degree_predictions: np.ndarray,
+        existence_mask: np.ndarray,
     ) -> List[int]:
-        """Derive integer degree targets from encodings while masking non-existent nodes."""
-        degs = np.rint(encodings[:n_nodes, 1])
-        existent = encodings[:n_nodes, 0] >= threshold
-        # For existent nodes enforce at least 1, for non-existent nodes set to 0.
+        """Derive integer degree targets from explicit degree and existence predictions."""
+        degs = np.rint(np.asarray(degree_predictions, dtype=float))
+        existent = np.asarray(existence_mask, dtype=bool)
         degs = np.where(existent, np.maximum(degs, 1), 0)
         return degs.astype(int).tolist()
 
     def decode_adjacency_matrix(
         self,
-        original_node_encodings_list: List[np.ndarray],
+        generated_nodes: GeneratedNodeBatch,
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
-        existence_threshold: float = 0.5
     ) -> List[np.ndarray]:
         """Project predicted adjacency probabilities onto valid binary graphs."""
-        # Constrain encodings to be non-negative.
-        node_encodings_list = self.constrained_node_encodings_list(original_node_encodings_list)
+        node_embeddings_list = self.constrained_node_encodings_list(generated_nodes.node_embeddings_list)
         channel_plan = self._plan_channel("direct_edges")
+        existence_masks = generated_nodes.node_presence_mask
+        degree_predictions = generated_nodes.node_degree_predictions
+
+        if existence_masks is None:
+            raise RuntimeError("decode_adjacency_matrix requires explicit node_presence_mask predictions.")
+        if degree_predictions is None:
+            raise RuntimeError("decode_adjacency_matrix requires explicit node_degree_predictions.")
 
         predicted_probs_list: List[np.ndarray]
         if predicted_edge_probability_matrices is None:
-            if self.adjacency_matrix_classifier is None:
-                if channel_plan is not None and channel_plan.mode == "disabled":
-                    raise RuntimeError(
-                        "decode_adjacency_matrix cannot reconstruct graph structure because direct_edges are "
-                        "disabled in the supervision plan and no adjacency_matrix_classifier is available."
-                    )
+            if channel_plan is not None and channel_plan.mode == "disabled":
                 raise RuntimeError(
-                    "decode_adjacency_matrix requires either predicted_edge_probability_matrices "
-                    "or a fitted adjacency_matrix_classifier."
+                    "decode_adjacency_matrix cannot reconstruct graph structure because direct_edges are disabled "
+                    "in the supervision plan."
                 )
-            # Calculate the number of instances per graph (all ordered pairs except self-pairs).
-            sizes = [enc.shape[0]**2 - enc.shape[0] for enc in node_encodings_list]
-            # Generate instances for adjacency matrix prediction.
-            X = self.encodings_to_instances(node_encodings_list)
-            predicted_probs = self.adjacency_matrix_classifier.predict_proba(X)[:, -1]
-            # Split predicted probabilities for each graph based on the sizes computed.
-            predicted_probs_list = np.split(predicted_probs, np.cumsum(sizes)[:-1])
+                raise RuntimeError(
+                    "decode_adjacency_matrix requires generator-provided edge probabilities."
+                )
         else:
-            if len(predicted_edge_probability_matrices) != len(node_encodings_list):
+            if len(predicted_edge_probability_matrices) != len(node_embeddings_list):
                 raise ValueError(
-                    "predicted_edge_probability_matrices must align with original_node_encodings_list "
-                    f"(got {len(predicted_edge_probability_matrices)} matrices for {len(node_encodings_list)} graphs)."
+                    "predicted_edge_probability_matrices must align with generated node batches "
+                    f"(got {len(predicted_edge_probability_matrices)} matrices for {len(node_embeddings_list)} graphs)."
                 )
             predicted_probs_list = []
-            for encodings, prob_matrix in zip(node_encodings_list, predicted_edge_probability_matrices):
-                n_nodes = encodings.shape[0]
+            for node_embeddings, prob_matrix in zip(node_embeddings_list, predicted_edge_probability_matrices):
+                n_nodes = node_embeddings.shape[0]
                 prob_matrix = np.asarray(prob_matrix, dtype=float)
                 if prob_matrix.shape != (n_nodes, n_nodes):
                     raise ValueError(
@@ -647,8 +539,8 @@ class DecompositionalNodeEncoderDecoder(object):
         
         adj_mtx_list = []
         # Process each graph's predictions.
-        for prob_list, encodings in zip(predicted_probs_list, node_encodings_list):
-            n_nodes = encodings.shape[0]
+        for graph_idx, (prob_list, node_embeddings) in enumerate(zip(predicted_probs_list, node_embeddings_list)):
+            n_nodes = node_embeddings.shape[0]
             idx = 0
             prob_matrix = np.zeros((n_nodes, n_nodes))
             # Reconstruct the probability matrix from the flat list.
@@ -658,15 +550,17 @@ class DecompositionalNodeEncoderDecoder(object):
                         prob_matrix[i, j] = prob_list[idx]
                         idx += 1
             # Zero out probabilities for edges where either node is non-existent.
-            existent = encodings[:, 0] >= existence_threshold
+            existent = np.asarray(existence_masks[graph_idx][:n_nodes], dtype=bool)
             for i in range(n_nodes):
                 for j in range(n_nodes):
                     if not (existent[i] and existent[j]):
                         prob_matrix[i, j] = 0
             # Ensure the matrix is symmetric.
             prob_matrix = (prob_matrix + prob_matrix.T) / 2
-            # Extract target degrees from encodings (modified to set degree=0 for non-existent nodes).
-            target_degrees = self.get_degrees(encodings, n_nodes, threshold=existence_threshold)
+            target_degrees = self.get_degrees(
+                np.asarray(degree_predictions[graph_idx][:n_nodes], dtype=float),
+                existent,
+            )
             # Optimize the probability matrix into a binary adjacency matrix.
             adj = self.optimize_adjacency_matrix(prob_matrix, target_degrees)
             adj_mtx_list.append(adj)
@@ -674,39 +568,31 @@ class DecompositionalNodeEncoderDecoder(object):
 
     def decode_node_labels(
         self,
-        node_encodings_list: List[np.ndarray]
+        generated_nodes: GeneratedNodeBatch,
     ) -> List[np.ndarray]:
         """Predict node-level labels for each encoding matrix."""
         channel_plan = self._plan_channel("node_labels")
         if channel_plan is not None and channel_plan.mode == "constant":
             predicted_node_labels_list = []
-            for enc in node_encodings_list:
-                n = enc.shape[0]
+            for node_embeddings in generated_nodes.node_embeddings_list:
+                n = node_embeddings.shape[0]
                 predicted_node_labels_list.append(np.array([channel_plan.constant_value] * n, dtype=object))
             return predicted_node_labels_list
 
-        if self.node_label_classifier is None:
-            if channel_plan is not None and channel_plan.mode == "disabled":
-                predicted_node_labels_list = []
-                for enc in node_encodings_list:
-                    n = enc.shape[0]
-                    predicted_node_labels_list.append(np.array([None] * n, dtype=object))
-                return predicted_node_labels_list
-            raise RuntimeError(
-                "decode_node_labels requires predicted node labels from the conditioning generator "
-                "or a fitted node_label_classifier."
-            )
+        if channel_plan is not None and channel_plan.mode == "disabled":
+            predicted_node_labels_list = []
+            for node_embeddings in generated_nodes.node_embeddings_list:
+                n = node_embeddings.shape[0]
+                predicted_node_labels_list.append(np.array([None] * n, dtype=object))
+            return predicted_node_labels_list
 
-        # Otherwise, predict labels for all nodes.
-        X = np.vstack(node_encodings_list)
-        predicted_node_labels = self.node_label_classifier.predict(X)
-        sizes = [enc.shape[0] for enc in node_encodings_list]
-        predicted_node_labels_list = np.split(predicted_node_labels, np.cumsum(sizes)[:-1])
-        return predicted_node_labels_list
+        raise RuntimeError(
+            "decode_node_labels requires generator-provided node labels."
+        )
 
     def decode_edge_labels(
         self,
-        node_encodings_list: List[np.ndarray],
+        generated_nodes: GeneratedNodeBatch,
         adj_mtx_list: List[np.ndarray],
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
     ) -> List[np.ndarray]:
@@ -742,64 +628,49 @@ class DecompositionalNodeEncoderDecoder(object):
                 predicted_edge_labels_list.append(np.array([channel_plan.constant_value] * n_edges, dtype=object))
             return predicted_edge_labels_list
 
-        if self.edge_label_classifier is None:
-            if channel_plan is not None and channel_plan.mode == "disabled":
-                return [np.asarray([], dtype=object) for _ in node_encodings_list]
-            if int(self.verbose) >= 2:
-                print(
-                    "No edge-label predictor is available; returning graphs without edge labels."
-                )
-            return [np.asarray([], dtype=object) for _ in node_encodings_list]
+        if channel_plan is not None and channel_plan.mode == "disabled":
+            return [np.asarray([], dtype=object) for _ in generated_nodes.node_embeddings_list]
 
-        # Create instances based on encodings and adjacency matrices.
-        X = self.encodings_and_adj_mtx_to_edge_dataset(node_encodings_list, adj_mtx_list)
-        if len(X) < 1:
-            return [[] for _ in node_encodings_list]
-        predicted_edge_labels = self.edge_label_classifier.predict(X)
-        sizes = [np.sum(adj) for adj in adj_mtx_list]
-        predicted_edge_labels_list = np.split(predicted_edge_labels, np.cumsum(sizes)[:-1])
-        return predicted_edge_labels_list
+        raise RuntimeError(
+            "decode_edge_labels requires generator-provided edge labels."
+        )
 
     @timeit
     def decode(
         self,
-        original_node_encodings_list: List[np.ndarray],
+        generated_nodes: GeneratedNodeBatch,
         predicted_node_labels_list: Optional[List[np.ndarray]] = None,
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
     ) -> List[nx.Graph]:
         """Reconstruct labelled graphs from node encodings, respecting existence masks."""
-        # Step 1: Decode the adjacency matrices using the modified method that accounts for node existence.
         adj_mtx_list = self.decode_adjacency_matrix(
-            original_node_encodings_list,
+            generated_nodes,
             predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-            existence_threshold=self.existence_threshold,
         )
         
-        # Step 2: Decode node labels unless they were already predicted by the conditional generator.
         if predicted_node_labels_list is None:
-            predicted_node_labels_list = self.decode_node_labels(original_node_encodings_list)
+            predicted_node_labels_list = self.decode_node_labels(generated_nodes)
         
-        # Step 3: Decode edge labels based on the updated adjacency matrices.
         predicted_edge_labels_list = self.decode_edge_labels(
-            original_node_encodings_list,
+            generated_nodes,
             adj_mtx_list,
             predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
         
         graphs = []
-        # Step 4: Reconstruct each graph and filter out non-existent nodes.
-        for encodings, node_labels, edge_labels, adj_mtx in zip(
-                original_node_encodings_list, predicted_node_labels_list, predicted_edge_labels_list, adj_mtx_list):
-            # Create the initial graph from the predicted adjacency matrix.
+        for node_embeddings, node_presence_mask, node_labels, edge_labels, adj_mtx in zip(
+                generated_nodes.node_embeddings_list,
+                generated_nodes.node_presence_mask,
+                predicted_node_labels_list,
+                predicted_edge_labels_list,
+                adj_mtx_list):
             graph = nx.from_numpy_array(adj_mtx)
             
-            # Assign node labels. (Assumes ordering in node_labels matches node indices.)
             if len(node_labels) > 0 and not all(label is None for label in node_labels):
                 node_label_map = {i: label for i, label in enumerate(node_labels)}
                 nx.set_node_attributes(graph, node_label_map, 'label')
             
-            # If edges exist, assign edge labels.
             if np.sum(adj_mtx) > 0 and len(edge_labels) > 0:
                 n_nodes = graph.number_of_nodes()
                 edge_idx = 0
@@ -811,9 +682,7 @@ class DecompositionalNodeEncoderDecoder(object):
                             edge_idx += 1
                 nx.set_edge_attributes(graph, edge_attr, 'label')
             
-            # Filter out nodes that do not meet the existence threshold.
-            existent_indices = np.where(encodings[:, 0] >= self.existence_threshold)[0]
-            # Create a subgraph that includes only existent nodes.
+            existent_indices = np.where(np.asarray(node_presence_mask[:node_embeddings.shape[0]], dtype=bool))[0]
             filtered_graph = graph.subgraph(existent_indices).copy()
             graphs.append(filtered_graph)
         
@@ -824,16 +693,16 @@ class DecompositionalNodeEncoderDecoder(object):
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
     
-    def load(self, filename: str = 'generative_model.obj') -> 'DecompositionalNodeEncoderDecoder':
+    def load(self, filename: str = 'generative_model.obj') -> 'GraphDecoder':
         """Load a previously saved instance from disk and return it."""
         with open(filename, 'rb') as f:
             self = pickle.load(f)
         return self
 
 # =============================================================================
-# ConditionalNodeGeneratorModel Class
+# ConditionedNodeGenerator Class
 # =============================================================================
-class ConditionalNodeGeneratorModel(object):
+class ConditionedNodeGenerator(object):
     """Thin wrapper that delegates training and inference to a conditional node generator."""
     def __init__(
             self, 
@@ -847,107 +716,69 @@ class ConditionalNodeGeneratorModel(object):
     @timeit
     def fit(
         self,
-        node_encodings_list: List[np.ndarray],
-        conditional_graph_encodings: Any,
-        edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
-        edge_targets: Optional[np.ndarray] = None,
-        edge_label_pairs: Optional[List[Tuple[int, int, int]]] = None,
-        edge_label_targets: Optional[np.ndarray] = None,
-        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
-        auxiliary_edge_targets: Optional[np.ndarray] = None,
-        node_mask: Optional[np.ndarray] = None,
-        node_label_targets: Optional[List[np.ndarray]] = None,
-    ) -> 'ConditionalNodeGeneratorModel':
+        node_batch: NodeGenerationBatch,
+        graph_conditioning: GraphConditioningBatch,
+    ) -> 'ConditionedNodeGenerator':
         if self.verbose:
-            print(f"Training conditional model on {len(node_encodings_list)} graphs with {node_encodings_list[0].shape[0]} nodes each.")
+            print(
+                f"Training conditional model on {len(node_batch)} graphs "
+                f"with up to {node_batch.node_presence_mask.shape[1]} nodes each."
+            )
+        if node_batch.edge_pairs is not None and node_batch.edge_targets is not None and self.verbose:
+            print(f"Using direct-edge supervision with {len(node_batch.edge_pairs)} labelled pairs.")
 
-        if edge_pairs is not None and edge_targets is not None:
-            if self.verbose:
-                print(f"Using locality supervision with {len(edge_pairs)} labelled pairs.")
-            self.conditional_node_generator.setup(
-                node_encodings_list=node_encodings_list,
-                conditional_graph_encodings=conditional_graph_encodings,
-                edge_pairs=edge_pairs,
-                edge_targets=edge_targets,
-                edge_label_pairs=edge_label_pairs,
-                edge_label_targets=edge_label_targets,
-                auxiliary_edge_pairs=auxiliary_edge_pairs,
-                auxiliary_edge_targets=auxiliary_edge_targets,
-                node_mask=node_mask,
-                node_label_targets=node_label_targets,
-            )
-            self.conditional_node_generator.fit(
-                node_encodings_list=node_encodings_list,
-                conditional_graph_encodings=conditional_graph_encodings,
-                edge_pairs=edge_pairs,
-                edge_targets=edge_targets,
-                edge_label_pairs=edge_label_pairs,
-                edge_label_targets=edge_label_targets,
-                auxiliary_edge_pairs=auxiliary_edge_pairs,
-                auxiliary_edge_targets=auxiliary_edge_targets,
-                node_mask=node_mask,
-                node_label_targets=node_label_targets,
-            )
-        else:
-            self.conditional_node_generator.setup(
-                node_encodings_list=node_encodings_list,
-                conditional_graph_encodings=conditional_graph_encodings,
-                edge_label_pairs=edge_label_pairs,
-                edge_label_targets=edge_label_targets,
-                auxiliary_edge_pairs=auxiliary_edge_pairs,
-                auxiliary_edge_targets=auxiliary_edge_targets,
-                node_mask=node_mask,
-                node_label_targets=node_label_targets,
-            )
-            self.conditional_node_generator.fit(
-                node_encodings_list=node_encodings_list,
-                conditional_graph_encodings=conditional_graph_encodings,
-                edge_label_pairs=edge_label_pairs,
-                edge_label_targets=edge_label_targets,
-                auxiliary_edge_pairs=auxiliary_edge_pairs,
-                auxiliary_edge_targets=auxiliary_edge_targets,
-                node_mask=node_mask,
-                node_label_targets=node_label_targets,
-            )
+        self.conditional_node_generator.setup(
+            node_batch=node_batch,
+            graph_conditioning=graph_conditioning,
+        )
+        self.conditional_node_generator.fit(
+            node_batch=node_batch,
+            graph_conditioning=graph_conditioning,
+        )
 
         return self
 
     @timeit
     def predict(
         self,
-        conditional_graph_encodings: Any,
+        graph_conditioning: GraphConditioningBatch,
         desired_class: Optional[Union[int, Sequence[int]]] = None,
-    ) -> List[np.ndarray]:
-        if int(self.verbose) >= 2:
-            print(f"Predicting node matrices for {len(conditional_graph_encodings)} graphs...")
-        predicted_node_encodings_list = self.conditional_node_generator.predict(
-            conditional_graph_encodings,
+    ) -> GeneratedNodeBatch:
+        if int(self.verbose) >= 3:
+            print(f"Predicting node matrices for {len(graph_conditioning)} graphs...")
+        generated_nodes = self.conditional_node_generator.predict(
+            graph_conditioning,
             desired_class=desired_class,
         )
-        return predicted_node_encodings_list
+        return generated_nodes
     
 # =============================================================================
-# DecompositionalEncoderDecoder Class 
+# GraphGenerator Class 
 # =============================================================================
 
-class DecompositionalEncoderDecoder(object):
+class GraphGenerator(object):
     """End-to-end manager that vectorises graphs, trains generators, and rebuilds structures."""
     def __init__(
             self,
             graph_vectorizer: Any = None,
             node_graph_vectorizer: Any = None,
-            conditioning_to_node_embeddings_generator: Optional[ConditionalNodeGeneratorModel] = None,
-            node_embeddings_to_graph_generator: Optional[DecompositionalNodeEncoderDecoder] = None,
+            node_generator: Optional[ConditionedNodeGenerator] = None,
+            graph_decoder: Optional[GraphDecoder] = None,
             verbose: bool = True,
             use_locality_supervision: bool = False,
             locality_sample_fraction: float = 1.0,
-            locality_horizon: int = 1
+            locality_horizon: int = 1,
+            negative_sample_factor: int = 1,
+            locality_sampling_strategy: str = "stratified_preserve",
+            locality_target_positive_ratio: Optional[float] = None,
+            feasibility_estimator: Any = None,
+            max_feasibility_attempts: int = 10,
             ) -> None:
         """Store the collaborating components and configuration used for the pipeline."""
         self.graph_vectorizer = graph_vectorizer
         self.node_graph_vectorizer = node_graph_vectorizer
-        self.conditioning_to_node_embeddings_generator = conditioning_to_node_embeddings_generator
-        self.node_embeddings_to_graph_generator = node_embeddings_to_graph_generator
+        self.node_generator = node_generator
+        self.graph_decoder = graph_decoder
         self.verbose = verbose
         self.use_locality_supervision = use_locality_supervision
         self.node_label_classes_ = None
@@ -960,6 +791,21 @@ class DecompositionalEncoderDecoder(object):
         if locality_horizon < 1:
             raise ValueError("locality_horizon must be >= 1")
         self.locality_horizon = locality_horizon
+        self.negative_sample_factor = negative_sample_factor
+        self.locality_sampling_strategy = locality_sampling_strategy
+        self.locality_target_positive_ratio = locality_target_positive_ratio
+        self.feasibility_estimator = feasibility_estimator
+        self.max_feasibility_attempts = int(max_feasibility_attempts)
+        valid_sampling_strategies = {"uniform", "stratified_preserve", "stratified_target"}
+        if self.locality_sampling_strategy not in valid_sampling_strategies:
+            raise ValueError(
+                f"locality_sampling_strategy must be one of {sorted(valid_sampling_strategies)} "
+                f"(got {self.locality_sampling_strategy!r})."
+            )
+        if self.locality_target_positive_ratio is not None and not 0.0 < self.locality_target_positive_ratio < 1.0:
+            raise ValueError("locality_target_positive_ratio must be between 0 and 1 when provided.")
+        if self.max_feasibility_attempts < 1:
+            raise ValueError("max_feasibility_attempts must be >= 1")
 
     def _build_supervision_plan(
         self,
@@ -1075,24 +921,27 @@ class DecompositionalEncoderDecoder(object):
     def toggle_verbose(self) -> None:
         """Flip verbosity for this instance and any nested generators."""
         self.verbose = not self.verbose
-        if self.conditioning_to_node_embeddings_generator is not None:
-            self.conditioning_to_node_embeddings_generator.verbose = self.verbose
-        if self.node_embeddings_to_graph_generator is not None:
-            self.node_embeddings_to_graph_generator.verbose = self.verbose
+        if self.node_generator is not None:
+            self.node_generator.verbose = self.verbose
+        if self.graph_decoder is not None:
+            self.graph_decoder.verbose = self.verbose
 
     @timeit
     def fit(
         self,
         graphs: List[nx.Graph],
-        train_conditioning_to_node_embeddings_generator: bool = True,
-        train_node_embeddings_to_graph_generator: bool = True
-    ) -> 'DecompositionalEncoderDecoder':
+        train_node_generator: bool = True,
+    ) -> 'GraphGenerator':
         if self.verbose:
             print(f"Fitting model on {len(graphs)} graphs")
 
         # Fit vectorizers
         self.graph_vectorizer.fit(graphs)
         self.node_graph_vectorizer.fit(graphs)
+        if self.feasibility_estimator is not None:
+            if self.verbose:
+                print(f"Fitting feasibility estimator on {len(graphs)} graphs")
+            self.feasibility_estimator.fit(graphs)
         node_label_targets = self.graphs_to_node_label_targets(graphs)
         edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
         self._fit_node_label_vocab(node_label_targets)
@@ -1102,65 +951,63 @@ class DecompositionalEncoderDecoder(object):
             edge_label_targets=edge_label_targets,
         )
         self.supervision_plan_ = supervision_plan
-        if self.conditioning_to_node_embeddings_generator is not None:
-            setattr(self.conditioning_to_node_embeddings_generator, "supervision_plan_", supervision_plan)
-        if self.node_embeddings_to_graph_generator is not None:
-            setattr(self.node_embeddings_to_graph_generator, "supervision_plan_", supervision_plan)
+        if self.node_generator is not None:
+            setattr(self.node_generator, "supervision_plan_", supervision_plan)
+        if self.graph_decoder is not None:
+            setattr(self.graph_decoder, "supervision_plan_", supervision_plan)
 
-        # Generate encodings
-        node_encodings_list, conditional_graph_encodings = self.encode(graphs)
+        node_embeddings_list, graph_conditioning = self.encode(graphs)
 
-        if train_conditioning_to_node_embeddings_generator:
+        if train_node_generator:
             edge_pairs_for_cond_gen = None
             edge_targets_for_cond_gen = None
             auxiliary_edge_pairs_for_cond_gen = None
             auxiliary_edge_targets_for_cond_gen = None
-            node_mask_for_cond_gen = None # Assuming node_mask might be needed by ConditionalNodeGeneratorModel
-
             if supervision_plan.direct_edges.enabled:
-                if self.node_embeddings_to_graph_generator is None:
-                    raise RuntimeError("Locality supervision requested but node_embeddings_to_graph_generator is None.")
+                if self.graph_decoder is None:
+                    raise RuntimeError("Locality supervision requested but graph_decoder is None.")
                 self._log_supervision_plan(supervision_plan)
 
-                edge_targets_for_cond_gen, edge_pairs_for_cond_gen = self.node_embeddings_to_graph_generator.compute_edge_supervision(
+                edge_targets_for_cond_gen, edge_pairs_for_cond_gen = self.graph_decoder.compute_edge_supervision(
                     graphs,
-                    node_encodings_list,
+                    node_embeddings_list,
                     locality_sample_fraction=self.locality_sample_fraction,
+                    negative_sample_factor=self.negative_sample_factor,
+                    locality_sampling_strategy=self.locality_sampling_strategy,
+                    locality_target_positive_ratio=self.locality_target_positive_ratio,
                     horizon=1,
                     supervision_name="direct_edge",
                 )
                 if supervision_plan.auxiliary_locality.enabled:
                     auxiliary_edge_targets_for_cond_gen, auxiliary_edge_pairs_for_cond_gen = (
-                        self.node_embeddings_to_graph_generator.compute_edge_supervision(
+                        self.graph_decoder.compute_edge_supervision(
                             graphs,
-                            node_encodings_list,
+                            node_embeddings_list,
                             locality_sample_fraction=self.locality_sample_fraction,
+                            negative_sample_factor=self.negative_sample_factor,
+                            locality_sampling_strategy=self.locality_sampling_strategy,
+                            locality_target_positive_ratio=self.locality_target_positive_ratio,
                             horizon=supervision_plan.auxiliary_locality.horizon,
                             supervision_name="aux_locality",
                         )
                     )
             else:
                 self._log_supervision_plan(supervision_plan)
-            
-            self.conditioning_to_node_embeddings_generator.fit(
-                node_encodings_list=node_encodings_list,
-                conditional_graph_encodings=conditional_graph_encodings,
+
+            node_batch = self._build_node_batch(
+                graphs,
+                node_embeddings_list,
+                node_label_targets=node_label_targets if supervision_plan.node_labels.enabled else None,
                 edge_pairs=edge_pairs_for_cond_gen,
                 edge_targets=edge_targets_for_cond_gen,
                 edge_label_pairs=edge_label_pairs if supervision_plan.edge_labels.enabled else None,
                 edge_label_targets=edge_label_targets if supervision_plan.edge_labels.enabled else None,
                 auxiliary_edge_pairs=auxiliary_edge_pairs_for_cond_gen,
                 auxiliary_edge_targets=auxiliary_edge_targets_for_cond_gen,
-                node_mask=node_mask_for_cond_gen, # Pass if available/needed
-                node_label_targets=node_label_targets if supervision_plan.node_labels.enabled else None,
             )
-
-        if train_node_embeddings_to_graph_generator:
-            self.node_embeddings_to_graph_generator.fit(
-                graphs,
-                node_encodings_list,
-                locality_sample_fraction_for_adj_mtx=self.locality_sample_fraction,
-                train_adjacency_matrix_classifier=not self._generator_predicts_edge_presence(),
+            self.node_generator.fit(
+                node_batch=node_batch,
+                graph_conditioning=graph_conditioning,
             )
 
         return self
@@ -1168,28 +1015,28 @@ class DecompositionalEncoderDecoder(object):
     @timeit
     def node_encode(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
         """Transform graphs into per-node embedding matrices."""
-        if int(self.verbose) >= 2:
+        if int(self.verbose) >= 3:
             print(f"Node encoding {len(graphs)} graphs")
         return self.node_graph_vectorizer.transform(graphs)
 
     @timeit
-    def graph_encode(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
-        """Transform graphs into global conditioning vectors."""
-        if int(self.verbose) >= 2:
+    def graph_encode(self, graphs: List[nx.Graph]) -> GraphConditioningBatch:
+        """Transform graphs into explicit graph-level conditioning signals."""
+        if int(self.verbose) >= 3:
             print(f"Encoding {len(graphs)} graphs")
-        cond_encodings = np.asarray(self.graph_vectorizer.transform(graphs))
-        if not self._should_use_node_label_histograms():
-            return cond_encodings
-        histograms = self.graphs_to_node_label_histograms(graphs)
-        if histograms is None:
-            return cond_encodings
-        return self._augment_condition_encodings(cond_encodings, histograms)
+        graph_embeddings = np.asarray(self.graph_vectorizer.transform(graphs))
+        node_counts = np.asarray([graph.number_of_nodes() for graph in graphs], dtype=np.int64)
+        edge_counts = np.asarray([graph.number_of_edges() for graph in graphs], dtype=np.int64)
+        return GraphConditioningBatch(
+            graph_embeddings=graph_embeddings,
+            node_counts=node_counts,
+            edge_counts=edge_counts,
+            node_label_histograms=None,
+        )
 
-    def encode(self, graphs: List[nx.Graph]) -> Tuple[List[np.ndarray], Any]:
-        """Produce both node-level encodings and their matching conditioning vectors."""
-        node_encs = self.node_encode(graphs)
-        cond_encs = self.graph_encode(graphs)
-        return node_encs, cond_encs
+    def encode(self, graphs: List[nx.Graph]) -> Tuple[List[np.ndarray], GraphConditioningBatch]:
+        """Produce both node-level embeddings and explicit graph-level conditioning."""
+        return self.node_encode(graphs), self.graph_encode(graphs)
 
     def graphs_to_node_label_targets(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
         """Extract per-node categorical labels in the node ordering used elsewhere."""
@@ -1229,19 +1076,7 @@ class DecompositionalEncoderDecoder(object):
         return np.asarray(edge_label_targets, dtype=object), edge_label_pairs
 
     def _should_use_node_label_histograms(self) -> bool:
-        generator = getattr(self.conditioning_to_node_embeddings_generator, "conditional_node_generator", None)
-        if generator is None:
-            return False
-        return bool(getattr(generator, "require_embedded_node_label_histogram", False))
-
-    def _generator_predicts_edge_presence(self) -> bool:
-        generator_model = self.conditioning_to_node_embeddings_generator
-        if generator_model is None:
-            return False
-        conditional_generator = getattr(generator_model, "conditional_node_generator", None)
-        if conditional_generator is None:
-            return False
-        return bool(getattr(conditional_generator, "use_locality_supervision", False))
+        return False
 
     def _fit_node_label_vocab(self, node_label_targets: List[np.ndarray]) -> None:
         if not self._should_use_node_label_histograms():
@@ -1258,19 +1093,6 @@ class DecompositionalEncoderDecoder(object):
         self.node_label_classes_ = np.unique(np.asarray(flat_labels, dtype=object))
         self.node_label_to_index_ = {label: idx for idx, label in enumerate(self.node_label_classes_)}
         self.node_label_histogram_dimension = int(len(self.node_label_classes_))
-
-    def _augment_condition_encodings(self, cond_encodings: np.ndarray, histograms: np.ndarray) -> np.ndarray:
-        if histograms is None or self.node_label_histogram_dimension == 0:
-            return cond_encodings
-        if cond_encodings.ndim == 2:
-            return np.concatenate([cond_encodings, histograms], axis=1)
-        if cond_encodings.ndim == 3:
-            hist_tokens = np.repeat(histograms[:, None, :], cond_encodings.shape[1], axis=1)
-            return np.concatenate([cond_encodings, hist_tokens], axis=2)
-        raise ValueError(
-            "graph conditioning vectors must have shape (B, C) or (B, M, C); "
-            f"received {cond_encodings.shape}"
-        )
 
     def graphs_to_node_label_histograms(self, graphs: List[nx.Graph]) -> Optional[np.ndarray]:
         """Convert graphs into label histograms using the fitted graph-level label vocabulary."""
@@ -1293,116 +1115,247 @@ class DecompositionalEncoderDecoder(object):
             histograms.append(hist)
         return np.asarray(histograms, dtype=float)
 
-    def _get_predicted_node_labels_from_generator(self) -> Optional[List[np.ndarray]]:
-        generator_model = self.conditioning_to_node_embeddings_generator
-        if generator_model is None:
-            return None
-        conditional_generator = getattr(generator_model, "conditional_node_generator", None)
-        if conditional_generator is None:
-            return None
-        predicted = getattr(conditional_generator, "last_predicted_node_label_classes_", None)
-        if predicted is None:
-            return None
-        return [np.asarray(labels, dtype=object) for labels in predicted]
-
-    def _get_predicted_edge_probabilities_from_generator(self) -> Optional[List[np.ndarray]]:
-        generator_model = self.conditioning_to_node_embeddings_generator
-        if generator_model is None:
-            return None
-        conditional_generator = getattr(generator_model, "conditional_node_generator", None)
-        if conditional_generator is None:
-            return None
-        predicted = getattr(conditional_generator, "last_predicted_edge_probability_matrices_", None)
-        if predicted is None:
-            return None
-        return [np.asarray(prob_matrix, dtype=float) for prob_matrix in predicted]
-
-    def _get_predicted_edge_labels_from_generator(self) -> Optional[List[np.ndarray]]:
-        generator_model = self.conditioning_to_node_embeddings_generator
-        if generator_model is None:
-            return None
-        conditional_generator = getattr(generator_model, "conditional_node_generator", None)
-        if conditional_generator is None:
-            return None
-        predicted = getattr(conditional_generator, "last_predicted_edge_label_matrices_", None)
-        if predicted is None:
-            return None
-        return [np.asarray(label_matrix, dtype=object) for label_matrix in predicted]
-
-    def _resolve_generated_node_labels(
+    def _build_node_batch(
         self,
-        node_feats: List[np.ndarray],
-    ) -> Optional[List[np.ndarray]]:
-        channel_plan = self._plan_channel("node_labels")
-        if channel_plan is not None and channel_plan.mode != "learned":
-            return None
-        predicted_node_labels_list = self._get_predicted_node_labels_from_generator()
-        if predicted_node_labels_list is None:
-            return None
-        if len(predicted_node_labels_list) != len(node_feats):
-            return None
-        for labels, feats in zip(predicted_node_labels_list, node_feats):
-            if len(labels) != feats.shape[0]:
-                return None
-        return predicted_node_labels_list
+        graphs: List[nx.Graph],
+        node_embeddings_list: List[np.ndarray],
+        node_label_targets: Optional[List[np.ndarray]] = None,
+        edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        edge_targets: Optional[np.ndarray] = None,
+        edge_label_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        edge_label_targets: Optional[np.ndarray] = None,
+        auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
+        auxiliary_edge_targets: Optional[np.ndarray] = None,
+    ) -> NodeGenerationBatch:
+        """Assemble explicit node-level supervision tensors from graphs."""
+        max_num_rows = max(emb.shape[0] for emb in node_embeddings_list)
+        node_presence_mask = np.zeros((len(graphs), max_num_rows), dtype=bool)
+        node_degree_targets = np.zeros((len(graphs), max_num_rows), dtype=np.int64)
+        for graph_idx, graph in enumerate(graphs):
+            nodes = list(graph.nodes())
+            node_presence_mask[graph_idx, :len(nodes)] = True
+            node_degree_targets[graph_idx, :len(nodes)] = np.asarray(
+                [graph.degree(node) for node in nodes],
+                dtype=np.int64,
+            )
+        return NodeGenerationBatch(
+            node_embeddings_list=node_embeddings_list,
+            node_presence_mask=node_presence_mask,
+            node_degree_targets=node_degree_targets,
+            node_label_targets=node_label_targets,
+            edge_pairs=edge_pairs,
+            edge_targets=edge_targets,
+            edge_label_pairs=edge_label_pairs,
+            edge_label_targets=edge_label_targets,
+            auxiliary_edge_pairs=auxiliary_edge_pairs,
+            auxiliary_edge_targets=auxiliary_edge_targets,
+        )
 
-    def _resolve_generated_edge_probabilities(
+    def _log_generated_batch_info(
         self,
-        node_feats: List[np.ndarray],
-    ) -> Optional[List[np.ndarray]]:
-        channel_plan = self._plan_channel("direct_edges")
-        if channel_plan is not None and channel_plan.mode != "learned":
-            return None
-        predicted_edge_probability_matrices = self._get_predicted_edge_probabilities_from_generator()
-        if predicted_edge_probability_matrices is None:
-            return None
-        if len(predicted_edge_probability_matrices) != len(node_feats):
-            return None
-        for prob_matrix, feats in zip(predicted_edge_probability_matrices, node_feats):
-            if prob_matrix.shape != (feats.shape[0], feats.shape[0]):
-                return None
-        return predicted_edge_probability_matrices
+        graph_conditioning: GraphConditioningBatch,
+        generated_nodes: GeneratedNodeBatch,
+    ) -> None:
+        """Print per-graph generation summaries at the highest verbosity level."""
+        if int(self.verbose) < 3:
+            return
+        total_graphs = len(generated_nodes.node_embeddings_list)
+        for graph_idx in range(total_graphs):
+            node_embeddings = generated_nodes.node_embeddings_list[graph_idx]
+            predicted_node_count = (
+                int(np.sum(generated_nodes.node_presence_mask[graph_idx][: node_embeddings.shape[0]]))
+                if generated_nodes.node_presence_mask is not None
+                else node_embeddings.shape[0]
+            )
+            conditioning_node_count = int(graph_conditioning.node_counts[graph_idx])
+            conditioning_edge_count = int(graph_conditioning.edge_counts[graph_idx])
+            message = (
+                f"Generated graph {graph_idx + 1}/{total_graphs}: "
+                f"conditioning_nodes={conditioning_node_count}, "
+                f"conditioning_edges={conditioning_edge_count}, "
+                f"predicted_nodes={predicted_node_count}"
+            )
+            if generated_nodes.node_degree_predictions is not None:
+                valid_deg = np.asarray(
+                    generated_nodes.node_degree_predictions[graph_idx][: node_embeddings.shape[0]],
+                    dtype=float,
+                )
+                if generated_nodes.node_presence_mask is not None:
+                    valid_mask = np.asarray(
+                        generated_nodes.node_presence_mask[graph_idx][: node_embeddings.shape[0]],
+                        dtype=bool,
+                    )
+                    valid_deg = valid_deg[valid_mask]
+                if valid_deg.size > 0:
+                    message += (
+                        f", mean_degree={float(np.mean(valid_deg)):.2f}, "
+                        f"max_degree={int(np.max(valid_deg))}"
+                    )
+            if generated_nodes.edge_probability_matrices is not None:
+                edge_probs = np.asarray(generated_nodes.edge_probability_matrices[graph_idx], dtype=float)
+                off_diag = edge_probs[~np.eye(edge_probs.shape[0], dtype=bool)]
+                if off_diag.size > 0:
+                    message += (
+                        f", mean_edge_prob={float(np.mean(off_diag)):.3f}, "
+                        f"max_edge_prob={float(np.max(off_diag)):.3f}"
+                    )
+            print(message)
+            if generated_nodes.node_labels is not None:
+                labels = np.asarray(generated_nodes.node_labels[graph_idx], dtype=object)
+                if generated_nodes.node_presence_mask is not None:
+                    valid_mask = np.asarray(
+                        generated_nodes.node_presence_mask[graph_idx][: labels.shape[0]],
+                        dtype=bool,
+                    )
+                    labels = labels[valid_mask]
+                if labels.size > 0:
+                    unique_labels, counts = np.unique(labels, return_counts=True)
+                    label_summary = {label: int(count) for label, count in zip(unique_labels.tolist(), counts.tolist())}
+                    print(f"  node_labels={label_summary}")
 
-    def _resolve_generated_edge_labels(
+    @staticmethod
+    def _slice_graph_conditioning(
+        graph_conditioning: GraphConditioningBatch,
+        indices: Sequence[int],
+    ) -> GraphConditioningBatch:
+        """Select a subset of conditioning rows by integer indices."""
+        idx = np.asarray(indices, dtype=np.int64)
+        node_label_histograms = None
+        if graph_conditioning.node_label_histograms is not None:
+            node_label_histograms = np.asarray(graph_conditioning.node_label_histograms)[idx]
+        return GraphConditioningBatch(
+            graph_embeddings=np.asarray(graph_conditioning.graph_embeddings)[idx],
+            node_counts=np.asarray(graph_conditioning.node_counts)[idx],
+            edge_counts=np.asarray(graph_conditioning.edge_counts)[idx],
+            node_label_histograms=node_label_histograms,
+        )
+
+    @staticmethod
+    def _repeat_graph_conditioning(
+        graph_conditioning: GraphConditioningBatch,
+        repeats: int,
+    ) -> GraphConditioningBatch:
+        """Repeat each conditioning row a fixed number of times."""
+        if repeats < 1:
+            raise ValueError("repeats must be >= 1")
+        node_label_histograms = None
+        if graph_conditioning.node_label_histograms is not None:
+            node_label_histograms = np.repeat(
+                np.asarray(graph_conditioning.node_label_histograms),
+                repeats,
+                axis=0,
+            )
+        return GraphConditioningBatch(
+            graph_embeddings=np.repeat(
+                np.asarray(graph_conditioning.graph_embeddings),
+                repeats,
+                axis=0,
+            ),
+            node_counts=np.repeat(np.asarray(graph_conditioning.node_counts), repeats, axis=0),
+            edge_counts=np.repeat(np.asarray(graph_conditioning.edge_counts), repeats, axis=0),
+            node_label_histograms=node_label_histograms,
+        )
+
+    def _decode_conditioning_batch(
         self,
-        node_feats: List[np.ndarray],
-    ) -> Optional[List[np.ndarray]]:
-        channel_plan = self._plan_channel("edge_labels")
-        if channel_plan is not None and channel_plan.mode != "learned":
-            return None
-        predicted_edge_label_matrices = self._get_predicted_edge_labels_from_generator()
-        if predicted_edge_label_matrices is None:
-            return None
-        if len(predicted_edge_label_matrices) != len(node_feats):
-            return None
-        for edge_label_matrix, feats in zip(predicted_edge_label_matrices, node_feats):
-            if edge_label_matrix.shape != (feats.shape[0], feats.shape[0]):
-                return None
-        return predicted_edge_label_matrices
+        graph_conditioning: GraphConditioningBatch,
+        desired_class: Optional[Union[int, Sequence[int]]] = None,
+    ) -> List[nx.Graph]:
+        """Run a single generator pass and decode graphs without feasibility retries."""
+        generated_nodes = self.node_generator.predict(
+            graph_conditioning,
+            desired_class=desired_class,
+        )
+        self._log_generated_batch_info(graph_conditioning, generated_nodes)
+        return self.graph_decoder.decode(
+            generated_nodes,
+            predicted_node_labels_list=generated_nodes.node_labels,
+            predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+            predicted_edge_label_matrices=generated_nodes.edge_label_matrices,
+        )
+
+    def _decode_with_feasibility(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_class: Optional[Union[int, Sequence[int]]] = None,
+    ) -> List[nx.Graph]:
+        """Decode graphs and optionally reject infeasible outputs until the batch is filled."""
+        if self.feasibility_estimator is None:
+            return self._decode_conditioning_batch(
+                graph_conditioning,
+                desired_class=desired_class,
+            )
+
+        accepted_graphs: List[nx.Graph] = []
+        pending_conditioning = graph_conditioning
+        attempt = 0
+        total_generated = 0
+        while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
+            attempt += 1
+            decoded_graphs = self._decode_conditioning_batch(
+                pending_conditioning,
+                desired_class=desired_class,
+            )
+            total_generated += len(decoded_graphs)
+            feasibility_mask = np.asarray(
+                self.feasibility_estimator.predict(decoded_graphs),
+                dtype=bool,
+            )
+            if feasibility_mask.shape[0] != len(decoded_graphs):
+                raise RuntimeError(
+                    "Feasibility estimator returned a mask of unexpected length "
+                    f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
+                )
+            accepted_graphs.extend(
+                graph for graph, is_feasible in zip(decoded_graphs, feasibility_mask.tolist()) if is_feasible
+            )
+            rejected_indices = [idx for idx, is_feasible in enumerate(feasibility_mask.tolist()) if not is_feasible]
+            if int(self.verbose) >= 1:
+                accepted_now = int(feasibility_mask.sum())
+                rejected_now = int((~feasibility_mask).sum())
+                attempted_total = len(decoded_graphs)
+                acceptance_rate = (accepted_now / attempted_total) if attempted_total > 0 else 0.0
+                print(
+                    f"Feasibility filtering attempt {attempt}/{self.max_feasibility_attempts}: "
+                    f"generated={attempted_total}, accepted={accepted_now}, "
+                    f"rejected={rejected_now}, acceptance_rate={acceptance_rate:.1%}."
+                )
+            if not rejected_indices:
+                break
+            pending_conditioning = self._slice_graph_conditioning(
+                pending_conditioning,
+                rejected_indices,
+            )
+
+        if len(accepted_graphs) != len(graph_conditioning):
+            raise RuntimeError(
+                "Feasibility filtering did not recover enough graphs: "
+                f"accepted {len(accepted_graphs)} of {len(graph_conditioning)} after "
+                f"{self.max_feasibility_attempts} attempts."
+            )
+        if int(self.verbose) >= 1:
+            overall_rate = (len(accepted_graphs) / total_generated) if total_generated > 0 else 0.0
+            print(
+                "Feasibility filtering summary: "
+                f"generated={total_generated}, accepted={len(accepted_graphs)}, "
+                f"acceptance_rate={overall_rate:.1%}."
+            )
+        return accepted_graphs
 
     def decode(
         self,
-        conditioning_vectors: Any,
+        graph_conditioning: GraphConditioningBatch,
         desired_class: Optional[Union[int, Sequence[int]]] = None,
     ) -> List[nx.Graph]:
         """Decode conditioning vectors into reconstructed graphs."""
         if self.verbose:
-            print(f"Decoding {len(conditioning_vectors)} conditioning vectors")
+            print(f"Decoding {len(graph_conditioning)} conditioning vectors")
             if desired_class is not None:
                 print(f"Using classifier guidance toward class(es): {desired_class}")
         
-        node_feats = self.conditioning_to_node_embeddings_generator.predict(
-            conditioning_vectors,
+        return self._decode_with_feasibility(
+            graph_conditioning,
             desired_class=desired_class,
-        )
-        predicted_node_labels_list = self._resolve_generated_node_labels(node_feats)
-        predicted_edge_probability_matrices = self._resolve_generated_edge_probabilities(node_feats)
-        predicted_edge_label_matrices = self._resolve_generated_edge_labels(node_feats)
-        return self.node_embeddings_to_graph_generator.decode(
-            node_feats,
-            predicted_node_labels_list=predicted_node_labels_list,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-            predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
 
     @timeit
@@ -1413,18 +1366,10 @@ class DecompositionalEncoderDecoder(object):
             if desired_class is not None:
                 print(f"Using classifier guidance toward class(es): {desired_class}")
         
-        node_feats = self.conditioning_to_node_embeddings_generator.predict(
-            self._sample_conditions(n_samples),
+        sampled_conditioning = self._sample_conditions(n_samples)
+        return self._decode_with_feasibility(
+            sampled_conditioning,
             desired_class=desired_class,
-        )
-        predicted_node_labels_list = self._resolve_generated_node_labels(node_feats)
-        predicted_edge_probability_matrices = self._resolve_generated_edge_probabilities(node_feats)
-        predicted_edge_label_matrices = self._resolve_generated_edge_labels(node_feats)
-        return self.node_embeddings_to_graph_generator.decode(
-            node_feats,
-            predicted_node_labels_list=predicted_node_labels_list,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-            predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
 
     @timeit
@@ -1435,30 +1380,21 @@ class DecompositionalEncoderDecoder(object):
         desired_class: Optional[Union[int, Sequence[int]]] = None
     ) -> List[List[nx.Graph]]:
         """Sample multiple graphs per input by conditioning on each graph's encoding."""
-        _, cond_encs = self.encode(graphs)
-        cond_encs = [[cond_enc]*n_samples for cond_enc in cond_encs]
-        
-        results = []
-        for i in range(len(graphs)):
-            y_i = cond_encs[i]
-            node_feats = self.conditioning_to_node_embeddings_generator.predict(
-                y_i,
-                desired_class=desired_class,
-            )
-            predicted_node_labels_list = self._resolve_generated_node_labels(node_feats)
-            predicted_edge_probability_matrices = self._resolve_generated_edge_probabilities(node_feats)
-            predicted_edge_label_matrices = self._resolve_generated_edge_labels(node_feats)
-            decoded = self.node_embeddings_to_graph_generator.decode(
-                node_feats,
-                predicted_node_labels_list=predicted_node_labels_list,
-                predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-                predicted_edge_label_matrices=predicted_edge_label_matrices,
-            )
-            results.append(decoded)
-        
-        return results
+        _, graph_conditioning = self.encode(graphs)
+        repeated_conditioning = self._repeat_graph_conditioning(
+            graph_conditioning,
+            repeats=n_samples,
+        )
+        decoded = self._decode_with_feasibility(
+            repeated_conditioning,
+            desired_class=desired_class,
+        )
+        return [
+            decoded[i * n_samples:(i + 1) * n_samples]
+            for i in range(len(graphs))
+        ]
 
-    def sample_from(self, graphs, n_samples=1):
+    def sample_conditioned_on_random(self, graphs, n_samples=1):
         sampled_seed_graphs = random.choices(graphs, k=n_samples)
         reconstructed_graphs_list = self.conditional_sample(sampled_seed_graphs, n_samples=1)
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list]
@@ -1475,11 +1411,27 @@ class DecompositionalEncoderDecoder(object):
         """Interpolate between two graphs by SLERP-ing their condition vectors."""
         ts = np.linspace(t_start, t_end, n_steps)
         results = []
-        emb1 = self.graph_encode([G1])[0]
-        emb2 = self.graph_encode([G2])[0]
+        cond1 = self.graph_encode([G1])
+        cond2 = self.graph_encode([G2])
+        emb1 = cond1.graph_embeddings[0]
+        emb2 = cond2.graph_embeddings[0]
+        node_count = int(round((cond1.node_counts[0] + cond2.node_counts[0]) / 2.0))
+        edge_count = int(round((cond1.edge_counts[0] + cond2.edge_counts[0]) / 2.0))
         for t in ts:
             emb_t = scaled_slerp(emb1, emb2, t)
-            results.append(self.decode([emb_t])[0])
+            hist_t = None
+            if cond1.node_label_histograms is not None and cond2.node_label_histograms is not None:
+                hist_t = np.asarray([(1 - t) * cond1.node_label_histograms[0] + t * cond2.node_label_histograms[0]])
+            results.append(
+                self.decode(
+                    GraphConditioningBatch(
+                        graph_embeddings=np.asarray([emb_t]),
+                        node_counts=np.asarray([node_count], dtype=np.int64),
+                        edge_counts=np.asarray([edge_count], dtype=np.int64),
+                        node_label_histograms=hist_t,
+                    )
+                )[0]
+            )
         
         return results
 
@@ -1488,9 +1440,22 @@ class DecompositionalEncoderDecoder(object):
         graphs: List[nx.Graph]
     ) -> nx.Graph:
         """Compute a geometric mean graph via the SLERP barycentre of encodings."""
-        Y = np.vstack(self.graph_encode(graphs))
+        graph_conditioning = self.graph_encode(graphs)
+        Y = np.vstack(graph_conditioning.graph_embeddings)
         centroid = scaled_slerp_average(Y)
-        return self.decode([centroid])[0]
+        mean_node_count = int(round(np.mean(graph_conditioning.node_counts)))
+        mean_edge_count = int(round(np.mean(graph_conditioning.edge_counts)))
+        mean_hist = None
+        if graph_conditioning.node_label_histograms is not None:
+            mean_hist = np.asarray([np.mean(graph_conditioning.node_label_histograms, axis=0)])
+        return self.decode(
+            GraphConditioningBatch(
+                graph_embeddings=np.asarray([centroid]),
+                node_counts=np.asarray([mean_node_count], dtype=np.int64),
+                edge_counts=np.asarray([mean_edge_count], dtype=np.int64),
+                node_label_histograms=mean_hist,
+            )
+        )[0]
     
     @timeit
     def fit_classifier(self, graphs, targets, epochs=20, lr=1e-3):
@@ -1504,7 +1469,7 @@ class DecompositionalEncoderDecoder(object):
         num_classes = int(np.max(targets_np)) + 1
 
         # --- Step 3: Access underlying model ---
-        model = self.conditioning_to_node_embeddings_generator.conditional_node_generator.model
+        model = self.node_generator.conditional_node_generator.model
 
         # --- Step 4: Ensure guidance classifier is initialized correctly ---
         if not hasattr(model, "guidance_classifier") or model.guidance_classifier is None:
