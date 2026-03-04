@@ -603,6 +603,7 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
             aux_edge_idx = torch.empty((0, 3), dtype=torch.long, device=input_examples.device)
             aux_edge_labels = torch.empty((0,), dtype=torch.float32, device=input_examples.device)
 
+        batch_size = int(node_presence_mask.shape[0])
         losses, latent_tokens = self._eqm_loss(
             input_examples,
             global_condition,
@@ -629,8 +630,8 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
                 edge_pred = (torch.sigmoid(edge_logits) > 0.5).float()
                 edge_acc = (edge_pred == edge_labels).float().mean()
 
-            self.log("train_edge_ce", edge_loss, on_step=False, on_epoch=True)
-            self.log("train_edge_acc", edge_acc, on_step=False, on_epoch=True)
+            self.log("train_edge_ce", edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
+            self.log("train_edge_acc", edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
 
         if self.use_edge_label_head and edge_label_idx.numel() > 0:
             b, i, j = edge_label_idx.unbind(1)
@@ -639,7 +640,7 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
             edge_label_logits = self.edge_label_head(h_i, h_j)
             edge_label_loss = F.cross_entropy(edge_label_logits, edge_label_targets)
             total_loss = total_loss + self.lambda_edge_label_importance * edge_label_loss
-            self.log("train_edge_label_ce", edge_label_loss, on_step=False, on_epoch=True)
+            self.log("train_edge_label_ce", edge_label_loss, on_step=False, on_epoch=True, batch_size=batch_size)
 
         if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
             b, i, j = aux_edge_idx.unbind(1)
@@ -657,16 +658,16 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
                 aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
                 aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
 
-            self.log("train_aux_locality_ce", aux_edge_loss, on_step=False, on_epoch=True)
-            self.log("train_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True)
+            self.log("train_aux_locality_ce", aux_edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
+            self.log("train_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
 
-        self.log("train_total", total_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("train_recon", losses["eqm"], on_step=False, on_epoch=True)
-        self.log("train_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
+        self.log("train_total", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("train_recon", losses["eqm"], on_step=False, on_epoch=True, batch_size=batch_size)
+        self.log("train_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True, batch_size=batch_size)
         if self.use_existence_head:
-            self.log("train_exist", losses["exist"], on_step=False, on_epoch=True)
+            self.log("train_exist", losses["exist"], on_step=False, on_epoch=True, batch_size=batch_size)
         if self.use_node_label_head:
-            self.log("train_node_label_ce", losses["label_ce"], on_step=False, on_epoch=True)
+            self.log("train_node_label_ce", losses["label_ce"], on_step=False, on_epoch=True, batch_size=batch_size)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
@@ -693,6 +694,7 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
                 aux_edge_idx = torch.empty((0, 3), dtype=torch.long, device=input_examples.device)
                 aux_edge_labels = torch.empty((0,), dtype=torch.float32, device=input_examples.device)
 
+            batch_size = int(node_presence_mask.shape[0])
             losses, latent_tokens = self._eqm_loss(
                 input_examples,
                 global_condition,
@@ -718,8 +720,8 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
                 edge_pred = (torch.sigmoid(edge_logits) > 0.5).float()
                 edge_acc = (edge_pred == edge_labels).float().mean()
 
-                self.log("val_edge_ce", edge_loss, on_step=False, on_epoch=True)
-                self.log("val_edge_acc", edge_acc, on_step=False, on_epoch=True)
+                self.log("val_edge_ce", edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
+                self.log("val_edge_acc", edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
 
             if self.use_edge_label_head and edge_label_idx.numel() > 0:
                 b, i, j = edge_label_idx.unbind(1)
@@ -728,7 +730,7 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
                 edge_label_logits = self.edge_label_head(h_i, h_j)
                 edge_label_loss = F.cross_entropy(edge_label_logits, edge_label_targets)
                 total_loss = total_loss + self.lambda_edge_label_importance * edge_label_loss
-                self.log("val_edge_label_ce", edge_label_loss, on_step=False, on_epoch=True)
+                self.log("val_edge_label_ce", edge_label_loss, on_step=False, on_epoch=True, batch_size=batch_size)
 
             if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
                 b, i, j = aux_edge_idx.unbind(1)
@@ -745,16 +747,16 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
                 aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
                 aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
 
-                self.log("val_aux_locality_ce", aux_edge_loss, on_step=False, on_epoch=True)
-                self.log("val_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True)
+                self.log("val_aux_locality_ce", aux_edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
+                self.log("val_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
 
-            self.log("val_total", total_loss, on_step=False, on_epoch=True, prog_bar=True)
-            self.log("val_recon", losses["eqm"], on_step=False, on_epoch=True)
-            self.log("val_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True)
+            self.log("val_total", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+            self.log("val_recon", losses["eqm"], on_step=False, on_epoch=True, batch_size=batch_size)
+            self.log("val_deg_ce", losses["deg_ce"], on_step=False, on_epoch=True, batch_size=batch_size)
             if self.use_existence_head:
-                self.log("val_exist", losses["exist"], on_step=False, on_epoch=True)
+                self.log("val_exist", losses["exist"], on_step=False, on_epoch=True, batch_size=batch_size)
             if self.use_node_label_head:
-                self.log("val_node_label_ce", losses["label_ce"], on_step=False, on_epoch=True)
+                self.log("val_node_label_ce", losses["label_ce"], on_step=False, on_epoch=True, batch_size=batch_size)
         return total_loss.detach()
 
     def on_train_end(self):
@@ -1463,6 +1465,7 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
             default_root_dir=self.artifact_root_dir,
             enable_checkpointing=True,
             enable_progress_bar=False,
+            log_every_n_steps=max(1, min(10, len(train_loader))),
         )
         if not self.verbose:
             with suppress_output():
