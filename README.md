@@ -15,7 +15,7 @@ The repository includes:
   - `eqm_conditional_node_generator.py`: model, training loop integration, sampling utilities.
   - `decompositional_encoder_decoder.py`: graph generator and decoder orchestration.
   - `graph_generator.py`: public graph generator entrypoints.
-  - `generator_shared.py`, `lightning_utils.py`, `low_rank_mlp.py`: shared modules.
+  - `generator_shared.py`, `lightning_utils.py`, `timeit.py`: shared modules.
 - `notebooks/`
   Experiment and demo notebooks, plus notebook-specific helpers in `notebook_utils.py`.
 - `tests/`
