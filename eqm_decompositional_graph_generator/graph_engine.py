@@ -53,32 +53,6 @@ def _interpolate_integer_series(start, end, ts, minimum):
     values = np.rint([(1.0 - t) * start + t * end for t in ts]).astype(np.int64)
     return np.maximum(values, np.int64(minimum))
 
-
-def interpolate(
-    graph_generator,
-    graph_a,
-    graph_b,
-    k=7,
-    apply_feasibility_filtering=True,
-    interpolation_mode: str = "slerp",
-):
-    """Compatibility helper. Prefer graph_generator.interpolate(...)."""
-    try:
-        return graph_generator.interpolate(
-            graph_a,
-            graph_b,
-            k=k,
-            apply_feasibility_filtering=apply_feasibility_filtering,
-            interpolation_mode=interpolation_mode,
-        )
-    except TypeError:
-        return graph_generator.interpolate(
-            graph_a,
-            graph_b,
-            k=k,
-            apply_feasibility_filtering=apply_feasibility_filtering,
-        )
-
 def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
     """Interpolate between vectors on the hypersphere while blending magnitudes linearly."""
     # Compute magnitudes

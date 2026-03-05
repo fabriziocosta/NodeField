@@ -4,7 +4,6 @@ import pytest
 
 from eqm_decompositional_graph_generator.graph_engine import (
     _interpolate_integer_series,
-    interpolate,
 )
 from eqm_decompositional_graph_generator.node_engine import GraphConditioningBatch
 from notebooks.notebook_utils import sample_positive_endpoint_pair
@@ -124,7 +123,7 @@ def test_interpolate_returns_conditioning_and_summary():
     }
     gen = _FakeGraphGenerator()
 
-    result = interpolate(gen, graph_a, graph_b, k=3, apply_feasibility_filtering=False)
+    result = gen.interpolate(graph_a, graph_b, k=3, apply_feasibility_filtering=False)
 
     assert set(result.keys()) == {"ts", "conditioning", "decoded_slots", "generated_graphs", "summary"}
     assert isinstance(result["summary"], pd.DataFrame)
