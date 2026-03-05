@@ -20,8 +20,8 @@ try:
 except ModuleNotFoundError:
     from nsppk import NSPPK, NodeNSPPK
 
-from eqm_decompositional_graph_generator.eqm_conditional_node_generator import EqMDecompositionalNodeGenerator
-from eqm_decompositional_graph_generator.graph_generator import (
+from eqm_decompositional_graph_generator.node_engine import EqMDecompositionalNodeGenerator
+from eqm_decompositional_graph_generator.graph_engine import (
     EqMDecompositionalGraphDecoder,
     EqMDecompositionalGraphGenerator,
 )
@@ -29,7 +29,7 @@ from eqm_decompositional_graph_generator.graph_generator import (
 
 def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
     if dataset_type == "ARTIFICIAL":
-        from eqm_decompositional_graph_generator.artificial_graph_constructor import ArtificialGraphDatasetConstructor
+        from eqm_decompositional_graph_generator.support import ArtificialGraphDatasetConstructor
         try:
             from notebooks.notebook_utils import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
         except ModuleNotFoundError:

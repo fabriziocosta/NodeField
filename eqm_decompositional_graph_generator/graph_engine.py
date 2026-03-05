@@ -1,3 +1,5 @@
+"""Graph-level EqM generation engine (merged module)."""
+
 #!/usr/bin/env python
 """Graph encoder/decoder helpers used by the maintained conditional graph-generation pipeline."""
 
@@ -7,9 +9,9 @@ import networkx as nx
 import random
 import pulp
 import dill as pickle
-from .timeit import timeit
+from .support import timeit
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union
-from .conditional_node_generator_base import (
+from .node_engine import (
     ConditionalNodeGeneratorBase,
     GeneratedNodeBatch,
     GraphConditioningBatch,
@@ -45,6 +47,36 @@ class SupervisionPlan:
             "direct_edges": self.direct_edges,
             "auxiliary_locality": self.auxiliary_locality,
         }
+
+
+
+def sample_positive_endpoint_pair(graphs, targets):
+    positive_indices = np.flatnonzero(np.asarray(targets) != 0)
+    if positive_indices.size < 2:
+        raise RuntimeError("Need at least two positive training graphs for interpolation.")
+    selected_indices = np.random.choice(positive_indices, size=2, replace=False)
+    selected_targets = [targets[int(idx)] for idx in selected_indices]
+    return (
+        selected_indices.tolist(),
+        selected_targets,
+        graphs[int(selected_indices[0])],
+        graphs[int(selected_indices[1])],
+    )
+
+
+def _interpolate_integer_series(start, end, ts, minimum):
+    values = np.rint([(1.0 - t) * start + t * end for t in ts]).astype(np.int64)
+    return np.maximum(values, np.int64(minimum))
+
+
+def interpolate(graph_generator, graph_a, graph_b, k=7, apply_feasibility_filtering=True):
+    """Compatibility helper. Prefer graph_generator.interpolate(...)."""
+    return graph_generator.interpolate(
+        graph_a,
+        graph_b,
+        k=k,
+        apply_feasibility_filtering=apply_feasibility_filtering,
+    )
 
 def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
     """Interpolate between vectors on the hypersphere while blending magnitudes linearly."""
@@ -1492,10 +1524,6 @@ class EqMDecompositionalGraphGenerator(object):
         apply_feasibility_filtering: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Interpolate between two graph condition vectors and decode intermediate graphs."""
-
-        def _interpolate_integer_series(start, end, ts, minimum):
-            values = np.rint([(1.0 - t) * start + t * end for t in ts]).astype(np.int64)
-            return np.maximum(values, np.int64(minimum))
 
         cond_a = self.graph_encode([G1])
         cond_b = self.graph_encode([G2])

@@ -1,7 +1,7 @@
 import re
 import time
 
-from eqm_decompositional_graph_generator.timeit import _verbosity_level, timeit
+from eqm_decompositional_graph_generator.support import _verbosity_level, timeit
 
 
 class _Worker:

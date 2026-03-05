@@ -5,14 +5,14 @@ import numpy as np
 import pytest
 import torch
 
-from eqm_decompositional_graph_generator.decompositional_encoder_decoder import (
+from eqm_decompositional_graph_generator.graph_engine import (
     EqMDecompositionalGraphGenerator,
 )
-from eqm_decompositional_graph_generator.eqm_conditional_node_generator import (
+from eqm_decompositional_graph_generator.node_engine import (
     EqMDecompositionalNodeGenerator,
     EqMDecompositionalNodeGeneratorModule,
 )
-from eqm_decompositional_graph_generator.conditional_node_generator_base import (
+from eqm_decompositional_graph_generator.node_engine import (
     GeneratedNodeBatch,
     GraphConditioningBatch,
 )

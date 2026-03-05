@@ -1,12 +1,12 @@
 import numpy as np
 import pytest
 
-from eqm_decompositional_graph_generator.conditional_node_generator_base import (
+from eqm_decompositional_graph_generator.node_engine import (
     GeneratedNodeBatch,
     GraphConditioningBatch,
     NodeGenerationBatch,
 )
-from eqm_decompositional_graph_generator.lightning_utils import run_trainer_fit
+from eqm_decompositional_graph_generator.support import run_trainer_fit
 
 
 def test_graph_conditioning_batch_len():

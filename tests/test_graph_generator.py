@@ -2,7 +2,7 @@ import numpy as np
 import networkx as nx
 import pytest
 
-from eqm_decompositional_graph_generator.decompositional_encoder_decoder import (
+from eqm_decompositional_graph_generator.graph_engine import (
     EqMDecompositionalGraphGenerator,
 )
 

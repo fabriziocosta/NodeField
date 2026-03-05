@@ -12,10 +12,9 @@ The repository includes:
 
 - `eqm_decompositional_graph_generator/`
   Core package:
-  - `eqm_conditional_node_generator.py`: model, training loop integration, sampling utilities.
-  - `decompositional_encoder_decoder.py`: graph generator and decoder orchestration.
-  - `graph_generator.py`: public graph generator entrypoints.
-  - `generator_shared.py`, `lightning_utils.py`, `timeit.py`: shared modules.
+  - `node_engine.py`: EqM node model, batch dataclasses, and shared NN/callback blocks.
+  - `graph_engine.py`: graph generator/decoder orchestration and interpolation helpers.
+  - `support.py`: runtime decorators/helpers plus artificial graph dataset constructors.
 - `notebooks/`
   Experiment and demo notebooks, plus notebook-specific helpers in `notebook_utils.py`.
 - `tests/`
