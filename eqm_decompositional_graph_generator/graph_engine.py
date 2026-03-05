@@ -70,14 +70,30 @@ def _interpolate_integer_series(start, end, ts, minimum):
     return np.maximum(values, np.int64(minimum))
 
 
-def interpolate(graph_generator, graph_a, graph_b, k=7, apply_feasibility_filtering=True):
+def interpolate(
+    graph_generator,
+    graph_a,
+    graph_b,
+    k=7,
+    apply_feasibility_filtering=True,
+    interpolation_mode: str = "slerp",
+):
     """Compatibility helper. Prefer graph_generator.interpolate(...)."""
-    return graph_generator.interpolate(
-        graph_a,
-        graph_b,
-        k=k,
-        apply_feasibility_filtering=apply_feasibility_filtering,
-    )
+    try:
+        return graph_generator.interpolate(
+            graph_a,
+            graph_b,
+            k=k,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+            interpolation_mode=interpolation_mode,
+        )
+    except TypeError:
+        return graph_generator.interpolate(
+            graph_a,
+            graph_b,
+            k=k,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+        )
 
 def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
     """Interpolate between vectors on the hypersphere while blending magnitudes linearly."""
@@ -1519,6 +1535,7 @@ class EqMDecompositionalGraphGenerator(object):
         G2: nx.Graph,
         k: int = 7,
         apply_feasibility_filtering: Optional[bool] = None,
+        interpolation_mode: str = "slerp",
     ) -> Dict[str, Any]:
         """Interpolate between two graph condition vectors and decode intermediate graphs."""
 
@@ -1526,10 +1543,21 @@ class EqMDecompositionalGraphGenerator(object):
         cond_b = self.graph_encode([G2])
         ts = np.linspace(0.0, 1.0, k + 2)[1:-1]
 
-        interpolated_graph_embeddings = np.stack(
-            [(1.0 - t) * cond_a.graph_embeddings[0] + t * cond_b.graph_embeddings[0] for t in ts],
-            axis=0,
-        )
+        interpolation_mode = str(interpolation_mode).lower()
+        if interpolation_mode not in {"lerp", "slerp"}:
+            raise ValueError(
+                f"interpolation_mode must be 'lerp' or 'slerp' (got {interpolation_mode!r})."
+            )
+        if interpolation_mode == "slerp":
+            interpolated_graph_embeddings = np.stack(
+                [scaled_slerp(cond_a.graph_embeddings[0], cond_b.graph_embeddings[0], t) for t in ts],
+                axis=0,
+            )
+        else:
+            interpolated_graph_embeddings = np.stack(
+                [(1.0 - t) * cond_a.graph_embeddings[0] + t * cond_b.graph_embeddings[0] for t in ts],
+                axis=0,
+            )
         interpolated_node_counts = _interpolate_integer_series(
             cond_a.node_counts[0],
             cond_b.node_counts[0],
@@ -1570,6 +1598,7 @@ class EqMDecompositionalGraphGenerator(object):
                 "target_nodes": interpolated_node_counts,
                 "target_edges": interpolated_edge_counts,
                 "decoded": [graph is not None for graph in decoded_slots],
+                "mode": interpolation_mode,
             }
         )
         return {
