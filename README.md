@@ -1,46 +1,92 @@
 # GraphGen
 
-GraphGen now maintains the Equilibrium Matching generator as the supported path for conditional graph generation.
+GraphGen is a Python toolkit for conditional graph generation with decompositional encoding/decoding and equilibrium-style node updates.
 
-## Maintained Surface
-- `eqm_decompositional_graph_generator/eqm_conditional_node_generator.py` – supported conditional generator backend.
-- `eqm_decompositional_graph_generator/decompositional_encoder_decoder.py` – orchestration, supervision planning, graph encode/decode, and optimization-based final decoding.
-- `eqm_decompositional_graph_generator/generator_shared.py` – shared transformer, edge-head, plotting, and metric utilities used by the maintained generator.
-- `notebooks/demo_eqm.ipynb` – maintained end-to-end notebook.
-- `EqM_README.md` – detailed notes on the EqM formulation and implementation.
+The repository includes:
+- A trainable conditional node generator.
+- A graph-level generator that handles encoding, supervision construction, and decoding.
+- Notebook workflows for experiments and analysis.
+- Unit tests for core utility and generation behavior.
 
-## Archived Legacy
-The diffusion-era implementation and related notebooks were archived under `v_0_1/`.
+## Project Layout
 
-- `v_0_1/node_diffusion/conditional_denoising_node_generator.py`
-- `v_0_1/notebooks/demo.ipynb`
-- `v_0_1/notebooks/demo_chem.ipynb`
-- `v_0_1/notebooks/Denoising Conditional Node Graph Generator.ipynb`
-
-These files are kept for historical reference and older experiments. They are no longer the maintained path.
+- `eqm_decompositional_graph_generator/`
+  Core package:
+  - `eqm_conditional_node_generator.py`: model, training loop integration, sampling utilities.
+  - `decompositional_encoder_decoder.py`: graph generator and decoder orchestration.
+  - `graph_generator.py`: public graph generator entrypoints.
+  - `generator_shared.py`, `lightning_utils.py`, `low_rank_mlp.py`: shared modules.
+- `notebooks/`
+  Experiment and demo notebooks, plus notebook-specific helpers in `notebook_utils.py`.
+- `tests/`
+  Pytest suite for generator behavior and helper modules.
+- `.artifacts/`
+  Local artifacts (checkpoints/models); ignored by git.
 
 ## Installation
-1. Create and activate a Python environment.
-2. Install the core dependencies:
-   ```bash
-   pip install "numpy<2" torch pytorch-lightning scipy pandas scikit-learn networkx matplotlib pulp dill
-   ```
-3. Install project-specific extras as needed:
-   - `coco-grape` for the vectorization helpers used by the decompositional pipeline
-   - `jupyterlab` or `notebook` if you want to run the notebook
+
+1. Create a Python environment (Python 3.10+ recommended).
+2. Install core dependencies:
+
+```bash
+pip install "numpy<2" torch pytorch-lightning scipy pandas scikit-learn networkx matplotlib pulp dill
+```
+
+3. Install optional extras as needed:
+- `jupyterlab` or `notebook` to run notebooks.
+- `coco-grape`, `NSPPK`, `AbstractGraph` if you run notebook flows that import them.
 
 ## Quick Start
+
 ```python
-from eqm_decompositional_graph_generator.eqm_conditional_node_generator import (
+from eqm_decompositional_graph_generator import (
     EqMDecompositionalNodeGenerator,
-)
-from eqm_decompositional_graph_generator.graph_generator import (
     EqMDecompositionalGraphDecoder,
     EqMDecompositionalGraphGenerator,
 )
 ```
 
-The maintained workflow is demonstrated in `notebooks/demo_eqm.ipynb`.
+Typical high-level workflow:
+1. Prepare graphs (`networkx.Graph`) with node/edge labels as needed.
+2. Build vectorizers for graph-level and node-level embeddings.
+3. Instantiate `EqMDecompositionalNodeGenerator`.
+4. Wrap it in `EqMDecompositionalGraphGenerator` (optionally with a decoder).
+5. Train with `.fit(...)`.
+6. Generate with `.sample(...)` or `.sample_conditioned_on_random(...)`.
 
-## Status
-This codebase is still research-oriented, but the supported generator path is now EqM-only. New work should target the maintained files listed above rather than the archived `v_0_1/` implementation.
+Notebook examples:
+- `notebooks/demo.ipynb`
+- `notebooks/demo2.ipynb`
+- `notebooks/demo_chem.ipynb`
+- `notebooks/demo_chem2.ipynb`
+- `notebooks/demo_optimization.ipynb`
+
+## Running Tests
+
+```bash
+pytest -q
+```
+
+Targeted run example:
+
+```bash
+pytest tests/test_graph_generator.py -q
+```
+
+## Data and Artifacts
+
+Large datasets and training artifacts are intentionally excluded from version control.
+
+Ignored locations include:
+- `.artifacts/`
+- `PUBCHEM/`
+- `notebooks/PUBCHEM/`
+
+Keep experimental outputs in ignored paths to avoid inflating repository history.
+
+## Notes for Notebook Development
+
+Notebook execution flow is kept lean by design:
+- Prefer assigning variables and calling functions from `.py` modules.
+- Place reusable notebook logic in helper modules (for example `notebooks/notebook_utils.py`).
+- Clear notebook outputs before committing.
