@@ -2,7 +2,8 @@
 
 This document explains the `EqMDecompositionalNodeGenerator` implemented in this repository, how it differs from the diffusion-based generator, what equations it uses during training and sampling, and how the surrounding graph-generation pipeline fits together.
 
-The implementation lives primarily in [eqm_conditional_node_generator.py](/home/fabrizio/work/GraphGen/eqm_decompositional_graph_generator/eqm_conditional_node_generator.py).
+The implementation lives primarily in
+[`node_engine.py`](eqm_decompositional_graph_generator/node_engine.py).
 
 ## Overview
 
@@ -262,8 +263,10 @@ $$
 where $s$ is a per-feature noise scale tensor. The degree channel uses reduced noise:
 
 $$
-s_d = \frac{\sigma}{\text{noise\_degree\_factor}}
+s_d = \frac{\sigma}{f_{\mathrm{deg}}}
 $$
+
+where $f_{\mathrm{deg}}$ is `noise_degree_factor`.
 
 while other channels use:
 
@@ -415,11 +418,7 @@ $$
 This loss is applied only on valid node positions, using the same node mask used by
 the EqM loss.
 
-The implementation logs this term as:
-
-$$
-\texttt{label\_ce}
-$$
+The implementation logs this term as `label_ce`.
 
 ### Locality Supervision Loss
 
@@ -548,7 +547,7 @@ So the EqM stage is trained to do both:
 In the current code, the first two graph-level conditioning features are already:
 
 $$
-[\text{num\_nodes}, 2 \cdot \text{num\_edges}]
+[n_{\mathrm{nodes}}, 2 \cdot n_{\mathrm{edges}}]
 $$
 
 and the label histogram is appended after those existing graph features, not used as a
