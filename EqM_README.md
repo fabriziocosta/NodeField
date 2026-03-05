@@ -336,11 +336,7 @@ $$
 
 and the masked BCE loss is:
 
-$$
-\mathcal{L}_{\text{exist}}
-=
-\mathrm{MaskedBCEWithLogits}(\ell^{\text{exist}}, y^{\text{exist}})
-$$
+$$\mathcal{L}_{\text{exist}} = \mathrm{MaskedBCEWithLogits}(\ell^{\text{exist}}, y^{\text{exist}})$$
 
 with class weighting via `exist_pos_weight`.
 
@@ -360,11 +356,7 @@ $$
 
 and the masked classification loss is:
 
-$$
-\mathcal{L}_{\text{deg}}
-=
-\mathrm{MaskedCrossEntropy}(\ell^{\text{deg}}, y^{\text{deg}})
-$$
+$$\mathcal{L}_{\text{deg}} = \mathrm{MaskedCrossEntropy}(\ell^{\text{deg}}, y^{\text{deg}})$$
 
 ### Node Label Loss
 
@@ -386,11 +378,7 @@ $$
 
 The masked classification loss is:
 
-$$
-\mathcal{L}_{\text{label}}
-=
-\mathrm{MaskedCrossEntropy}(\ell^{\text{label}}, y^{\text{label}})
-$$
+$$\mathcal{L}_{\text{label}} = \mathrm{MaskedCrossEntropy}(\ell^{\text{label}}, y^{\text{label}})$$
 
 This loss is applied only on valid node positions, using the same node mask used by
 the EqM loss.
@@ -407,45 +395,19 @@ $$
 
 and trained with binary cross-entropy against supplied locality labels:
 
-$$
-\mathcal{L}_{\text{edge}}
-=
-\mathrm{BCEWithLogits}(\ell^{\text{edge}}, y^{\text{edge}})
-$$
+$$\mathcal{L}_{\text{edge}} = \mathrm{BCEWithLogits}(\ell^{\text{edge}}, y^{\text{edge}})$$
 
 ## Total Training Objective
 
 The full objective used in the implementation is:
 
-$$
-\mathcal{L}_{\text{total}}
-=
-\mathcal{L}_{\text{eqm}}
-+
-\lambda_{\text{exist}} \mathcal{L}_{\text{exist}}
-+
-\lambda_{\text{deg}} \mathcal{L}_{\text{deg}}
-+
-\lambda_{\text{label}} \mathcal{L}_{\text{label}}
-+
-\lambda_{\text{local}} \mathcal{L}_{\text{edge}}
-$$
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{eqm}} + \lambda_{\text{exist}} \mathcal{L}_{\text{exist}} + \lambda_{\text{deg}} \mathcal{L}_{\text{deg}} + \lambda_{\text{label}} \mathcal{L}_{\text{label}} + \lambda_{\text{local}} \mathcal{L}_{\text{edge}}$$
 
 when locality supervision is enabled.
 
 Otherwise:
 
-$$
-\mathcal{L}_{\text{total}}
-=
-\mathcal{L}_{\text{eqm}}
-+
-\lambda_{\text{exist}} \mathcal{L}_{\text{exist}}
-+
-\lambda_{\text{deg}} \mathcal{L}_{\text{deg}}
-+
-\lambda_{\text{label}} \mathcal{L}_{\text{label}}
-$$
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{eqm}} + \lambda_{\text{exist}} \mathcal{L}_{\text{exist}} + \lambda_{\text{deg}} \mathcal{L}_{\text{deg}} + \lambda_{\text{label}} \mathcal{L}_{\text{label}}$$
 
 If the dataset has a degenerate fixed-size existence target, the implementation disables
 the existence head automatically and drops $\mathcal{L}_{\text{exist}}$ from the
@@ -484,13 +446,7 @@ this moves samples toward higher conditional probability, or equivalently lower 
 
 If enabled, the implementation adds stochasticity:
 
-$$
-x_{k+1}
-=
-x_k + \eta g_\theta(x_k, c)
-+
-\sqrt{2\eta} \, \alpha \, \xi_k
-$$
+$$x_{k+1} = x_k + \eta g_\theta(x_k, c) + \sqrt{2\eta} \, \alpha \, \xi_k$$
 
 where:
 
