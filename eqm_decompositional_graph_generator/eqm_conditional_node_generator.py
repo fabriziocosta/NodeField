@@ -1205,6 +1205,67 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
             parts.append(np.asarray(graph_conditioning.node_label_histograms, dtype=float))
         return np.concatenate(parts, axis=1)
 
+    def _fit_target_encoder(self, targets: Sequence[Any]) -> None:
+        targets_array = np.asarray(targets, dtype=object)
+        unique_targets = np.unique(targets_array)
+        if unique_targets.size <= self.target_classification_max_distinct:
+            self.target_mode_ = "classification"
+            self.target_classes_ = unique_targets
+            self.target_to_index_ = {
+                target_value: int(index)
+                for index, target_value in enumerate(self.target_classes_.tolist())
+            }
+            self.target_scaler_ = None
+            self.target_condition_dim_ = int(len(self.target_classes_))
+        else:
+            self.target_mode_ = "regression"
+            self.target_classes_ = None
+            self.target_to_index_ = None
+            self.target_scaler_ = MinMaxScaler()
+            numeric_targets = np.asarray(targets, dtype=float).reshape(-1, 1)
+            self.target_scaler_.fit(numeric_targets)
+            self.target_condition_dim_ = 1
+        self.guidance_enabled_ = True
+
+    def _reset_target_encoder(self) -> None:
+        self.target_mode_ = None
+        self.target_classes_ = None
+        self.target_to_index_ = None
+        self.target_scaler_ = None
+        self.target_condition_dim_ = 0
+        self.target_condition_start_ = None
+        self.guidance_enabled_ = False
+
+    def _encode_targets(self, targets: Sequence[Any]) -> np.ndarray:
+        if not self.guidance_enabled_ or self.target_mode_ is None:
+            return np.zeros((len(targets), 0), dtype=float)
+        if self.target_mode_ == "classification":
+            encoded = np.zeros((len(targets), self.target_condition_dim_), dtype=float)
+            for row, target in enumerate(targets):
+                if target not in self.target_to_index_:
+                    raise ValueError(f"Unknown classification target value: {target!r}")
+                encoded[row, self.target_to_index_[target]] = 1.0
+            return encoded
+        numeric_targets = np.asarray(targets, dtype=float).reshape(-1, 1)
+        return self.target_scaler_.transform(numeric_targets)
+
+    def _normalize_desired_target(
+        self,
+        desired_target: Optional[Union[int, float, Sequence[Any]]],
+        batch_size: int,
+    ) -> Optional[List[Any]]:
+        if desired_target is None:
+            return None
+        if isinstance(desired_target, (list, tuple, np.ndarray)):
+            values = list(desired_target)
+            if len(values) != batch_size:
+                raise ValueError(
+                    "desired_target sequence length must match the batch size "
+                    f"(got {len(values)} values for batch size {batch_size})."
+                )
+            return values
+        return [desired_target] * batch_size
+
     def _compute_binary_pos_weight(self, targets: Optional[np.ndarray], default: float = 1.0) -> float:
         """Compute a BCE positive-class weight from binary targets."""
         if targets is None:
@@ -1224,6 +1285,7 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         self,
         node_batch: NodeGenerationBatch,
         graph_conditioning: GraphConditioningBatch,
+        targets: Optional[Sequence[Any]] = None,
     ):
         node_encodings_list = node_batch.node_embeddings_list
         edge_pairs = node_batch.edge_pairs
@@ -1275,7 +1337,20 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
             padded_examples.append(x)
 
         X_array = np.stack(padded_examples, axis=0)
-        y_array = self._compose_condition_array(graph_conditioning)
+        base_condition_array = self._compose_condition_array(graph_conditioning)
+        self.target_condition_start_ = int(base_condition_array.shape[1])
+        if targets is not None:
+            if len(targets) != len(node_encodings_list):
+                raise ValueError(
+                    "targets length must match node batch size "
+                    f"(got {len(targets)} targets for {len(node_encodings_list)} graphs)."
+                )
+            self._fit_target_encoder(targets)
+            target_condition_array = self._encode_targets(targets)
+            y_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
+        else:
+            self._reset_target_encoder()
+            y_array = base_condition_array
         self.condition_token_count = 1
         valid_mask = np.asarray(node_batch.node_presence_mask, dtype=bool)
 
@@ -1283,9 +1358,9 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         if node_label_targets is not None:
             self._fit_node_label_vocab(node_label_targets)
             encoded_node_label_targets = self._encode_node_label_targets(node_label_targets, max_num_rows)
-            self.base_condition_feature_dimension = graph_conditioning.graph_embeddings.shape[-1] + 2
+            self.base_condition_feature_dimension = base_condition_array.shape[1]
         else:
-            self.base_condition_feature_dimension = graph_conditioning.graph_embeddings.shape[-1] + 2
+            self.base_condition_feature_dimension = base_condition_array.shape[1]
             self.use_node_label_head = False
             self.node_label_histogram_dimension = 0
             self.node_label_classes_ = None
@@ -1415,6 +1490,11 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
             sampling_steps=self.sampling_steps,
             langevin_noise_scale=self.langevin_noise_scale,
             pool_condition_tokens=self.pool_condition_tokens,
+            guidance_enabled=self.guidance_enabled_,
+            target_condition_start_index=self.target_condition_start_,
+            target_condition_feature_count=self.target_condition_dim_,
+            cfg_condition_dropout_prob=self.cfg_condition_dropout_prob,
+            cfg_null_target_strategy=self.cfg_null_target_strategy,
         )
         self.model.noise_degree_factor = self.noise_degree_factor
         self.model.use_existence_head = self.use_existence_head
@@ -1436,6 +1516,7 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         self,
         node_batch: NodeGenerationBatch,
         graph_conditioning: GraphConditioningBatch,
+        targets: Optional[Sequence[Any]] = None,
     ):
         node_encodings_list = node_batch.node_embeddings_list
         edge_pairs = node_batch.edge_pairs
@@ -1452,7 +1533,22 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
             ],
             axis=0,
         )
-        y_array = self._compose_condition_array(graph_conditioning)
+        base_condition_array = self._compose_condition_array(graph_conditioning)
+        if self.guidance_enabled_:
+            if targets is None:
+                if int(self.verbose) >= 1:
+                    print("Guidance targets were not provided at fit time; using unconditional (null) targets.")
+                target_condition_array = np.zeros((len(base_condition_array), self.target_condition_dim_), dtype=float)
+            else:
+                if len(targets) != len(base_condition_array):
+                    raise ValueError(
+                        "targets length must match node batch size "
+                        f"(got {len(targets)} targets for {len(base_condition_array)} graphs)."
+                    )
+                target_condition_array = self._encode_targets(targets)
+            y_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
+        else:
+            y_array = base_condition_array
         mask_array = np.asarray(node_batch.node_presence_mask, dtype=bool)
         degree_target_array = np.asarray(node_batch.node_degree_targets, dtype=np.int64)
         encoded_node_label_targets = None
@@ -1608,19 +1704,43 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
     def predict(
         self,
         graph_conditioning: GraphConditioningBatch,
+        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+        guidance_scale: float = 1.0,
         desired_class: Optional[Union[int, Sequence[int]]] = None,
     ) -> GeneratedNodeBatch:
-        if desired_class is not None and int(self.verbose) >= 3:
-            print("EqMDecompositionalNodeGenerator ignores desired_class because classifier guidance is not implemented.")
+        if guidance_scale < 0:
+            raise ValueError(f"guidance_scale must be >= 0 (got {guidance_scale}).")
+        if desired_target is None and desired_class is not None:
+            desired_target = desired_class
 
         self.device = next(self.model.parameters()).device
-        cond_array = self._compose_condition_array(graph_conditioning)
+        base_condition_array = self._compose_condition_array(graph_conditioning)
+        desired_targets = self._normalize_desired_target(desired_target, len(base_condition_array))
+        use_cfg_guidance = self.guidance_enabled_ and (desired_targets is not None)
+        if self.guidance_enabled_:
+            if desired_targets is None:
+                target_condition_array = np.zeros((len(base_condition_array), self.target_condition_dim_), dtype=float)
+            else:
+                target_condition_array = self._encode_targets(desired_targets)
+            cond_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
+        else:
+            if desired_targets is not None and int(self.verbose) >= 1:
+                print("desired_target was provided, but guidance conditioning is not available; falling back to unguided generation.")
+            cond_array = base_condition_array
         cond_scaled = self.y_scaler.transform(cond_array)
         cond_tensor = torch.tensor(cond_scaled, dtype=torch.float32, device=self.device)
+        cond_uncond_tensor = None
+        if use_cfg_guidance:
+            cond_uncond_scaled = np.asarray(cond_scaled, dtype=float).copy()
+            cond_uncond_scaled[:, self.target_condition_start_:self.target_condition_start_ + self.target_condition_dim_] = 0.0
+            cond_uncond_tensor = torch.tensor(cond_uncond_scaled, dtype=torch.float32, device=self.device)
 
         generated = self.model.generate(
             cond_tensor,
             total_steps=self.sampling_steps,
+            desired_target=desired_target,
+            guidance_scale=guidance_scale,
+            global_condition_unconditional=cond_uncond_tensor,
             desired_class=desired_class,
             use_heads_projection=True,
         )

@@ -8,7 +8,6 @@ import random
 import pulp
 import dill as pickle
 from .timeit import timeit
-import torch
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union
 from .conditional_node_generator_base import (
     ConditionalNodeGeneratorBase,
@@ -1544,36 +1543,8 @@ class EqMDecompositionalGraphGenerator(object):
     
     @timeit
     def fit_classifier(self, graphs, targets, epochs=20, lr=1e-3):
-        """Train the optional guidance classifier on supplied graphs and labels."""
-        # --- Step 1: Encode inputs ---
-        node_encs = self.node_graph_vectorizer.transform(graphs)  # List of node arrays
-        cond_vecs = self.graph_vectorizer.transform(graphs)       # 2D array
-
-        # --- Step 2: Infer number of classes ---
-        targets_np = targets.cpu().numpy() if isinstance(targets, torch.Tensor) else np.array(targets)
-        num_classes = int(np.max(targets_np)) + 1
-
-        # --- Step 3: Access underlying model ---
-        model = self.conditional_node_generator_model.model
-
-        # --- Step 4: Ensure guidance classifier is initialized correctly ---
-        if not hasattr(model, "guidance_classifier") or model.guidance_classifier is None:
-            model.set_guidance_classifier(num_classes)
-        else:
-            try:
-                current_dim = model.guidance_classifier.net[-1].out_features
-            except AttributeError:
-                current_dim = None
-            if current_dim != num_classes:
-                print(f"Resetting guidance classifier (was {current_dim}, now {num_classes})")
-                model.set_guidance_classifier(num_classes)
-
-        # --- Step 5: Train the classifier with internal validation and plot ---
-        model.train_guidance_classifier(
-            node_feats=node_encs,
-            cond_vecs=cond_vecs,
-            labels=targets_np,
-            epochs=epochs,
-            lr=lr,
-            verbose=self.verbose
+        del graphs, targets, epochs, lr
+        raise NotImplementedError(
+            "fit_classifier() is deprecated in strict CFG mode. "
+            "Pass targets directly to fit(..., targets=...) and use desired_target/guidance_scale at decode/sample time."
         )
