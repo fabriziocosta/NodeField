@@ -17,6 +17,20 @@ except Exception:  # pragma: no cover
         print(obj)
 
 
+def sample_positive_endpoint_pair(graphs, targets):
+    positive_indices = np.flatnonzero(np.asarray(targets) != 0)
+    if positive_indices.size < 2:
+        raise RuntimeError("Need at least two positive training graphs for interpolation.")
+    selected_indices = np.random.choice(positive_indices, size=2, replace=False)
+    selected_targets = [targets[int(idx)] for idx in selected_indices]
+    return (
+        selected_indices.tolist(),
+        selected_targets,
+        graphs[int(selected_indices[0])],
+        graphs[int(selected_indices[1])],
+    )
+
+
 def offset_neg_graphs(graphs, targets, offset=10):
     out_graphs = []
     for graph, target in zip(graphs, targets):

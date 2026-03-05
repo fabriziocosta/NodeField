@@ -5,9 +5,9 @@ import pytest
 from eqm_decompositional_graph_generator.graph_engine import (
     _interpolate_integer_series,
     interpolate,
-    sample_positive_endpoint_pair,
 )
 from eqm_decompositional_graph_generator.node_engine import GraphConditioningBatch
+from notebooks.notebook_utils import sample_positive_endpoint_pair
 
 
 class _FakeGraphGenerator:
