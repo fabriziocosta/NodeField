@@ -194,10 +194,10 @@ def plot_metrics(
     """Visualise train/validation metrics with a geometric moving average.
 
     Args:
-        train_metrics (Dict[str, Sequence[float]]): Parameter.
-        val_metrics (Dict[str, Sequence[float]]): Parameter.
-        window (int): Parameter. Optional.
-        alpha (float): Parameter. Optional.
+        train_metrics (Dict[str, Sequence[float]]): Input value.
+        val_metrics (Dict[str, Sequence[float]]): Input value.
+        window (int): Optional input value.
+        alpha (float): Optional input value.
     """
 
     def _moving_average(data: Sequence[float], window_size: int) -> np.ndarray:
@@ -289,12 +289,12 @@ class MetricsLogger(pl.callbacks.Callback):
         """Collect weighted loss components so differently scaled terms are comparable.
 
         Args:
-            pl_module (Any): Parameter.
-            metrics (Dict[str, torch.Tensor]): Parameter.
-            prefix (str): Parameter.
+            pl_module (Any): Input value.
+            metrics (Dict[str, torch.Tensor]): Input value.
+            prefix (str): Input value.
 
         Returns:
-            Any: Return value.
+            Any: Computed result.
         """
         component_specs = [
             ("eqm", "recon", 1.0),
@@ -567,10 +567,10 @@ def collate_eqm_graph_with_edges(batch):
     """Batch EqMGraphWithEdgesDataset items into tensors with optional label targets.
 
     Args:
-        batch (Any): Parameter.
+        batch (Any): Input value.
 
     Returns:
-        Any: Return value.
+        Any: Computed result.
     """
     xs, ys, masks, degree_targets = [], [], [], []
     local_edge_idxs, local_edge_lbls = [], []
@@ -837,10 +837,10 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
         """Evaluate the edge head on every ordered node pair.
 
         Args:
-            latent_tokens (torch.Tensor): Parameter.
+            latent_tokens (torch.Tensor): Input value.
 
         Returns:
-            torch.Tensor: Return value.
+            torch.Tensor: Computed result.
         """
         batch_size, node_count, latent_dim = latent_tokens.shape
         src = latent_tokens.unsqueeze(2).expand(batch_size, node_count, node_count, latent_dim)
@@ -858,10 +858,10 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
         """Evaluate the edge-label head on every ordered node pair.
 
         Args:
-            latent_tokens (torch.Tensor): Parameter.
+            latent_tokens (torch.Tensor): Input value.
 
         Returns:
-            torch.Tensor: Return value.
+            torch.Tensor: Computed result.
         """
         batch_size, node_count, latent_dim = latent_tokens.shape
         src = latent_tokens.unsqueeze(2).expand(batch_size, node_count, node_count, latent_dim)
@@ -1523,10 +1523,10 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         """Return the named channel from the orchestration supervision plan when available.
 
         Args:
-            channel_name (str): Parameter.
+            channel_name (str): Input value.
 
         Returns:
-            Any: Return value.
+            Any: Computed result.
         """
         plan = getattr(self, "supervision_plan_", None)
         if plan is None:
@@ -1537,11 +1537,11 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         """Resolve whether a supervision channel is intended to be active.
 
         Args:
-            channel_name (str): Parameter.
-            fallback (bool): Parameter.
+            channel_name (str): Input value.
+            fallback (bool): Input value.
 
         Returns:
-            bool: Return value.
+            bool: Computed result.
         """
         channel = self._plan_channel(channel_name)
         if channel is None:
@@ -1560,15 +1560,15 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         """Combine the supervision plan with the actually supplied arrays.
 
         Args:
-            edge_pairs (Optional[List[Tuple[int, int, int]]]): Parameter.
-            edge_targets (Optional[np.ndarray]): Parameter.
-            edge_label_pairs (Optional[List[Tuple[int, int, int]]]): Parameter.
-            edge_label_targets (Optional[np.ndarray]): Parameter.
-            auxiliary_edge_pairs (Optional[List[Tuple[int, int, int]]]): Parameter.
-            auxiliary_edge_targets (Optional[np.ndarray]): Parameter.
+            edge_pairs (Optional[List[Tuple[int, int, int]]]): Input value.
+            edge_targets (Optional[np.ndarray]): Input value.
+            edge_label_pairs (Optional[List[Tuple[int, int, int]]]): Input value.
+            edge_label_targets (Optional[np.ndarray]): Input value.
+            auxiliary_edge_pairs (Optional[List[Tuple[int, int, int]]]): Input value.
+            auxiliary_edge_targets (Optional[np.ndarray]): Input value.
 
         Returns:
-            Tuple[bool, bool, bool]: Return value.
+            Tuple[bool, bool, bool]: Computed result.
         """
         planned_direct_edges = self._planned_enabled("direct_edges", False)
         planned_aux_locality = self._planned_enabled("auxiliary_locality", False)
@@ -1667,10 +1667,10 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         """Compose a concrete NN conditioning matrix from explicit semantic fields.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
+            graph_conditioning (GraphConditioningBatch): Input value.
 
         Returns:
-            np.ndarray: Return value.
+            np.ndarray: Computed result.
         """
         graph_embeddings = np.asarray(graph_conditioning.graph_embeddings, dtype=float)
         if graph_embeddings.ndim == 1:
@@ -1747,11 +1747,11 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         """Compute a BCE positive-class weight from binary targets.
 
         Args:
-            targets (Optional[np.ndarray]): Parameter.
-            default (float): Parameter. Optional.
+            targets (Optional[np.ndarray]): Input value.
+            default (float): Optional input value.
 
         Returns:
-            float: Return value.
+            float: Computed result.
         """
         if targets is None:
             return float(default)

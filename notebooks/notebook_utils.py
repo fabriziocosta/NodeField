@@ -369,10 +369,10 @@ def _median_iqr(values):
     """Return (q1, median, q3) for a numeric sequence.
 
     Args:
-        values (Any): Parameter.
+        values (Any): Input value.
 
     Returns:
-        Any: Return value.
+        Any: Computed result.
     """
     values = np.asarray(values, dtype=float)
     if values.size == 0:
@@ -385,13 +385,13 @@ def plot_similarity_distribution_with_iqr(sim_high, sim_low, target_high, target
     """Plot median + IQR whiskers and print concise summary stats.
 
     Args:
-        sim_high (Any): Parameter.
-        sim_low (Any): Parameter.
-        target_high (Any): Parameter.
-        target_low (Any): Parameter.
+        sim_high (Any): Input value.
+        sim_low (Any): Input value.
+        target_high (Any): Input value.
+        target_low (Any): Input value.
 
     Returns:
-        Any: Return value.
+        Any: Computed result.
     """
     q1_high, med_high, q3_high = _median_iqr(sim_high)
     q1_low, med_low, q3_low = _median_iqr(sim_low)

@@ -8,10 +8,10 @@ def _verbosity_level(instance) -> int:
     """Interpret legacy boolean verbosity as levels, defaulting to 0.
 
     Args:
-        instance (Any): Parameter.
+        instance (Any): Input value.
 
     Returns:
-        int: Return value.
+        int: Computed result.
     """
     if instance is None or not hasattr(instance, "verbose"):
         return 0
@@ -27,10 +27,10 @@ def timeit(func):
     """A decorator to time member functions, printing the function's name,.
 
     Args:
-        func (Any): Parameter.
+        func (Any): Input value.
 
     Returns:
-        Any: Return value.
+        Any: Computed result.
     """
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -59,11 +59,11 @@ def run_trainer_fit(trainer, model, train_loader, val_loader, context: str) -> N
     """Run Lightning training while surfacing notebook-hostile SystemExit failures.
 
     Args:
-        trainer (Any): Parameter.
-        model (Any): Parameter.
-        train_loader (Any): Parameter.
-        val_loader (Any): Parameter.
-        context (str): Parameter.
+        trainer (Any): Input value.
+        model (Any): Input value.
+        train_loader (Any): Input value.
+        val_loader (Any): Input value.
+        context (str): Input value.
     """
     try:
         trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
@@ -100,10 +100,10 @@ def _safe_random_tree(n: int) -> nx.Graph:
     """Return a random tree on n nodes.
 
     Args:
-        n (int): Parameter.
+        n (int): Input value.
 
     Returns:
-        nx.Graph: Return value.
+        nx.Graph: Computed result.
     """
     if hasattr(nx.generators.trees, "random_tree"):
         # modern NetworkX versions
@@ -166,10 +166,10 @@ def random_tree_graph(n):
     """Return a random tree with n nodes.
 
     Args:
-        n (Any): Parameter.
+        n (Any): Input value.
 
     Returns:
-        Any: Return value.
+        Any: Computed result.
     """
     g = _safe_random_tree(n)
     g = nx.convert_node_labels_to_integers(g)
@@ -419,15 +419,15 @@ def make_combined_graphs(graphs1, targets1, graphs2=None, targets2=None, number_
     """Combines pairs of graphs from two lists with matching targets, adds edges between them,.
 
     Args:
-        graphs1 (Any): Parameter.
-        targets1 (Any): Parameter.
-        graphs2 (Any): Parameter. Optional.
-        targets2 (Any): Parameter. Optional.
-        number_of_graphs (Any): Parameter. Optional.
-        number_of_edges (Any): Parameter. Optional.
+        graphs1 (Any): Input value.
+        targets1 (Any): Input value.
+        graphs2 (Any): Optional input value.
+        targets2 (Any): Optional input value.
+        number_of_graphs (Any): Optional input value.
+        number_of_edges (Any): Optional input value.
 
     Returns:
-        Any: Return value.
+        Any: Computed result.
     """
 
     # If graphs2 and targets2 are None, use graphs1 and targets1

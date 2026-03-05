@@ -1,6 +1,3 @@
-"""Graph-level EqM generation engine (merged module)."""
-
-#!/usr/bin/env python
 """Graph encoder/decoder helpers used by the maintained conditional graph-generation pipeline."""
 
 from dataclasses import dataclass
@@ -57,12 +54,12 @@ def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
     """Interpolate between vectors on the hypersphere while blending magnitudes linearly.
 
     Args:
-        v0 (np.ndarray): Parameter.
-        v1 (np.ndarray): Parameter.
-        t (float): Parameter.
+        v0 (np.ndarray): Input value.
+        v1 (np.ndarray): Input value.
+        t (float): Input value.
 
     Returns:
-        np.ndarray: Return value.
+        np.ndarray: Computed result.
     """
     # Compute magnitudes
     mag0 = np.linalg.norm(v0)
@@ -98,10 +95,10 @@ def scaled_slerp_average(vectors: np.ndarray) -> np.ndarray:
     """Compute a magnitude-aware mean direction for a batch of vectors.
 
     Args:
-        vectors (np.ndarray): Parameter.
+        vectors (np.ndarray): Input value.
 
     Returns:
-        np.ndarray: Return value.
+        np.ndarray: Computed result.
     """
     vs = np.asarray(vectors, dtype=float)             # (B, D)
     mags = np.linalg.norm(vs, axis=1)                # (B,)
@@ -136,11 +133,11 @@ class EqMDecompositionalGraphDecoder(object):
         """Store graph decoding hyper-parameters.
 
         Args:
-            verbose (bool): Parameter. Optional.
-            existence_threshold (float): Parameter. Optional.
-            enforce_connectivity (bool): Parameter. Optional.
-            degree_slack_penalty (float): Parameter. Optional.
-            warm_start_mst (bool): Parameter. Optional.
+            verbose (bool): Optional input value.
+            existence_threshold (float): Optional input value.
+            enforce_connectivity (bool): Optional input value.
+            degree_slack_penalty (float): Optional input value.
+            warm_start_mst (bool): Optional input value.
         """
         self.verbose                    = verbose
         self.existence_threshold        = existence_threshold
@@ -153,10 +150,10 @@ class EqMDecompositionalGraphDecoder(object):
         """Return the named supervision channel when a plan is available.
 
         Args:
-            channel_name (str): Parameter.
+            channel_name (str): Input value.
 
         Returns:
-            Optional[SupervisionChannelPlan]: Return value.
+            Optional[SupervisionChannelPlan]: Computed result.
         """
         plan = getattr(self, "supervision_plan_", None)
         if plan is None:
@@ -175,15 +172,15 @@ class EqMDecompositionalGraphDecoder(object):
         """Optimise a binary adjacency matrix subject to degree and connectivity targets.
 
         Args:
-            prob_matrix (np.ndarray): Parameter.
-            target_degrees (List[int]): Parameter.
-            timeLimit (int): Parameter. Optional.
-            verbose (bool): Parameter. Optional.
-            alpha (float): Parameter. Optional.
-            connectivity (Optional[bool]): Parameter. Optional.
+            prob_matrix (np.ndarray): Input value.
+            target_degrees (List[int]): Input value.
+            timeLimit (int): Optional input value.
+            verbose (bool): Optional input value.
+            alpha (float): Optional input value.
+            connectivity (Optional[bool]): Optional input value.
 
         Returns:
-            np.ndarray: Return value.
+            np.ndarray: Computed result.
         """
         n = prob_matrix.shape[0]
         # Smooth probabilities
@@ -255,10 +252,10 @@ class EqMDecompositionalGraphDecoder(object):
         """Convert each NetworkX graph into a dense adjacency array.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            List[np.ndarray]: Return value.
+            List[np.ndarray]: Computed result.
         """
         adj_mtx_list = []
         for graph in graphs:
@@ -271,10 +268,10 @@ class EqMDecompositionalGraphDecoder(object):
         """Count positive and negative supervision pairs.
 
         Args:
-            targets (List[int]): Parameter.
+            targets (List[int]): Input value.
 
         Returns:
-            Tuple[int, int]: Return value.
+            Tuple[int, int]: Computed result.
         """
         positive = int(sum(1 for target in targets if int(target) == 1))
         negative = int(len(targets) - positive)
@@ -290,13 +287,13 @@ class EqMDecompositionalGraphDecoder(object):
         """Sample supervision indices using the configured class-balancing strategy.
 
         Args:
-            targets (List[int]): Parameter.
-            sample_count (int): Parameter.
-            locality_sampling_strategy (str): Parameter.
-            locality_target_positive_ratio (Optional[float]): Parameter.
+            targets (List[int]): Input value.
+            sample_count (int): Input value.
+            locality_sampling_strategy (str): Input value.
+            locality_target_positive_ratio (Optional[float]): Input value.
 
         Returns:
-            np.ndarray: Return value.
+            np.ndarray: Computed result.
         """
         num_pairs = len(targets)
         if sample_count <= 0:
@@ -360,19 +357,19 @@ class EqMDecompositionalGraphDecoder(object):
         """Label node pairs as local or non-local using shortest-path distance within each graph.
 
         Args:
-            adj_mtx_list (List[np.ndarray]): Parameter.
-            node_encodings_list (List[np.ndarray]): Parameter.
-            locality_sample_fraction (float): Parameter.
-            negative_sample_factor (int): Parameter. Optional.
-            locality_sampling_strategy (str): Parameter. Optional.
-            locality_target_positive_ratio (Optional[float]): Parameter. Optional.
-            force_bi_directional_edges (bool): Parameter. Optional.
-            is_training (bool): Parameter. Optional.
-            horizon (int): Parameter. Optional.
-            supervision_name (str): Parameter. Optional.
+            adj_mtx_list (List[np.ndarray]): Input value.
+            node_encodings_list (List[np.ndarray]): Input value.
+            locality_sample_fraction (float): Input value.
+            negative_sample_factor (int): Optional input value.
+            locality_sampling_strategy (str): Optional input value.
+            locality_target_positive_ratio (Optional[float]): Optional input value.
+            force_bi_directional_edges (bool): Optional input value.
+            is_training (bool): Optional input value.
+            horizon (int): Optional input value.
+            supervision_name (str): Optional input value.
 
         Returns:
-            Tuple[np.ndarray, List[Tuple[int, int, int]]]: Return value.
+            Tuple[np.ndarray, List[Tuple[int, int, int]]]: Computed result.
         """
         if horizon < 1:
             raise ValueError("horizon must be >= 1")
@@ -491,17 +488,17 @@ class EqMDecompositionalGraphDecoder(object):
         """Compute locality supervision pairs for training.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
-            node_encodings_list (List[np.ndarray]): Parameter.
-            locality_sample_fraction (float): Parameter.
-            negative_sample_factor (int): Parameter. Optional.
-            locality_sampling_strategy (str): Parameter. Optional.
-            locality_target_positive_ratio (Optional[float]): Parameter. Optional.
-            horizon (int): Parameter. Optional.
-            supervision_name (str): Parameter. Optional.
+            graphs (List[nx.Graph]): Input value.
+            node_encodings_list (List[np.ndarray]): Input value.
+            locality_sample_fraction (float): Input value.
+            negative_sample_factor (int): Optional input value.
+            locality_sampling_strategy (str): Optional input value.
+            locality_target_positive_ratio (Optional[float]): Optional input value.
+            horizon (int): Optional input value.
+            supervision_name (str): Optional input value.
 
         Returns:
-            Tuple[np.ndarray, List[Tuple[int, int, int]]]: Return value.
+            Tuple[np.ndarray, List[Tuple[int, int, int]]]: Computed result.
         """
         adj = self.graphs_to_adjacency_matrices(graphs)
         return self.adj_mtx_to_targets(
@@ -526,13 +523,13 @@ class EqMDecompositionalGraphDecoder(object):
         """Assemble feature/label pairs for the locality classifier derived from adjacencies.
 
         Args:
-            node_encodings_list (List[np.ndarray]): Parameter.
-            adj_mtx_list (List[np.ndarray]): Parameter.
-            locality_sample_fraction (float): Parameter.
-            horizon (int): Parameter. Optional.
+            node_encodings_list (List[np.ndarray]): Input value.
+            adj_mtx_list (List[np.ndarray]): Input value.
+            locality_sample_fraction (float): Input value.
+            horizon (int): Optional input value.
 
         Returns:
-            Tuple[np.ndarray, np.ndarray]: Return value.
+            Tuple[np.ndarray, np.ndarray]: Computed result.
         """
         y, pair_indices = self.adj_mtx_to_targets(
             adj_mtx_list,
@@ -553,12 +550,12 @@ class EqMDecompositionalGraphDecoder(object):
         """Stack node-pair feature vectors, optionally augmented with a graph-level summary.
 
         Args:
-            node_encodings_list (List[np.ndarray]): Parameter.
-            pair_indices (Optional[List[Tuple[int, int, int]]]): Parameter. Optional.
-            use_graph_encoding (bool): Parameter. Optional.
+            node_encodings_list (List[np.ndarray]): Input value.
+            pair_indices (Optional[List[Tuple[int, int, int]]]): Optional input value.
+            use_graph_encoding (bool): Optional input value.
 
         Returns:
-            np.ndarray: Return value.
+            np.ndarray: Computed result.
         """
         instances = []
         if pair_indices is not None:
@@ -594,10 +591,10 @@ class EqMDecompositionalGraphDecoder(object):
         """Return copies of the encodings with negative entries clipped to zero.
 
         Args:
-            original_node_encodings_list (List[np.ndarray]): Parameter.
+            original_node_encodings_list (List[np.ndarray]): Input value.
 
         Returns:
-            List[np.ndarray]: Return value.
+            List[np.ndarray]: Computed result.
         """
         constrained = []
         for encoding in original_node_encodings_list:
@@ -615,11 +612,11 @@ class EqMDecompositionalGraphDecoder(object):
         """Derive integer degree targets from explicit degree and existence predictions.
 
         Args:
-            degree_predictions (np.ndarray): Parameter.
-            existence_mask (np.ndarray): Parameter.
+            degree_predictions (np.ndarray): Input value.
+            existence_mask (np.ndarray): Input value.
 
         Returns:
-            List[int]: Return value.
+            List[int]: Computed result.
         """
         degs = np.rint(np.asarray(degree_predictions, dtype=float))
         existent = np.asarray(existence_mask, dtype=bool)
@@ -634,11 +631,11 @@ class EqMDecompositionalGraphDecoder(object):
         """Project predicted adjacency probabilities onto valid binary graphs.
 
         Args:
-            generated_nodes (GeneratedNodeBatch): Parameter.
-            predicted_edge_probability_matrices (Optional[List[np.ndarray]]): Parameter. Optional.
+            generated_nodes (GeneratedNodeBatch): Input value.
+            predicted_edge_probability_matrices (Optional[List[np.ndarray]]): Optional input value.
 
         Returns:
-            List[np.ndarray]: Return value.
+            List[np.ndarray]: Computed result.
         """
         node_embeddings_list = self.constrained_node_encodings_list(generated_nodes.node_embeddings_list)
         channel_plan = self._plan_channel("direct_edges")
@@ -713,10 +710,10 @@ class EqMDecompositionalGraphDecoder(object):
         """Predict node-level labels for each encoding matrix.
 
         Args:
-            generated_nodes (GeneratedNodeBatch): Parameter.
+            generated_nodes (GeneratedNodeBatch): Input value.
 
         Returns:
-            List[np.ndarray]: Return value.
+            List[np.ndarray]: Computed result.
         """
         channel_plan = self._plan_channel("node_labels")
         if channel_plan is not None and channel_plan.mode == "constant":
@@ -746,12 +743,12 @@ class EqMDecompositionalGraphDecoder(object):
         """Predict edge labels for every edge present in the supplied adjacency matrices.
 
         Args:
-            generated_nodes (GeneratedNodeBatch): Parameter.
-            adj_mtx_list (List[np.ndarray]): Parameter.
-            predicted_edge_label_matrices (Optional[List[np.ndarray]]): Parameter. Optional.
+            generated_nodes (GeneratedNodeBatch): Input value.
+            adj_mtx_list (List[np.ndarray]): Input value.
+            predicted_edge_label_matrices (Optional[List[np.ndarray]]): Optional input value.
 
         Returns:
-            List[np.ndarray]: Return value.
+            List[np.ndarray]: Computed result.
         """
         channel_plan = self._plan_channel("edge_labels")
         if predicted_edge_label_matrices is not None:
@@ -802,13 +799,13 @@ class EqMDecompositionalGraphDecoder(object):
         """Reconstruct labelled graphs from node encodings, respecting existence masks.
 
         Args:
-            generated_nodes (GeneratedNodeBatch): Parameter.
-            predicted_node_labels_list (Optional[List[np.ndarray]]): Parameter. Optional.
-            predicted_edge_probability_matrices (Optional[List[np.ndarray]]): Parameter. Optional.
-            predicted_edge_label_matrices (Optional[List[np.ndarray]]): Parameter. Optional.
+            generated_nodes (GeneratedNodeBatch): Input value.
+            predicted_node_labels_list (Optional[List[np.ndarray]]): Optional input value.
+            predicted_edge_probability_matrices (Optional[List[np.ndarray]]): Optional input value.
+            predicted_edge_label_matrices (Optional[List[np.ndarray]]): Optional input value.
 
         Returns:
-            List[nx.Graph]: Return value.
+            List[nx.Graph]: Computed result.
         """
         adj_mtx_list = self.decode_adjacency_matrix(
             generated_nodes,
@@ -858,7 +855,7 @@ class EqMDecompositionalGraphDecoder(object):
         """Serialise the current object to `filename` using pickle.
 
         Args:
-            filename (str): Parameter. Optional.
+            filename (str): Optional input value.
         """
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
@@ -867,10 +864,10 @@ class EqMDecompositionalGraphDecoder(object):
         """Load a previously saved instance from disk and return it.
 
         Args:
-            filename (str): Parameter. Optional.
+            filename (str): Optional input value.
 
         Returns:
-            'EqMDecompositionalGraphDecoder': Return value.
+            'EqMDecompositionalGraphDecoder': Computed result.
         """
         with open(filename, 'rb') as f:
             self = pickle.load(f)
@@ -903,21 +900,21 @@ class EqMDecompositionalGraphGenerator(object):
         """Store the collaborating components and configuration used for the pipeline.
 
         Args:
-            graph_vectorizer (Any): Parameter. Optional.
-            node_graph_vectorizer (Any): Parameter. Optional.
-            conditional_node_generator_model (Optional[ConditionalNodeGeneratorBase]): Parameter. Optional.
-            graph_decoder (Optional[EqMDecompositionalGraphDecoder]): Parameter. Optional.
-            verbose (bool): Parameter. Optional.
-            locality_sample_fraction (float): Parameter. Optional.
-            locality_horizon (int): Parameter. Optional.
-            negative_sample_factor (int): Parameter. Optional.
-            locality_sampling_strategy (str): Parameter. Optional.
-            locality_target_positive_ratio (Optional[float]): Parameter. Optional.
-            feasibility_estimator (Any): Parameter. Optional.
-            use_feasibility_filtering (bool): Parameter. Optional.
-            max_feasibility_attempts (int): Parameter. Optional.
-            feasibility_candidates_per_attempt (int): Parameter. Optional.
-            feasibility_failure_mode (str): Parameter. Optional.
+            graph_vectorizer (Any): Optional input value.
+            node_graph_vectorizer (Any): Optional input value.
+            conditional_node_generator_model (Optional[ConditionalNodeGeneratorBase]): Optional input value.
+            graph_decoder (Optional[EqMDecompositionalGraphDecoder]): Optional input value.
+            verbose (bool): Optional input value.
+            locality_sample_fraction (float): Optional input value.
+            locality_horizon (int): Optional input value.
+            negative_sample_factor (int): Optional input value.
+            locality_sampling_strategy (str): Optional input value.
+            locality_target_positive_ratio (Optional[float]): Optional input value.
+            feasibility_estimator (Any): Optional input value.
+            use_feasibility_filtering (bool): Optional input value.
+            max_feasibility_attempts (int): Optional input value.
+            feasibility_candidates_per_attempt (int): Optional input value.
+            feasibility_failure_mode (str): Optional input value.
         """
         self.graph_vectorizer = graph_vectorizer
         self.node_graph_vectorizer = node_graph_vectorizer
@@ -965,7 +962,7 @@ class EqMDecompositionalGraphGenerator(object):
         """Enable or disable feasibility filtering during generation without discarding the fitted estimator.
 
         Args:
-            enabled (bool): Parameter.
+            enabled (bool): Input value.
         """
         self.use_feasibility_filtering = bool(enabled)
 
@@ -978,12 +975,12 @@ class EqMDecompositionalGraphGenerator(object):
         """Build a single explicit supervision plan for the whole fit() call.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
-            node_label_targets (List[np.ndarray]): Parameter.
-            edge_label_targets (Optional[np.ndarray]): Parameter.
+            graphs (List[nx.Graph]): Input value.
+            node_label_targets (List[np.ndarray]): Input value.
+            edge_label_targets (Optional[np.ndarray]): Input value.
 
         Returns:
-            SupervisionPlan: Return value.
+            SupervisionPlan: Computed result.
         """
         del graphs
 
@@ -1069,7 +1066,7 @@ class EqMDecompositionalGraphGenerator(object):
         """Print the current supervision plan when verbose logging is enabled.
 
         Args:
-            supervision_plan (SupervisionPlan): Parameter.
+            supervision_plan (SupervisionPlan): Input value.
         """
         if not self.verbose:
             return
@@ -1083,10 +1080,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Return the named supervision channel when a plan is available.
 
         Args:
-            channel_name (str): Parameter.
+            channel_name (str): Input value.
 
         Returns:
-            Optional[SupervisionChannelPlan]: Return value.
+            Optional[SupervisionChannelPlan]: Computed result.
         """
         plan = getattr(self, "supervision_plan_", None)
         if plan is None:
@@ -1097,7 +1094,7 @@ class EqMDecompositionalGraphGenerator(object):
         """Flip verbosity for this instance and any nested generators.
 
         Args:
-            None: No parameters.
+            None: This callable does not take explicit parameters.
         """
         self.verbose = not self.verbose
         if self.conditional_node_generator_model is not None:
@@ -1215,10 +1212,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Transform graphs into per-node embedding matrices.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            List[np.ndarray]: Return value.
+            List[np.ndarray]: Computed result.
         """
         if int(self.verbose) >= 3:
             print(f"Node encoding {len(graphs)} graphs")
@@ -1229,10 +1226,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Transform graphs into explicit graph-level conditioning signals.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            GraphConditioningBatch: Return value.
+            GraphConditioningBatch: Computed result.
         """
         if int(self.verbose) >= 3:
             print(f"Encoding {len(graphs)} graphs")
@@ -1250,10 +1247,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Produce both node-level embeddings and explicit graph-level conditioning.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            Tuple[List[np.ndarray], GraphConditioningBatch]: Return value.
+            Tuple[List[np.ndarray], GraphConditioningBatch]: Computed result.
         """
         return self.node_encode(graphs), self.graph_encode(graphs)
 
@@ -1261,10 +1258,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Extract per-node categorical labels in the node ordering used elsewhere.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            List[np.ndarray]: Return value.
+            List[np.ndarray]: Computed result.
         """
         node_label_targets = []
         for graph in graphs:
@@ -1275,10 +1272,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Return True only when every observed edge carries a label and at least one labelled edge exists.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            bool: Return value.
+            bool: Computed result.
         """
         saw_any_edge = False
         for graph in graphs:
@@ -1295,10 +1292,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Extract per-edge categorical labels in the ordered node-pair convention used elsewhere.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            Tuple[Optional[np.ndarray], Optional[List[Tuple[int, int, int]]]]: Return value.
+            Tuple[Optional[np.ndarray], Optional[List[Tuple[int, int, int]]]]: Computed result.
         """
         if not self._graphs_have_usable_edge_labels(graphs):
             if self.verbose:
@@ -1338,10 +1335,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Convert graphs into label histograms using the fitted graph-level label vocabulary.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            Optional[np.ndarray]: Return value.
+            Optional[np.ndarray]: Computed result.
         """
         if not self._should_use_node_label_histograms():
             return None
@@ -1377,18 +1374,18 @@ class EqMDecompositionalGraphGenerator(object):
         """Assemble explicit node-level supervision tensors from graphs.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
-            node_embeddings_list (List[np.ndarray]): Parameter.
-            node_label_targets (Optional[List[np.ndarray]]): Parameter. Optional.
-            edge_pairs (Optional[List[Tuple[int, int, int]]]): Parameter. Optional.
-            edge_targets (Optional[np.ndarray]): Parameter. Optional.
-            edge_label_pairs (Optional[List[Tuple[int, int, int]]]): Parameter. Optional.
-            edge_label_targets (Optional[np.ndarray]): Parameter. Optional.
-            auxiliary_edge_pairs (Optional[List[Tuple[int, int, int]]]): Parameter. Optional.
-            auxiliary_edge_targets (Optional[np.ndarray]): Parameter. Optional.
+            graphs (List[nx.Graph]): Input value.
+            node_embeddings_list (List[np.ndarray]): Input value.
+            node_label_targets (Optional[List[np.ndarray]]): Optional input value.
+            edge_pairs (Optional[List[Tuple[int, int, int]]]): Optional input value.
+            edge_targets (Optional[np.ndarray]): Optional input value.
+            edge_label_pairs (Optional[List[Tuple[int, int, int]]]): Optional input value.
+            edge_label_targets (Optional[np.ndarray]): Optional input value.
+            auxiliary_edge_pairs (Optional[List[Tuple[int, int, int]]]): Optional input value.
+            auxiliary_edge_targets (Optional[np.ndarray]): Optional input value.
 
         Returns:
-            NodeGenerationBatch: Return value.
+            NodeGenerationBatch: Computed result.
         """
         max_num_rows = max(emb.shape[0] for emb in node_embeddings_list)
         node_presence_mask = np.zeros((len(graphs), max_num_rows), dtype=bool)
@@ -1421,8 +1418,8 @@ class EqMDecompositionalGraphGenerator(object):
         """Print per-graph generation summaries at the highest verbosity level.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
-            generated_nodes (GeneratedNodeBatch): Parameter.
+            graph_conditioning (GraphConditioningBatch): Input value.
+            generated_nodes (GeneratedNodeBatch): Input value.
         """
         if int(self.verbose) < 3:
             return
@@ -1488,11 +1485,11 @@ class EqMDecompositionalGraphGenerator(object):
         """Select a subset of conditioning rows by integer indices.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
-            indices (Sequence[int]): Parameter.
+            graph_conditioning (GraphConditioningBatch): Input value.
+            indices (Sequence[int]): Input value.
 
         Returns:
-            GraphConditioningBatch: Return value.
+            GraphConditioningBatch: Computed result.
         """
         idx = np.asarray(indices, dtype=np.int64)
         node_label_histograms = None
@@ -1513,11 +1510,11 @@ class EqMDecompositionalGraphGenerator(object):
         """Repeat each conditioning row a fixed number of times.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
-            repeats (int): Parameter.
+            graph_conditioning (GraphConditioningBatch): Input value.
+            repeats (int): Input value.
 
         Returns:
-            GraphConditioningBatch: Return value.
+            GraphConditioningBatch: Computed result.
         """
         if repeats < 1:
             raise ValueError("repeats must be >= 1")
@@ -1549,13 +1546,13 @@ class EqMDecompositionalGraphGenerator(object):
         """Run a single generator pass and decode graphs without feasibility retries.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Parameter. Optional.
-            guidance_scale (float): Parameter. Optional.
-            desired_class (Optional[Union[int, Sequence[int]]]): Parameter. Optional.
+            graph_conditioning (GraphConditioningBatch): Input value.
+            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
+            guidance_scale (float): Optional input value.
+            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
 
         Returns:
-            List[nx.Graph]: Return value.
+            List[nx.Graph]: Computed result.
         """
         if int(self.verbose) >= 3:
             print(f"Predicting node matrices for {len(graph_conditioning)} graphs...")
@@ -1584,14 +1581,14 @@ class EqMDecompositionalGraphGenerator(object):
         """Decode graphs and optionally reject infeasible outputs until the batch is filled.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Parameter. Optional.
-            guidance_scale (float): Parameter. Optional.
-            desired_class (Optional[Union[int, Sequence[int]]]): Parameter. Optional.
-            apply_feasibility_filtering (Optional[bool]): Parameter. Optional.
+            graph_conditioning (GraphConditioningBatch): Input value.
+            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
+            guidance_scale (float): Optional input value.
+            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
+            apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
-            List[Optional[nx.Graph]]: Return value.
+            List[Optional[nx.Graph]]: Computed result.
         """
         use_filtering = (
             self.use_feasibility_filtering
@@ -1694,14 +1691,14 @@ class EqMDecompositionalGraphGenerator(object):
         """Decode graphs and optionally reject infeasible outputs until the batch is filled.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Parameter. Optional.
-            guidance_scale (float): Parameter. Optional.
-            desired_class (Optional[Union[int, Sequence[int]]]): Parameter. Optional.
-            apply_feasibility_filtering (Optional[bool]): Parameter. Optional.
+            graph_conditioning (GraphConditioningBatch): Input value.
+            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
+            guidance_scale (float): Optional input value.
+            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
+            apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
-            List[nx.Graph]: Return value.
+            List[nx.Graph]: Computed result.
         """
         accepted_graphs_by_slot = self._decode_with_feasibility_slots(
             graph_conditioning,
@@ -1736,14 +1733,14 @@ class EqMDecompositionalGraphGenerator(object):
         """Decode conditioning vectors into reconstructed graphs.
 
         Args:
-            graph_conditioning (GraphConditioningBatch): Parameter.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Parameter. Optional.
-            guidance_scale (float): Parameter. Optional.
-            desired_class (Optional[Union[int, Sequence[int]]]): Parameter. Optional.
-            apply_feasibility_filtering (Optional[bool]): Parameter. Optional.
+            graph_conditioning (GraphConditioningBatch): Input value.
+            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
+            guidance_scale (float): Optional input value.
+            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
+            apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
-            List[nx.Graph]: Return value.
+            List[nx.Graph]: Computed result.
         """
         if self.verbose:
             print(f"Decoding {len(graph_conditioning)} conditioning vectors")
@@ -1772,14 +1769,14 @@ class EqMDecompositionalGraphGenerator(object):
         """Generate random graphs by sampling conditioning vectors from the prior.
 
         Args:
-            n_samples (int): Parameter. Optional.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Parameter. Optional.
-            guidance_scale (float): Parameter. Optional.
-            desired_class (Optional[Union[int, Sequence[int]]]): Parameter. Optional.
-            apply_feasibility_filtering (Optional[bool]): Parameter. Optional.
+            n_samples (int): Optional input value.
+            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
+            guidance_scale (float): Optional input value.
+            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
+            apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
-            List[nx.Graph]: Return value.
+            List[nx.Graph]: Computed result.
         """
         if self.verbose:
             print(f"Sampling {n_samples} graphs")
@@ -1810,15 +1807,15 @@ class EqMDecompositionalGraphGenerator(object):
         """Sample multiple graphs per input by conditioning on each graph's encoding.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
-            n_samples (int): Parameter. Optional.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Parameter. Optional.
-            guidance_scale (float): Parameter. Optional.
-            desired_class (Optional[Union[int, Sequence[int]]]): Parameter. Optional.
-            apply_feasibility_filtering (Optional[bool]): Parameter. Optional.
+            graphs (List[nx.Graph]): Input value.
+            n_samples (int): Optional input value.
+            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
+            guidance_scale (float): Optional input value.
+            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
+            apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
-            List[List[nx.Graph]]: Return value.
+            List[List[nx.Graph]]: Computed result.
         """
         _, graph_conditioning = self.encode(graphs)
         repeated_conditioning = self._repeat_graph_conditioning(
@@ -1871,14 +1868,14 @@ class EqMDecompositionalGraphGenerator(object):
         """Interpolate between two graph condition vectors and decode intermediate graphs.
 
         Args:
-            G1 (nx.Graph): Parameter.
-            G2 (nx.Graph): Parameter.
-            k (int): Parameter. Optional.
-            apply_feasibility_filtering (Optional[bool]): Parameter. Optional.
-            interpolation_mode (str): Parameter. Optional.
+            G1 (nx.Graph): Input value.
+            G2 (nx.Graph): Input value.
+            k (int): Optional input value.
+            apply_feasibility_filtering (Optional[bool]): Optional input value.
+            interpolation_mode (str): Optional input value.
 
         Returns:
-            Dict[str, Any]: Return value.
+            Dict[str, Any]: Computed result.
         """
 
         cond_a = self.graph_encode([G1])
@@ -1958,10 +1955,10 @@ class EqMDecompositionalGraphGenerator(object):
         """Compute a geometric mean graph via the SLERP barycentre of encodings.
 
         Args:
-            graphs (List[nx.Graph]): Parameter.
+            graphs (List[nx.Graph]): Input value.
 
         Returns:
-            nx.Graph: Return value.
+            nx.Graph: Computed result.
         """
         graph_conditioning = self.graph_encode(graphs)
         Y = np.vstack(graph_conditioning.graph_embeddings)
