@@ -1601,10 +1601,3 @@ class EqMDecompositionalGraphGenerator(object):
             )
         )[0]
     
-    @timeit
-    def fit_classifier(self, graphs, targets, epochs=20, lr=1e-3):
-        del graphs, targets, epochs, lr
-        raise NotImplementedError(
-            "fit_classifier() is deprecated in strict CFG mode. "
-            "Pass targets directly to fit(..., targets=...) and use desired_target/guidance_scale at decode/sample time."
-        )
