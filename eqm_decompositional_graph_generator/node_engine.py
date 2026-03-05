@@ -117,7 +117,15 @@ def suppress_output():
 
 
 def get_sinusoidal_time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
-    """Encode scalar time values into sinusoidal embeddings."""
+    """Encode scalar time values into sinusoidal embeddings.
+
+    Args:
+        t (torch.Tensor): Parameter.
+        dim (int): Parameter.
+
+    Returns:
+        torch.Tensor: Return value.
+    """
     half_dim = dim // 2
     inv_freq = torch.exp(
         torch.arange(0, half_dim, device=t.device).float() * (-math.log(10000) / (half_dim - 1))
@@ -204,7 +212,14 @@ def plot_metrics(
     window: int = 10,
     alpha: float = 0.3,
 ) -> None:
-    """Visualise train/validation metrics with a geometric moving average."""
+    """Visualise train/validation metrics with a geometric moving average.
+
+    Args:
+        train_metrics (Dict[str, Sequence[float]]): Parameter.
+        val_metrics (Dict[str, Sequence[float]]): Parameter.
+        window (int): Parameter. Optional.
+        alpha (float): Parameter. Optional.
+    """
 
     def _moving_average(data: Sequence[float], window_size: int) -> np.ndarray:
         arr = np.asarray(data, dtype=float)
@@ -292,7 +307,16 @@ class MetricsLogger(pl.callbacks.Callback):
 
     @staticmethod
     def _component_summary(pl_module, metrics: Dict[str, torch.Tensor], prefix: str):
-        """Collect weighted loss components so differently scaled terms are comparable."""
+        """Collect weighted loss components so differently scaled terms are comparable.
+
+        Args:
+            pl_module (Any): Parameter.
+            metrics (Dict[str, torch.Tensor]): Parameter.
+            prefix (str): Parameter.
+
+        Returns:
+            Any: Return value.
+        """
         component_specs = [
             ("eqm", "recon", 1.0),
             ("deg", "deg_ce", float(getattr(pl_module, "lambda_degree_importance", 1.0))),
@@ -561,7 +585,14 @@ class EqMGraphWithEdgesDataset(Dataset):
 
 
 def collate_eqm_graph_with_edges(batch):
-    """Batch EqMGraphWithEdgesDataset items into tensors with optional label targets."""
+    """Batch EqMGraphWithEdgesDataset items into tensors with optional label targets.
+
+    Args:
+        batch (Any): Parameter.
+
+    Returns:
+        Any: Return value.
+    """
     xs, ys, masks, degree_targets = [], [], [], []
     local_edge_idxs, local_edge_lbls = [], []
     edge_label_idxs_list, edge_label_targets_list = [], []
@@ -824,7 +855,14 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
             )
 
     def _compute_edge_probability_matrices(self, latent_tokens: torch.Tensor) -> torch.Tensor:
-        """Evaluate the edge head on every ordered node pair."""
+        """Evaluate the edge head on every ordered node pair.
+
+        Args:
+            latent_tokens (torch.Tensor): Parameter.
+
+        Returns:
+            torch.Tensor: Return value.
+        """
         batch_size, node_count, latent_dim = latent_tokens.shape
         src = latent_tokens.unsqueeze(2).expand(batch_size, node_count, node_count, latent_dim)
         dst = latent_tokens.unsqueeze(1).expand(batch_size, node_count, node_count, latent_dim)
@@ -838,7 +876,14 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
         return edge_probs
 
     def _compute_edge_label_logits(self, latent_tokens: torch.Tensor) -> torch.Tensor:
-        """Evaluate the edge-label head on every ordered node pair."""
+        """Evaluate the edge-label head on every ordered node pair.
+
+        Args:
+            latent_tokens (torch.Tensor): Parameter.
+
+        Returns:
+            torch.Tensor: Return value.
+        """
         batch_size, node_count, latent_dim = latent_tokens.shape
         src = latent_tokens.unsqueeze(2).expand(batch_size, node_count, node_count, latent_dim)
         dst = latent_tokens.unsqueeze(1).expand(batch_size, node_count, node_count, latent_dim)
@@ -1496,14 +1541,29 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         self.best_checkpoint_epoch_ = None
 
     def _plan_channel(self, channel_name: str):
-        """Return the named channel from the orchestration supervision plan when available."""
+        """Return the named channel from the orchestration supervision plan when available.
+
+        Args:
+            channel_name (str): Parameter.
+
+        Returns:
+            Any: Return value.
+        """
         plan = getattr(self, "supervision_plan_", None)
         if plan is None:
             return None
         return getattr(plan, channel_name, None)
 
     def _planned_enabled(self, channel_name: str, fallback: bool) -> bool:
-        """Resolve whether a supervision channel is intended to be active."""
+        """Resolve whether a supervision channel is intended to be active.
+
+        Args:
+            channel_name (str): Parameter.
+            fallback (bool): Parameter.
+
+        Returns:
+            bool: Return value.
+        """
         channel = self._plan_channel(channel_name)
         if channel is None:
             return fallback
@@ -1518,7 +1578,19 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]],
         auxiliary_edge_targets: Optional[np.ndarray],
     ) -> Tuple[bool, bool, bool]:
-        """Combine the supervision plan with the actually supplied arrays."""
+        """Combine the supervision plan with the actually supplied arrays.
+
+        Args:
+            edge_pairs (Optional[List[Tuple[int, int, int]]]): Parameter.
+            edge_targets (Optional[np.ndarray]): Parameter.
+            edge_label_pairs (Optional[List[Tuple[int, int, int]]]): Parameter.
+            edge_label_targets (Optional[np.ndarray]): Parameter.
+            auxiliary_edge_pairs (Optional[List[Tuple[int, int, int]]]): Parameter.
+            auxiliary_edge_targets (Optional[np.ndarray]): Parameter.
+
+        Returns:
+            Tuple[bool, bool, bool]: Return value.
+        """
         planned_direct_edges = self._planned_enabled("direct_edges", False)
         planned_aux_locality = self._planned_enabled("auxiliary_locality", False)
         planned_edge_labels = self._planned_enabled(
@@ -1613,7 +1685,14 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         return histograms
 
     def _compose_condition_array(self, graph_conditioning: GraphConditioningBatch) -> np.ndarray:
-        """Compose a concrete NN conditioning matrix from explicit semantic fields."""
+        """Compose a concrete NN conditioning matrix from explicit semantic fields.
+
+        Args:
+            graph_conditioning (GraphConditioningBatch): Parameter.
+
+        Returns:
+            np.ndarray: Return value.
+        """
         graph_embeddings = np.asarray(graph_conditioning.graph_embeddings, dtype=float)
         if graph_embeddings.ndim == 1:
             graph_embeddings = graph_embeddings[:, None]
@@ -1686,7 +1765,15 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
         return [desired_target] * batch_size
 
     def _compute_binary_pos_weight(self, targets: Optional[np.ndarray], default: float = 1.0) -> float:
-        """Compute a BCE positive-class weight from binary targets."""
+        """Compute a BCE positive-class weight from binary targets.
+
+        Args:
+            targets (Optional[np.ndarray]): Parameter.
+            default (float): Parameter. Optional.
+
+        Returns:
+            float: Return value.
+        """
         if targets is None:
             return float(default)
         targets_array = np.asarray(targets, dtype=float).reshape(-1)

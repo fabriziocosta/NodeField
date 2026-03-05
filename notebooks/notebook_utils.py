@@ -366,7 +366,14 @@ def compare_real_vs_generated(graph_generator, reference_graphs, apply_feasibili
 
 
 def _median_iqr(values):
-    """Return (q1, median, q3) for a numeric sequence."""
+    """Return (q1, median, q3) for a numeric sequence.
+
+    Args:
+        values (Any): Parameter.
+
+    Returns:
+        Any: Return value.
+    """
     values = np.asarray(values, dtype=float)
     if values.size == 0:
         return np.nan, np.nan, np.nan
@@ -375,7 +382,17 @@ def _median_iqr(values):
 
 
 def plot_similarity_distribution_with_iqr(sim_high, sim_low, target_high, target_low):
-    """Plot median + IQR whiskers and print concise summary stats."""
+    """Plot median + IQR whiskers and print concise summary stats.
+
+    Args:
+        sim_high (Any): Parameter.
+        sim_low (Any): Parameter.
+        target_high (Any): Parameter.
+        target_low (Any): Parameter.
+
+    Returns:
+        Any: Return value.
+    """
     q1_high, med_high, q3_high = _median_iqr(sim_high)
     q1_low, med_low, q3_low = _median_iqr(sim_low)
 

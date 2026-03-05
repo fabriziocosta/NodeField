@@ -1,10 +1,15 @@
-# Notebook And Coding Preferences
+# Preferences
 
-## User Preferences
+## Notebooks
 
 - Keep notebooks lean before commits (clear outputs and reduce execution noise).
 - Prefer notebook cells that call functions from `.py` modules instead of embedding long logic inline.
 - Use utility-style modules for reusable notebook logic, including specialized helpers in `notebooks/` when useful.
 - Keep notebook execution cells focused on variable assignments and function calls.
 - Add concise comments in notebook cells to clarify variable meaning and role in the workflow.
-- Public-facing functions should use Google-style docstrings, including `Args` (parameter descriptions) and `Returns`.
+
+## Python Modules
+
+- Public-facing functions in `.py` files should use Google-style docstrings.
+- Include `Args:` with parameter descriptions.
+- Include `Returns:` with return-value descriptions.

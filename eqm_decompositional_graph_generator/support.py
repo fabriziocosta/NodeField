@@ -5,7 +5,14 @@ from functools import wraps
 
 
 def _verbosity_level(instance) -> int:
-    """Interpret legacy boolean verbosity as levels, defaulting to 0."""
+    """Interpret legacy boolean verbosity as levels, defaulting to 0.
+
+    Args:
+        instance (Any): Parameter.
+
+    Returns:
+        int: Return value.
+    """
     if instance is None or not hasattr(instance, "verbose"):
         return 0
     value = getattr(instance, "verbose")
@@ -17,10 +24,13 @@ def _verbosity_level(instance) -> int:
         return 1 if value else 0
 
 def timeit(func):
-    """
-    A decorator to time member functions, printing the function's name,
-    execution time in seconds, minutes, and hours if the class has a 'verbose'
-    attribute set to True.
+    """A decorator to time member functions, printing the function's name,.
+
+    Args:
+        func (Any): Parameter.
+
+    Returns:
+        Any: Return value.
     """
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -46,7 +56,15 @@ import sys
 
 
 def run_trainer_fit(trainer, model, train_loader, val_loader, context: str) -> None:
-    """Run Lightning training while surfacing notebook-hostile SystemExit failures."""
+    """Run Lightning training while surfacing notebook-hostile SystemExit failures.
+
+    Args:
+        trainer (Any): Parameter.
+        model (Any): Parameter.
+        train_loader (Any): Parameter.
+        val_loader (Any): Parameter.
+        context (str): Parameter.
+    """
     try:
         trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
     except SystemExit as exc:
@@ -79,10 +97,13 @@ def _make_duplicate_detection_estimator():
     return GraphDuplicateDetectionEstimator()
 
 def _safe_random_tree(n: int) -> nx.Graph:
-    """
-    Return a random tree on n nodes.
-    Uses NetworkX's random_tree if available,
-    otherwise falls back to Prüfer-sequence generation.
+    """Return a random tree on n nodes.
+
+    Args:
+        n (int): Parameter.
+
+    Returns:
+        nx.Graph: Return value.
     """
     if hasattr(nx.generators.trees, "random_tree"):
         # modern NetworkX versions
@@ -142,7 +163,14 @@ def random_path_graph(n):
 
 @curry
 def random_tree_graph(n):
-    """Return a random tree with n nodes."""
+    """Return a random tree with n nodes.
+
+    Args:
+        n (Any): Parameter.
+
+    Returns:
+        Any: Return value.
+    """
     g = _safe_random_tree(n)
     g = nx.convert_node_labels_to_integers(g)
     return g
@@ -388,23 +416,18 @@ class ArtificialGraphDatasetConstructor(object):
         return graphs, targets
 
 def make_combined_graphs(graphs1, targets1, graphs2=None, targets2=None, number_of_graphs=1, number_of_edges=1):
-    """
-    Combines pairs of graphs from two lists with matching targets, adds edges between them,
-    and returns a list of new graphs along with their associated targets.
-    If graphs2 and targets2 are None, graphs1 and targets1 are used for both lists.
+    """Combines pairs of graphs from two lists with matching targets, adds edges between them,.
 
-    Parameters:
-    - graphs1: List of networkx graphs.
-    - targets1: List of target labels associated with graphs1.
-    - graphs2: (Optional) List of networkx graphs.
-    - targets2: (Optional) List of target labels associated with graphs2.
-    - number_of_graphs: Desired number of combined graphs to generate (default is 1).
-    - number_of_edges: Number of edges to add between each pair of graphs (default is 1).
+    Args:
+        graphs1 (Any): Parameter.
+        targets1 (Any): Parameter.
+        graphs2 (Any): Parameter. Optional.
+        targets2 (Any): Parameter. Optional.
+        number_of_graphs (Any): Parameter. Optional.
+        number_of_edges (Any): Parameter. Optional.
 
     Returns:
-    - Tuple (combined_graphs, combined_targets):
-        - combined_graphs: List of combined networkx graphs.
-        - combined_targets: List of targets associated with the combined graphs.
+        Any: Return value.
     """
 
     # If graphs2 and targets2 are None, use graphs1 and targets1
