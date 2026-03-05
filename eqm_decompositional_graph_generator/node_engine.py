@@ -1016,10 +1016,15 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
                 pos_weight=self.exist_pos_weight,
                 reduction="none",
             )
-            exist_mask = node_presence_mask.to(dtype=exist_loss_map.dtype)
-            loss_exist = (exist_loss_map * exist_mask).sum() / exist_mask.sum().clamp_min(1.0)
+            # Train existence on all slots so padded nodes contribute true negatives.
+            loss_exist = exist_loss_map.mean()
+            presence_mask = node_presence_mask.to(dtype=exist_loss_map.dtype)
         else:
-            exist_mask = node_presence_mask.to(dtype=input_examples.dtype) if node_presence_mask is not None else torch.ones_like(input_examples[..., 0])
+            presence_mask = (
+                node_presence_mask.to(dtype=input_examples.dtype)
+                if node_presence_mask is not None
+                else torch.ones_like(input_examples[..., 0])
+            )
             loss_exist = input_examples.new_zeros(())
 
         if node_degree_targets is None:
@@ -1036,7 +1041,7 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
             true_deg_class.reshape(-1),
             reduction="none",
         )
-        deg_mask = exist_mask.reshape(-1)
+        deg_mask = presence_mask.reshape(-1)
         loss_deg_ce = (deg_loss_map * deg_mask).sum() / deg_mask.sum().clamp_min(1.0)
         if self.use_node_label_head and node_label_targets is not None:
             label_valid_mask = node_presence_mask if node_presence_mask is not None else torch.ones_like(node_label_targets, dtype=torch.bool)
