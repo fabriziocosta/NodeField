@@ -1899,6 +1899,18 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
             self.constant_existence_value = 1.0
 
         if self.verbose:
+            lambda_summary = [
+                f"degree={self.lambda_degree_importance:.3f}",
+                f"node_exist={self.lambda_node_exist_importance:.3f}",
+                f"node_count={self.lambda_node_count_importance:.3f}",
+                f"node_label={self.lambda_node_label_importance:.3f}",
+                f"edge_label={self.lambda_edge_label_importance:.3f}",
+                f"direct_edge={self.lambda_direct_edge_importance:.3f}",
+                f"edge_count={self.lambda_edge_count_importance:.3f}",
+                f"deg_edge_consistency={self.lambda_degree_edge_consistency_importance:.3f}",
+                f"aux_edge={self.lambda_auxiliary_edge_importance:.3f}",
+            ]
+            print("Lambda settings: " + ", ".join(lambda_summary))
             if effective_locality:
                 print("Direct edge supervision enabled: horizon-1 edge presence will be learned and used by the decoder.")
                 if self.lambda_edge_count_importance > 0.0:
