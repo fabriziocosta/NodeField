@@ -192,10 +192,32 @@ def test_decode_node_labels_assigns_dummy_constant_label_for_unlabelled_training
     )()
 
     labels = decoder.decode_node_labels(
-        GeneratedNodeBatch(node_embeddings_list=[np.zeros((2, 3), dtype=float)])
+        GeneratedNodeBatch(
+            node_embeddings_list=[np.zeros((2, 3), dtype=float)],
+            node_presence_mask=np.asarray([[True, True]], dtype=bool),
+        )
     )
 
     assert labels[0].tolist() == [DEFAULT_DUMMY_NODE_LABEL, DEFAULT_DUMMY_NODE_LABEL]
+
+
+def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
+    decoder = EqMDecompositionalGraphDecoder(verbose=False)
+
+    generated_nodes = GeneratedNodeBatch(
+        node_embeddings_list=[np.zeros((5, 3), dtype=float)],
+        node_presence_mask=np.asarray([[True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[1, 1]], dtype=float),
+        edge_probability_matrices=[np.asarray([[0.0, 0.9], [0.9, 0.0]], dtype=float)],
+    )
+
+    adj_mtx_list = decoder.decode_adjacency_matrix(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+    )
+
+    assert len(adj_mtx_list) == 1
+    assert adj_mtx_list[0].shape == (2, 2)
 
 
 def test_encode_paths_return_expected_shapes_and_counts():

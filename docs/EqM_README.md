@@ -3,7 +3,7 @@
 This document explains the `EqMDecompositionalNodeGenerator` implemented in this repository, how it differs from the diffusion-based generator, what equations it uses during training and sampling, and how the surrounding graph-generation pipeline fits together.
 
 The implementation lives primarily in
-[`node_engine.py`](eqm_decompositional_graph_generator/node_engine.py).
+[`../eqm_decompositional_graph_generator/node_engine.py`](../eqm_decompositional_graph_generator/node_engine.py).
 
 ## Overview
 
@@ -25,7 +25,7 @@ In this repository, the EqM generator is used as the `conditioning -> node embed
 
 1. encode each training graph into node feature matrices and graph-level conditioning vectors,
 2. train the EqM conditional generator to map graph-level conditions to node-level embeddings,
-3. train downstream classifiers and decoders that map node embeddings back into graphs.
+3. use the model heads and graph decoder to map generated node-level predictions back into graphs.
 
 ## High-Level Idea
 

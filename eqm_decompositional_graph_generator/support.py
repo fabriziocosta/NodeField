@@ -53,6 +53,7 @@ def timeit(func):
 
 
 import sys
+import warnings
 
 
 def run_trainer_fit(trainer, model, train_loader, val_loader, context: str) -> None:
@@ -66,7 +67,16 @@ def run_trainer_fit(trainer, model, train_loader, val_loader, context: str) -> N
         context (str): Input value.
     """
     try:
-        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"The '.*_dataloader' does not have many workers which may be a bottleneck\..*",
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Starting from v1\.9\.0, `tensorboardX` has been removed as a dependency.*",
+            )
+            trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
     except SystemExit as exc:
         code = exc.code if exc.code is not None else "None"
         argv_preview = " ".join(sys.argv[:5])

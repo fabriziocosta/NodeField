@@ -2,7 +2,25 @@
 
 from dataclasses import dataclass
 from typing import List, Any, Optional, Tuple, Sequence, Union
+import os
+
 import numpy as np
+import pytorch_lightning as pl
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.preprocessing import MinMaxScaler
+from torch.utils.data import DataLoader, Dataset, TensorDataset
+
+from .metrics_collection import MetricsLogger
+from .metrics_visualization import plot_metrics
+from .support import run_trainer_fit
+from .training_policy import (
+    build_training_callbacks,
+    create_trainer,
+    format_restored_checkpoint_summary,
+    suppress_output,
+)
 
 @dataclass
 class GraphConditioningBatch:
@@ -86,32 +104,6 @@ class ConditionalNodeGeneratorBase:
     ):
         raise NotImplementedError("predict() must be implemented by subclasses.")
 
-
-import contextlib
-import os
-import sys
-import time
-from typing import Dict, Optional, Sequence
-
-import matplotlib.pyplot as plt
-import numpy as np
-import pytorch_lightning as pl
-import torch
-import torch.nn as nn
-
-
-@contextlib.contextmanager
-def suppress_output():
-    with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        try:
-            sys.stdout = devnull
-            sys.stderr = devnull
-            yield
-        finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
 class CrossTransformerEncoderLayer(nn.Module):
     """Pre-norm transformer block with self-attention followed by cross-attention."""
 
@@ -184,124 +176,6 @@ class CrossTransformerEncoderLayer(nn.Module):
         return x
 
 
-def plot_metrics(
-    train_metrics: Dict[str, Sequence[float]],
-    val_metrics: Dict[str, Sequence[float]],
-    window: int = 10,
-    alpha: float = 0.3,
-) -> None:
-    """Visualise train/validation metrics with LOESS-smoothed overlays.
-
-    Args:
-        train_metrics (Dict[str, Sequence[float]]): Input value.
-        val_metrics (Dict[str, Sequence[float]]): Input value.
-        window (int): Optional input value used to derive the LOESS span.
-        alpha (float): Optional input value.
-    """
-
-    def _loess_smooth(data: Sequence[float], window_size: int) -> np.ndarray:
-        arr = np.asarray(data, dtype=float)
-        n = arr.size
-        if n < 3:
-            return arr.copy()
-
-        use_log_domain = bool(np.all(arr > 0))
-        working = np.log(arr) if use_log_domain else arr.copy()
-        x = np.arange(n, dtype=float)
-        span = max(3, min(n, int(round(window_size))))
-        smoothed = np.empty(n, dtype=float)
-
-        for idx in range(n):
-            distances = np.abs(x - x[idx])
-            nearest = np.argpartition(distances, span - 1)[:span]
-            local_x = x[nearest]
-            local_y = working[nearest]
-
-            max_distance = float(np.max(np.abs(local_x - x[idx])))
-            if max_distance <= 0.0:
-                smoothed[idx] = working[idx]
-                continue
-
-            u = np.abs(local_x - x[idx]) / max_distance
-            weights = np.power(1.0 - np.power(np.clip(u, 0.0, 1.0), 3.0), 3.0)
-            X = np.column_stack([np.ones_like(local_x), local_x - x[idx]])
-            weighted_design = X * weights[:, None]
-            xtwx = X.T @ weighted_design
-            xtwy = weighted_design.T @ local_y
-            try:
-                beta = np.linalg.solve(xtwx, xtwy)
-                smoothed[idx] = beta[0]
-            except np.linalg.LinAlgError:
-                smoothed[idx] = np.average(local_y, weights=weights)
-
-        return np.exp(smoothed) if use_log_domain else smoothed
-
-    metrics = [
-        name
-        for name in train_metrics.keys()
-        if len(train_metrics.get(name, [])) > 0 and len(val_metrics.get(name, [])) > 0
-    ]
-    if not metrics:
-        return
-
-    color_cycle = plt.rcParams.get("axes.prop_cycle", None)
-    default_colors = color_cycle.by_key()["color"] if color_cycle is not None else ["blue", "red", "green", "purple", "orange"]
-    panel_specs = [
-        ("Structural Losses", ["total", "eqm", "deg_ce", "exist"]),
-        ("Semantic And Pairwise Losses", ["node_label_ce", "edge_label_ce", "edge_ce", "aux_locality"]),
-    ]
-    active_panels = [
-        (title, [name for name in panel_metrics if name in metrics])
-        for title, panel_metrics in panel_specs
-    ]
-    active_panels = [(title, panel_metrics) for title, panel_metrics in active_panels if panel_metrics]
-    if not active_panels:
-        active_panels = [("Metrics", metrics)]
-
-    fig_height = 4.2 * len(active_panels) + 1.2
-    fig, axes = plt.subplots(
-        len(active_panels),
-        1,
-        figsize=(14, fig_height),
-        sharex=True,
-        squeeze=False,
-    )
-    flat_axes = axes[:, 0]
-    color_by_metric = {
-        metric_name: default_colors[idx % len(default_colors)]
-        for idx, metric_name in enumerate(metrics)
-    }
-    lines, labels = [], []
-
-    for ax, (panel_title, panel_metrics) in zip(flat_axes, active_panels):
-        for name in panel_metrics:
-            color = color_by_metric[name]
-            train_vals = train_metrics[name]
-            val_vals = val_metrics[name]
-            count = min(len(train_vals), len(val_vals))
-            train = train_vals[:count]
-            val = val_vals[:count]
-            epochs = np.arange(1, count + 1)
-            ax.plot(epochs, train, color=color, alpha=alpha, linewidth=1.0)
-            ax.plot(epochs, val, color=color, linestyle="--", alpha=alpha, linewidth=1.0)
-            sm_train = _loess_smooth(train, window)
-            sm_val = _loess_smooth(val, window)
-            line_train, = ax.plot(epochs, sm_train, color=color, linewidth=2.2, label=f"Train {name} (LOESS)")
-            line_val, = ax.plot(epochs, sm_val, color=color, linewidth=2.2, linestyle="--", label=f"Val {name} (LOESS)")
-            lines += [line_train, line_val]
-            labels += [f"Train {name} (LOESS)", f"Val {name} (LOESS)"]
-
-        ax.set_title(panel_title)
-        ax.set_yscale("log")
-        ax.grid(True, which="both", linestyle="--", linewidth=0.5)
-        ax.set_ylabel("Loss")
-
-    flat_axes[-1].set_xlabel("Epoch")
-    fig.legend(lines, labels, loc="upper center", ncol=max(min(len(lines), 6), 1), fontsize="small")
-    fig.subplots_adjust(left=0.08, right=0.98, top=0.90, hspace=0.28)
-    plt.show()
-
-
 class EdgeMLP(nn.Module):
     """Pairwise MLP used for edge presence or edge-label scoring."""
 
@@ -323,207 +197,6 @@ class EdgeMLP(nn.Module):
         x = torch.cat([h_i, h_j, diff, prod], dim=-1)
         out = self.mlp(x)
         return out.squeeze(-1) if self.output_dim == 1 else out
-
-
-class MetricsLogger(pl.callbacks.Callback):
-    """Collect end-of-epoch metrics into the module's history lists."""
-
-    def on_fit_start(self, trainer, pl_module):
-        pl_module._fit_start_time = time.time()
-        pl_module._ema_metrics = {}
-
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
-        total_seconds = max(0, int(round(float(seconds))))
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, secs = divmod(remainder, 60)
-        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
-
-    @staticmethod
-    def _component_summary(pl_module, metrics: Dict[str, torch.Tensor], prefix: str):
-        """Collect weighted loss components so differently scaled terms are comparable.
-
-        Args:
-            pl_module (Any): Input value.
-            metrics (Dict[str, torch.Tensor]): Input value.
-            prefix (str): Input value.
-
-        Returns:
-            Any: Computed result.
-        """
-        component_specs = [
-            ("eqm", "recon", 1.0),
-            ("deg", "deg_ce", float(getattr(pl_module, "lambda_degree_importance", 1.0))),
-            ("exist", "exist", float(getattr(pl_module, "lambda_node_exist_importance", 1.0))),
-            ("node_label", "node_label_ce", float(getattr(pl_module, "lambda_node_label_importance", 1.0))),
-            ("edge_label", "edge_label_ce", float(getattr(pl_module, "lambda_edge_label_importance", 1.0))),
-            ("edge", "edge_ce", float(getattr(pl_module, "lambda_locality_importance", 1.0))),
-            ("aux", "aux_locality_ce", float(getattr(pl_module, "lambda_auxiliary_locality_importance", 1.0))),
-        ]
-
-        raw_total = float(metrics.get(f"{prefix}_total", torch.tensor(0.0)).item())
-        components = []
-        weighted_sum = 0.0
-        for label, metric_name, scale in component_specs:
-            key = f"{prefix}_{metric_name}"
-            if key not in metrics:
-                continue
-            raw_value = float(metrics[key].item())
-            weighted_value = raw_value * scale
-            weighted_sum += weighted_value
-            components.append((label, raw_value, weighted_value))
-
-        if not components:
-            return raw_total, [], None, 0.0
-
-        denominator = weighted_sum if weighted_sum > 0 else 1.0
-        dominant_label, _, dominant_weighted = max(components, key=lambda item: item[2])
-        normalized_components = [
-            (label, raw, weighted, weighted / denominator)
-            for label, raw, weighted in components
-        ]
-        return raw_total, normalized_components, dominant_label, dominant_weighted / denominator
-
-    @staticmethod
-    def _update_ema_metric(trainer, pl_module, metric_name: str, metric_value: float) -> float:
-        alpha = float(getattr(pl_module, "early_stopping_ema_alpha", 0.3))
-        if not 0.0 < alpha <= 1.0:
-            alpha = 0.3
-        previous = pl_module._ema_metrics.get(metric_name)
-        ema_value = metric_value if previous is None else alpha * metric_value + (1.0 - alpha) * previous
-        pl_module._ema_metrics[metric_name] = float(ema_value)
-        ema_key = f"{metric_name}_ema"
-        ema_tensor = torch.tensor(float(ema_value), dtype=torch.float32)
-        trainer.callback_metrics[ema_key] = ema_tensor
-        if hasattr(trainer, "logged_metrics") and isinstance(trainer.logged_metrics, dict):
-            trainer.logged_metrics[ema_key] = ema_tensor
-        return float(ema_value)
-
-    def on_train_epoch_end(self, trainer, pl_module):
-        m = trainer.callback_metrics
-        pl_module.train_losses.append(m.get("train_total", torch.tensor(0.0)).item())
-        pl_module.train_deg_ce.append(m.get("train_deg_ce", torch.tensor(0.0)).item())
-        pl_module.train_recon.append(m.get("train_recon", torch.tensor(0.0)).item())
-        if hasattr(pl_module, "train_exist"):
-            pl_module.train_exist.append(m.get("train_exist", torch.tensor(0.0)).item())
-        if hasattr(pl_module, "train_node_label_ce"):
-            pl_module.train_node_label_ce.append(m.get("train_node_label_ce", m.get("train_label_ce", torch.tensor(0.0))).item())
-        elif hasattr(pl_module, "train_label_ce"):
-            pl_module.train_label_ce.append(m.get("train_label_ce", m.get("train_node_label_ce", torch.tensor(0.0))).item())
-        if hasattr(pl_module, "train_edge_label_ce"):
-            pl_module.train_edge_label_ce.append(m.get("train_edge_label_ce", torch.tensor(0.0)).item())
-        if getattr(pl_module, "use_locality_supervision", False):
-            pl_module.train_edge_loss.append(m.get("train_edge_ce", m.get("train_edge_loss", torch.tensor(0.0))).item())
-            pl_module.train_edge_acc.append(m.get("train_edge_acc", torch.tensor(0.0)).item())
-        if getattr(pl_module, "use_auxiliary_locality_supervision", False):
-            pl_module.train_aux_edge_loss.append(m.get("train_aux_locality_ce", m.get("train_aux_edge_loss", torch.tensor(0.0))).item())
-            pl_module.train_aux_edge_acc.append(m.get("train_aux_edge_acc", torch.tensor(0.0)).item())
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        m = trainer.callback_metrics
-        pl_module.val_losses.append(m.get("val_total", torch.tensor(0.0)).item())
-        pl_module.val_deg_ce.append(m.get("val_deg_ce", torch.tensor(0.0)).item())
-        pl_module.val_recon.append(m.get("val_recon", torch.tensor(0.0)).item())
-        if hasattr(pl_module, "val_exist"):
-            pl_module.val_exist.append(m.get("val_exist", torch.tensor(0.0)).item())
-        if hasattr(pl_module, "val_node_label_ce"):
-            pl_module.val_node_label_ce.append(m.get("val_node_label_ce", m.get("val_label_ce", torch.tensor(0.0))).item())
-        elif hasattr(pl_module, "val_label_ce"):
-            pl_module.val_label_ce.append(m.get("val_label_ce", m.get("val_node_label_ce", torch.tensor(0.0))).item())
-        if hasattr(pl_module, "val_edge_label_ce"):
-            pl_module.val_edge_label_ce.append(m.get("val_edge_label_ce", torch.tensor(0.0)).item())
-        if getattr(pl_module, "use_locality_supervision", False):
-            pl_module.val_edge_loss.append(m.get("val_edge_ce", m.get("val_edge_loss", torch.tensor(0.0))).item())
-            pl_module.val_edge_acc.append(m.get("val_edge_acc", torch.tensor(0.0)).item())
-        if getattr(pl_module, "use_auxiliary_locality_supervision", False):
-            pl_module.val_aux_edge_loss.append(m.get("val_aux_locality_ce", m.get("val_aux_edge_loss", torch.tensor(0.0))).item())
-            pl_module.val_aux_edge_acc.append(m.get("val_aux_edge_acc", torch.tensor(0.0)).item())
-        self._update_ema_metric(trainer, pl_module, "val_total", pl_module.val_losses[-1])
-        self._update_ema_metric(trainer, pl_module, "val_eqm", pl_module.val_recon[-1])
-
-        verbose_level = 0
-        try:
-            verbose_level = int(getattr(pl_module, "verbose", 0))
-        except (TypeError, ValueError):
-            verbose_level = 1 if getattr(pl_module, "verbose", False) else 0
-        if verbose_level >= 2:
-            interval = int(getattr(pl_module, "verbose_epoch_interval", 10))
-            current_epoch = int(getattr(trainer, "current_epoch", -1)) + 1
-            if interval > 0 and (current_epoch % interval == 0):
-                train_total, train_components, train_dominant, train_dominant_share = self._component_summary(pl_module, m, "train")
-                val_total, val_components, val_dominant, val_dominant_share = self._component_summary(pl_module, m, "val")
-                max_epochs = getattr(trainer, "max_epochs", None)
-                fit_start_time = getattr(pl_module, "_fit_start_time", None)
-                eta_label = None
-                if (
-                    isinstance(max_epochs, int)
-                    and max_epochs > 0
-                    and fit_start_time is not None
-                    and current_epoch > 0
-                ):
-                    elapsed_seconds = max(0.0, time.time() - float(fit_start_time))
-                    average_epoch_seconds = elapsed_seconds / float(current_epoch)
-                    remaining_epochs = max(0, max_epochs - current_epoch)
-                    eta_seconds = remaining_epochs * average_epoch_seconds
-                    eta_label = self._format_duration(eta_seconds)
-                epoch_label = (
-                    f"Epoch {current_epoch}/{max_epochs}"
-                    if isinstance(max_epochs, int) and max_epochs > 0
-                    else f"Epoch {current_epoch}"
-                )
-                if eta_label is not None:
-                    epoch_label += f" | ETA {eta_label}"
-                ordered_labels = []
-                for label, *_ in train_components + val_components:
-                    if label not in ordered_labels:
-                        ordered_labels.append(label)
-
-                def _components_to_map(components):
-                    return {label: (raw, weighted, share) for label, raw, weighted, share in components}
-
-                train_map = _components_to_map(train_components)
-                val_map = _components_to_map(val_components)
-
-                def _format_row(prefix_label, total_value, component_map, dominant_label, dominant_share):
-                    def _format_share(value: float) -> str:
-                        if value <= 0:
-                            return "  0%"
-                        if value < 0.001:
-                            return "<0.1%"
-                        return f"{value:>5.1%}"
-
-                    row = f"{prefix_label:<5} total={total_value:>9.1f}"
-                    for label in ordered_labels:
-                        if label in component_map:
-                            _, weighted, share = component_map[label]
-                            row += f" | {label:>10} {weighted:>9.1f} {_format_share(share)}"
-                        else:
-                            row += f" | {label:>10} {'-':>9} {'-':>5}"
-                    if dominant_label is not None:
-                        row += f" | dominant={dominant_label} ({_format_share(dominant_share).strip()})"
-                    return row
-
-                print(f"{epoch_label}:")
-                print("  " + _format_row("train", train_total, train_map, train_dominant, train_dominant_share))
-                print("  " + _format_row("val", val_total, val_map, val_dominant, val_dominant_share))
-
-
-import contextlib
-import os
-import uuid
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
-
-import numpy as np
-import pytorch_lightning as pl
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, Dataset, TensorDataset
-
-from .support import run_trainer_fit
-
 
 class EqMGraphDataset(Dataset):
     """Dataset carrying graph node features, conditioning, masks, and label targets."""
@@ -2202,44 +1875,24 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
             train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
             val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
 
-        callbacks = [MetricsLogger()]
-        checkpoint_dir = os.path.join(
-            self.checkpoint_root_dir,
-            f"{self.__class__.__name__}_{uuid.uuid4().hex}",
+        callbacks, checkpoint_dir, checkpoint_callback = build_training_callbacks(
+            generator_name=self.__class__.__name__,
+            checkpoint_root_dir=self.checkpoint_root_dir,
+            early_stopping_monitor=self.early_stopping_monitor,
+            early_stopping_mode=self.early_stopping_mode,
+            enable_early_stopping=self.enable_early_stopping,
+            early_stopping_patience=self.early_stopping_patience,
+            early_stopping_min_delta=self.early_stopping_min_delta,
+            metrics_logger=MetricsLogger(),
         )
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        checkpoint_callback = ModelCheckpoint(
-            dirpath=checkpoint_dir,
-            filename="best-{epoch:03d}-{val_total:.4f}",
-            monitor=self.early_stopping_monitor,
-            mode=self.early_stopping_mode,
-            save_top_k=1,
-            save_last=True,
-            auto_insert_metric_name=False,
-            save_weights_only=False,
-        )
-        callbacks.append(checkpoint_callback)
         if int(self.verbose) >= 1:
             print(f"Writing Lightning logs to {os.path.join(self.artifact_root_dir, 'lightning_logs')}")
             print(f"Writing checkpoints to {checkpoint_dir}")
-        if self.enable_early_stopping:
-            callbacks.append(
-                EarlyStopping(
-                    monitor=self.early_stopping_monitor,
-                    mode=self.early_stopping_mode,
-                    patience=self.early_stopping_patience,
-                    min_delta=self.early_stopping_min_delta,
-                )
-            )
-
-        trainer = pl.Trainer(
-            max_epochs=self.maximum_epochs,
+        trainer = create_trainer(
+            maximum_epochs=self.maximum_epochs,
             callbacks=callbacks,
-            logger=True,
-            default_root_dir=self.artifact_root_dir,
-            enable_checkpointing=True,
-            enable_progress_bar=False,
-            log_every_n_steps=max(1, min(10, len(train_loader))),
+            artifact_root_dir=self.artifact_root_dir,
+            train_loader_length=len(train_loader),
         )
         if not self.verbose:
             with suppress_output():
@@ -2277,18 +1930,15 @@ class EqMDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
                     and self.best_checkpoint_epoch_ < len(self.model.val_recon)
                 ):
                     raw_best_val_eqm = float(self.model.val_recon[self.best_checkpoint_epoch_])
-                summary_parts = []
-                if self.best_checkpoint_epoch_ is not None:
-                    summary_parts.append(f"best_epoch={self.best_checkpoint_epoch_ + 1}")
-                summary_parts.append(
-                    f"{self.early_stopping_monitor}={self.best_checkpoint_score_:.4f}"
-                    if self.best_checkpoint_score_ is not None
-                    else f"{self.early_stopping_monitor}=unknown"
+                print(
+                    format_restored_checkpoint_summary(
+                        early_stopping_monitor=self.early_stopping_monitor,
+                        best_checkpoint_score=self.best_checkpoint_score_,
+                        best_checkpoint_epoch=self.best_checkpoint_epoch_,
+                        raw_best_val_eqm=raw_best_val_eqm,
+                        stopped_epoch=stopped_epoch,
+                    )
                 )
-                if raw_best_val_eqm is not None:
-                    summary_parts.append(f"raw_val_eqm={raw_best_val_eqm:.4f}")
-                summary_parts.append(f"stopped_epoch={stopped_epoch}")
-                print("Restored best checkpoint: " + ", ".join(summary_parts))
                 print(f"  path={self.best_checkpoint_path_}")
 
     def predict(

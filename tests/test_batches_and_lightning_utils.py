@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import torch
+import warnings
 
 from eqm_decompositional_graph_generator.node_engine import (
     GeneratedNodeBatch,
@@ -61,6 +62,41 @@ def test_run_trainer_fit_calls_fit_with_named_loaders():
 def test_run_trainer_fit_wraps_system_exit():
     with pytest.raises(RuntimeError, match="unit-test aborted with SystemExit\\(2\\)"):
         run_trainer_fit(_ExitTrainer(), object(), object(), object(), context="unit-test")
+
+
+class _WarnTrainer:
+    def __init__(self):
+        self.called = False
+
+    def fit(self, model, train_dataloaders=None, val_dataloaders=None):
+        del model, train_dataloaders, val_dataloaders
+        self.called = True
+        warnings.warn(
+            "The 'train_dataloader' does not have many workers which may be a bottleneck. "
+            "Consider increasing the value of the `num_workers` argument` to `num_workers=15` in the `DataLoader` to improve performance.",
+            UserWarning,
+        )
+        warnings.warn(
+            "The 'val_dataloader' does not have many workers which may be a bottleneck. "
+            "Consider increasing the value of the `num_workers` argument` to `num_workers=15` in the `DataLoader` to improve performance.",
+            UserWarning,
+        )
+        warnings.warn(
+            "Starting from v1.9.0, `tensorboardX` has been removed as a dependency of the "
+            "`pytorch_lightning` package, due to potential conflicts with other packages in the ML ecosystem.",
+            UserWarning,
+        )
+
+
+def test_run_trainer_fit_suppresses_lightning_worker_warnings():
+    trainer = _WarnTrainer()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run_trainer_fit(trainer, object(), object(), object(), context="unit-test")
+
+    assert trainer.called is True
+    assert caught == []
 
 
 def test_build_train_val_subsets_reuses_single_example_for_train_and_val():

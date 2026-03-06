@@ -600,26 +600,6 @@ class EqMDecompositionalGraphDecoder(object):
                             instances.append(instance)
         return np.vstack(instances)
         
-    def constrained_node_encodings_list(
-        self,
-        original_node_encodings_list: List[np.ndarray]
-    ) -> List[np.ndarray]:
-        """Return copies of the encodings with negative entries clipped to zero.
-
-        Args:
-            original_node_encodings_list (List[np.ndarray]): Input value.
-
-        Returns:
-            List[np.ndarray]: Computed result.
-        """
-        constrained = []
-        for encoding in original_node_encodings_list:
-            new_enc = encoding.copy()
-            # Replace negative values with 0.
-            new_enc[new_enc < 0] = 0
-            constrained.append(new_enc)
-        return constrained
-
     def get_degrees(
         self,
         degree_predictions: np.ndarray,
@@ -653,7 +633,6 @@ class EqMDecompositionalGraphDecoder(object):
         Returns:
             List[np.ndarray]: Computed result.
         """
-        node_embeddings_list = self.constrained_node_encodings_list(generated_nodes.node_embeddings_list)
         channel_plan = self._plan_channel("direct_edges")
         existence_masks = generated_nodes.node_presence_mask
         degree_predictions = generated_nodes.node_degree_predictions
@@ -662,6 +641,11 @@ class EqMDecompositionalGraphDecoder(object):
             raise RuntimeError("decode_adjacency_matrix requires explicit node_presence_mask predictions.")
         if degree_predictions is None:
             raise RuntimeError("decode_adjacency_matrix requires explicit node_degree_predictions.")
+        if len(degree_predictions) != len(existence_masks):
+            raise ValueError(
+                "node_degree_predictions must align with node_presence_mask "
+                f"(got {len(degree_predictions)} degree rows for {len(existence_masks)} existence rows)."
+            )
 
         if predicted_edge_probability_matrices is None:
             if channel_plan is not None and channel_plan.mode == "disabled":
@@ -673,14 +657,18 @@ class EqMDecompositionalGraphDecoder(object):
                 "decode_adjacency_matrix requires generator-provided edge probabilities."
             )
         else:
-            if len(predicted_edge_probability_matrices) != len(node_embeddings_list):
+            if len(predicted_edge_probability_matrices) != len(existence_masks):
                 raise ValueError(
                     "predicted_edge_probability_matrices must align with generated node batches "
-                    f"(got {len(predicted_edge_probability_matrices)} matrices for {len(node_embeddings_list)} graphs)."
+                    f"(got {len(predicted_edge_probability_matrices)} matrices for {len(existence_masks)} graphs)."
                 )
             predicted_probs_list = []
-            for node_embeddings, prob_matrix in zip(node_embeddings_list, predicted_edge_probability_matrices):
-                n_nodes = node_embeddings.shape[0]
+            for existence_mask, degree_prediction, prob_matrix in zip(
+                existence_masks,
+                degree_predictions,
+                predicted_edge_probability_matrices,
+            ):
+                n_nodes = min(len(existence_mask), len(degree_prediction))
                 prob_matrix = np.asarray(prob_matrix, dtype=float)
                 if prob_matrix.shape != (n_nodes, n_nodes):
                     raise ValueError(
@@ -692,8 +680,11 @@ class EqMDecompositionalGraphDecoder(object):
         
         adj_mtx_list = []
         # Process each graph's predictions.
-        for graph_idx, (prob_list, node_embeddings) in enumerate(zip(predicted_probs_list, node_embeddings_list)):
-            n_nodes = node_embeddings.shape[0]
+        for graph_idx, prob_list in enumerate(predicted_probs_list):
+            n_nodes = min(
+                len(existence_masks[graph_idx]),
+                len(degree_predictions[graph_idx]),
+            )
             idx = 0
             prob_matrix = np.zeros((n_nodes, n_nodes))
             # Reconstruct the probability matrix from the flat list.
@@ -734,15 +725,19 @@ class EqMDecompositionalGraphDecoder(object):
         channel_plan = self._plan_channel("node_labels")
         if channel_plan is not None and channel_plan.mode == "constant":
             predicted_node_labels_list = []
-            for node_embeddings in generated_nodes.node_embeddings_list:
-                n = node_embeddings.shape[0]
+            if generated_nodes.node_presence_mask is None:
+                raise RuntimeError("decode_node_labels requires node_presence_mask when using a constant node-label policy.")
+            for node_presence_mask in generated_nodes.node_presence_mask:
+                n = len(node_presence_mask)
                 predicted_node_labels_list.append(np.array([channel_plan.constant_value] * n, dtype=object))
             return predicted_node_labels_list
 
         if channel_plan is not None and channel_plan.mode == "disabled":
             predicted_node_labels_list = []
-            for node_embeddings in generated_nodes.node_embeddings_list:
-                n = node_embeddings.shape[0]
+            if generated_nodes.node_presence_mask is None:
+                raise RuntimeError("decode_node_labels requires node_presence_mask when node labels are disabled.")
+            for node_presence_mask in generated_nodes.node_presence_mask:
+                n = len(node_presence_mask)
                 predicted_node_labels_list.append(np.array([None] * n, dtype=object))
             return predicted_node_labels_list
 
@@ -798,7 +793,7 @@ class EqMDecompositionalGraphDecoder(object):
             return predicted_edge_labels_list
 
         if channel_plan is not None and channel_plan.mode == "disabled":
-            return [np.asarray([], dtype=object) for _ in generated_nodes.node_embeddings_list]
+            return [np.asarray([], dtype=object) for _ in adj_mtx_list]
 
         raise RuntimeError(
             "decode_edge_labels requires generator-provided edge labels."
@@ -812,7 +807,7 @@ class EqMDecompositionalGraphDecoder(object):
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
     ) -> List[nx.Graph]:
-        """Reconstruct labelled graphs from node encodings, respecting existence masks.
+        """Reconstruct labelled graphs from predicted structural and semantic channels.
 
         Args:
             generated_nodes (GeneratedNodeBatch): Input value.
@@ -838,8 +833,7 @@ class EqMDecompositionalGraphDecoder(object):
         )
         
         graphs = []
-        for node_embeddings, node_presence_mask, node_labels, edge_labels, adj_mtx in zip(
-                generated_nodes.node_embeddings_list,
+        for node_presence_mask, node_labels, edge_labels, adj_mtx in zip(
                 generated_nodes.node_presence_mask,
                 predicted_node_labels_list,
                 predicted_edge_labels_list,
@@ -861,7 +855,7 @@ class EqMDecompositionalGraphDecoder(object):
                             edge_idx += 1
                 nx.set_edge_attributes(graph, edge_attr, 'label')
             
-            existent_indices = np.where(np.asarray(node_presence_mask[:node_embeddings.shape[0]], dtype=bool))[0]
+            existent_indices = np.where(np.asarray(node_presence_mask[:adj_mtx.shape[0]], dtype=bool))[0]
             filtered_graph = graph.subgraph(existent_indices).copy()
             graphs.append(filtered_graph)
         
