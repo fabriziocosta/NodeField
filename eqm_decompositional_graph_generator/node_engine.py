@@ -210,18 +210,29 @@ def plot_metrics(
         smoothed_log = np.convolve(log_arr, kernel, mode="valid")
         return np.exp(smoothed_log)
 
+    metrics = [
+        name
+        for name in train_metrics.keys()
+        if len(train_metrics.get(name, [])) > 0 and len(val_metrics.get(name, [])) > 0
+    ]
+    if not metrics:
+        return
+
     fig, ax0 = plt.subplots(figsize=(15, 8))
-    metrics = list(train_metrics.keys())
     axes = [ax0] + [ax0.twinx() for _ in range(len(metrics) - 1)]
     for i, ax in enumerate(axes[1:], start=1):
-        ax.spines["right"].set_position(("outward", 60 * i))
-    colors = ["blue", "red", "green", "purple", "orange"]
+        ax.spines["right"].set_position(("outward", 56 * i))
+        ax.yaxis.set_label_position("right")
+        ax.yaxis.tick_right()
+        ax.patch.set_visible(False)
+
+    color_cycle = plt.rcParams.get("axes.prop_cycle", None)
+    default_colors = color_cycle.by_key()["color"] if color_cycle is not None else ["blue", "red", "green", "purple", "orange"]
+    colors = [default_colors[i % len(default_colors)] for i in range(len(metrics))]
     lines, labels = [], []
     for name, ax, color in zip(metrics, axes, colors):
         train_vals = train_metrics[name]
         val_vals = val_metrics[name]
-        if len(train_vals) < 1 or len(val_vals) < 1:
-            continue
         count = min(len(train_vals), len(val_vals))
         train = train_vals[:count]
         val = val_vals[:count]
