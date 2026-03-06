@@ -749,8 +749,12 @@ class EqMDecompositionalNodeGeneratorModule(pl.LightningModule):
         self.langevin_noise_scale = float(langevin_noise_scale)
         self.pool_condition_tokens = bool(pool_condition_tokens)
         self.guidance_enabled = bool(guidance_enabled)
-        self.target_condition_start_index = int(target_condition_start_index)
-        self.target_condition_feature_count = int(target_condition_feature_count)
+        self.target_condition_start_index = int(
+            0 if target_condition_start_index is None else target_condition_start_index
+        )
+        self.target_condition_feature_count = int(
+            0 if target_condition_feature_count is None else target_condition_feature_count
+        )
         self.cfg_condition_dropout_prob = float(cfg_condition_dropout_prob)
         self.cfg_null_target_strategy = str(cfg_null_target_strategy)
         self.use_guidance = False
