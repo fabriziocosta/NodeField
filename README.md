@@ -3,7 +3,7 @@
 GraphGen is a Python toolkit for conditional graph generation with decompositional encoding/decoding and equilibrium-style node updates.
 
 Technical documentation lives under [`docs/`](docs/):
-- [`docs/EquilibriumMatching_README.md`](docs/EquilibriumMatching_README.md): Equilibrium Matching node-generator internals and training/sampling behavior.
+- [`docs/EQUILIBRIUM_MATCHING_README.md`](docs/EQUILIBRIUM_MATCHING_README.md): Equilibrium Matching node-generator internals and training/sampling behavior.
 - [`docs/GRAPH_GENERATOR_README.md`](docs/GRAPH_GENERATOR_README.md): graph-generator orchestration architecture.
 - [`docs/DECODER_README.md`](docs/DECODER_README.md): decoder and constraint-solver details.
 - [`docs/PREFERENCES.md`](docs/PREFERENCES.md): local documentation and notebook conventions.

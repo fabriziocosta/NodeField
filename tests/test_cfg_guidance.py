@@ -72,7 +72,6 @@ class _ConditionalStub:
         }
         n = len(graph_conditioning)
         return GeneratedNodeBatch(
-            node_embeddings_list=[np.zeros((2, 1), dtype=float) for _ in range(n)],
             node_presence_mask=np.ones((n, 2), dtype=bool),
             node_degree_predictions=np.ones((n, 2), dtype=np.int64),
         )

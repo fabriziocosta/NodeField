@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
+import os
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -164,26 +166,49 @@ def plot_networkx_graphs(
     plt.show()
 
 
-def show_samples(n_samples, graphs, targets, graph_generator, mode=None):
+@contextlib.contextmanager
+def _temporary_decoder_n_jobs(graph_generator, decoder_n_jobs):
+    decoder = getattr(graph_generator, "graph_decoder", None)
+    if decoder is None or decoder_n_jobs is None:
+        yield
+        return
+
+    original_n_jobs = getattr(decoder, "n_jobs", 1)
+    if int(decoder_n_jobs) < 0:
+        cpu_count = os.cpu_count() or 1
+        resolved_n_jobs = max(1, cpu_count + 1 + int(decoder_n_jobs))
+    else:
+        resolved_n_jobs = max(1, int(decoder_n_jobs))
+
+    decoder.n_jobs = resolved_n_jobs
+    try:
+        yield
+    finally:
+        decoder.n_jobs = original_n_jobs
+
+
+def show_samples(n_samples, graphs, targets, graph_generator, mode=None, decoder_n_jobs=-1):
     display_mode = mode or infer_display_mode(graphs)
 
     def _show_group(title, seed_graphs):
         print(f"{title} Graphs:")
         plot_networkx_graphs(seed_graphs[:n_samples], n_cols=n_samples, mode=display_mode)
 
-        unfiltered_graphs = graph_generator.sample_conditioned_on_random(
-            seed_graphs,
-            n_samples,
-            apply_feasibility_filtering=False,
-        )
+        with _temporary_decoder_n_jobs(graph_generator, decoder_n_jobs):
+            unfiltered_graphs = graph_generator.sample_conditioned_on_random(
+                seed_graphs,
+                n_samples,
+                apply_feasibility_filtering=False,
+            )
         print(f"Sampled {title} Graphs Without Feasibility Filtering ({len(unfiltered_graphs)}/{n_samples}):")
         plot_networkx_graphs(unfiltered_graphs, n_cols=max(1, len(unfiltered_graphs)), mode=display_mode)
 
-        filtered_graphs = graph_generator.sample_conditioned_on_random(
-            seed_graphs,
-            n_samples,
-            apply_feasibility_filtering=True,
-        )
+        with _temporary_decoder_n_jobs(graph_generator, decoder_n_jobs):
+            filtered_graphs = graph_generator.sample_conditioned_on_random(
+                seed_graphs,
+                n_samples,
+                apply_feasibility_filtering=True,
+            )
         print(f"Sampled {title} Graphs With Feasibility Filtering ({len(filtered_graphs)}/{n_samples}):")
         plot_networkx_graphs(filtered_graphs, n_cols=max(1, len(filtered_graphs)), mode=display_mode)
 

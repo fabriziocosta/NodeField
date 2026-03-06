@@ -55,9 +55,8 @@ class NodeGenerationBatch:
 
 @dataclass
 class GeneratedNodeBatch:
-    """Generator outputs separated into embeddings and explicit semantic predictions."""
+    """Generator outputs as explicit structural and semantic predictions."""
 
-    node_embeddings_list: List[np.ndarray]
     node_presence_mask: Optional[np.ndarray] = None
     node_degree_predictions: Optional[np.ndarray] = None
     node_labels: Optional[List[np.ndarray]] = None
@@ -65,7 +64,17 @@ class GeneratedNodeBatch:
     edge_label_matrices: Optional[List[np.ndarray]] = None
 
     def __len__(self) -> int:
-        return int(len(self.node_embeddings_list))
+        if self.node_presence_mask is not None:
+            return int(self.node_presence_mask.shape[0])
+        if self.node_degree_predictions is not None:
+            return int(len(self.node_degree_predictions))
+        if self.node_labels is not None:
+            return int(len(self.node_labels))
+        if self.edge_probability_matrices is not None:
+            return int(len(self.edge_probability_matrices))
+        if self.edge_label_matrices is not None:
+            return int(len(self.edge_label_matrices))
+        return 0
 
 
 class ConditionalNodeGeneratorBase:
@@ -2292,7 +2301,6 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
             self.last_predicted_edge_label_matrices_ = predicted_edge_label_matrices
 
         return GeneratedNodeBatch(
-            node_embeddings_list=[gen_orig[index] for index in range(gen_orig.shape[0])],
             node_presence_mask=node_presence_mask,
             node_degree_predictions=node_degree_predictions,
             node_labels=predicted_node_labels,

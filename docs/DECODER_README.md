@@ -37,7 +37,7 @@ The decoder operates on these predicted channels:
 - `edge_probability_matrices`
 - `edge_label_matrices` or a constant/disabled edge-label policy
 
-`GeneratedNodeBatch` still carries `node_embeddings_list`, but the current decoder no longer uses node embeddings for structural reconstruction. Structural decode now depends on explicit existence, degree, and edge-probability predictions.
+`GeneratedNodeBatch` contains only explicit structural and semantic prediction channels. Structural decode depends on node existence, degree, and edge-probability predictions.
 
 The supervision plan built during training determines which channels are:
 
@@ -455,7 +455,7 @@ A MILP technique used to enforce graph connectivity by routing artificial flow t
 
 ### GeneratedNodeBatch
 
-The node generator’s output object containing node embeddings plus predicted semantic and structural channels.
+The node generator’s output object containing predicted structural and semantic channels.
 
 ### MILP
 

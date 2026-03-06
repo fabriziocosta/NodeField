@@ -19,10 +19,10 @@ The Equilibrium Matching model replaces diffusion time-conditioning and reverse-
 - a stationary score-matching objective,
 - iterative relaxation or Langevin-style sampling in feature space.
 
-In this repository, the Equilibrium Matching generator is used as the `conditioning -> node embeddings` stage inside the broader decompositional pipeline:
+In this repository, the Equilibrium Matching generator is used as the `conditioning -> node-level predictions` stage inside the broader decompositional pipeline:
 
 1. encode each training graph into node feature matrices and graph-level conditioning vectors,
-2. train the Equilibrium Matching conditional generator to map graph-level conditions to node-level embeddings,
+2. train the Equilibrium Matching conditional generator to map graph-level conditions to node-level structural and semantic predictions,
 3. use the model heads and graph decoder to map generated node-level predictions back into graphs.
 
 ## High-Level Idea
@@ -254,13 +254,13 @@ This is also the implementation target score.
 
 The implementation minimizes masked mean squared error between learned score and target score:
 
-$$\mathcal{L}_{\text{equilibrium_matching}} = \mathbb{E}_{x,\varepsilon}\left[\left\|g_\theta(\tilde{x}, c) + \frac{\varepsilon}{\sigma}\right\|^2\right]$$
+$$\mathcal{L}_{\mathrm{equilibrium\_matching}} = \mathbb{E}_{x,\varepsilon}\left[\left\|g_\theta(\tilde{x}, c) + \frac{\varepsilon}{\sigma}\right\|^2\right]$$
 
 with masking applied to padded node positions.
 
 Expanded with mask $m$:
 
-$$\mathcal{L}_{\text{equilibrium_matching}} = \frac{\sum_{b,i,d} m_{b,i}\left(g_\theta(\tilde{x}, c)_{b,i,d} + \frac{\varepsilon_{b,i,d}}{\sigma}\right)^2}{\sum_{b,i,d} m_{b,i}}$$
+$$\mathcal{L}_{\mathrm{equilibrium\_matching}} = \frac{\sum_{b,i,d} m_{b,i}\left(g_\theta(\tilde{x}, c)_{b,i,d} + \frac{\varepsilon_{b,i,d}}{\sigma}\right)^2}{\sum_{b,i,d} m_{b,i}}$$
 
 This is the primary generative loss in the current code.
 
@@ -291,7 +291,7 @@ The complete loss is easiest to understand as a sum of three groups:
 This is the main generative term:
 
 $$
-\mathcal{L}_{\text{equilibrium_matching}}
+\mathcal{L}_{\mathrm{equilibrium\_matching}}
 $$
 
 It teaches the model’s score field to match the denoising score implied by Gaussian corruption.
@@ -311,19 +311,19 @@ This term is logged as:
 The existence target is the true node-support mask:
 
 $$
-y^{\text{exist}}_{b,i} \in \{0, 1\}
+y^{\mathrm{exist}}_{b,i} \in \{0, 1\}
 $$
 
 The existence head predicts logits:
 
 $$
-\ell^{\text{exist}}_{b,i}
+\ell^{\mathrm{exist}}_{b,i}
 $$
 
 and the implementation applies binary cross-entropy with logits:
 
 $$
-\mathcal{L}_{\text{exist}} = \mathrm{BCEWithLogits}(\ell^{\text{exist}}, y^{\text{exist}})
+\mathcal{L}_{\mathrm{exist}} = \mathrm{BCEWithLogits}(\ell^{\mathrm{exist}}, y^{\mathrm{exist}})
 $$
 
 with positive-class reweighting through `exist_pos_weight`.
@@ -352,20 +352,20 @@ This is a soft global consistency term built on top of the existence head.
 The conditioning vector contains an explicit desired node count:
 
 $$
-n^{\text{target}}_b
+n^{\mathrm{target}}_b
 $$
 
 The model’s existence logits imply an expected number of materialized nodes:
 
 $$
-\hat{n}_b = \sum_i \sigma(\ell^{\text{exist}}_{b,i})
+\hat{n}_b = \sum_i \sigma(\ell^{\mathrm{exist}}_{b,i})
 $$
 
 The implementation penalizes disagreement with a Huber loss:
 
 $$
-\mathcal{L}_{\text{node-count}} =
-\mathrm{Huber}(\hat{n}_b, n^{\text{target}}_b)
+\mathcal{L}_{\mathrm{node\_count}} =
+\mathrm{Huber}(\hat{n}_b, n^{\mathrm{target}}_b)
 $$
 
 This term is useful because the per-slot BCE loss does not by itself guarantee that the total occupancy mass matches the desired graph size.
@@ -383,20 +383,20 @@ and weighted by:
 The degree target is the true node degree clipped to the supported class range:
 
 $$
-y^{\text{deg}}_{b,i} \in \{0, \dots, D_{\max}\}
+y^{\mathrm{deg}}_{b,i} \in \{0, \dots, D_{\max}\}
 $$
 
 The degree head predicts logits:
 
 $$
-\ell^{\text{deg}}_{b,i} \in \mathbb{R}^{D_{\max}+1}
+\ell^{\mathrm{deg}}_{b,i} \in \mathbb{R}^{D_{\max}+1}
 $$
 
 and the implementation applies masked cross-entropy:
 
 $$
-\mathcal{L}_{\text{deg}} =
-\mathrm{MaskedCrossEntropy}(\ell^{\text{deg}}, y^{\text{deg}})
+\mathcal{L}_{\mathrm{deg}} =
+\mathrm{MaskedCrossEntropy}(\ell^{\mathrm{deg}}, y^{\mathrm{deg}})
 $$
 
 Masking means:
@@ -417,20 +417,20 @@ and weighted by:
 If node labels are supervised and not collapsed to a constant, the node-label head predicts categorical logits:
 
 $$
-\ell^{\text{label}}_{b,i} \in \mathbb{R}^{K}
+\ell^{\mathrm{label}}_{b,i} \in \mathbb{R}^{K}
 $$
 
 for encoded node-label targets:
 
 $$
-y^{\text{label}}_{b,i} \in \{0, \dots, K-1\}
+y^{\mathrm{label}}_{b,i} \in \{0, \dots, K-1\}
 $$
 
 The loss is masked cross-entropy:
 
 $$
-\mathcal{L}_{\text{label}} =
-\mathrm{MaskedCrossEntropy}(\ell^{\text{label}}, y^{\text{label}})
+\mathcal{L}_{\mathrm{label}} =
+\mathrm{MaskedCrossEntropy}(\ell^{\mathrm{label}}, y^{\mathrm{label}})
 $$
 
 Only valid nodes contribute.
@@ -450,14 +450,14 @@ If node labels are constant or disabled by the supervision plan, this term is ab
 If direct edge supervision is enabled, the model scores selected node pairs with an edge MLP:
 
 $$
-\ell^{\text{edge}}_{(i,j)} = f_{\text{edge}}(h_i, h_j)
+\ell^{\mathrm{edge}}_{(i,j)} = f_{\mathrm{edge}}(h_i, h_j)
 $$
 
 and applies BCE with logits against direct edge-presence targets:
 
 $$
-\mathcal{L}_{\text{edge}} =
-\mathrm{BCEWithLogits}(\ell^{\text{edge}}, y^{\text{edge}})
+\mathcal{L}_{\mathrm{edge}} =
+\mathrm{BCEWithLogits}(\ell^{\mathrm{edge}}, y^{\mathrm{edge}})
 $$
 
 This is the main structural pairwise supervision term used by the decoder path.
@@ -491,14 +491,14 @@ restricted to currently materialized node slots.
 The conditioning vector contains a desired edge count:
 
 $$
-m^{\text{target}}_b
+m^{\mathrm{target}}_b
 $$
 
 and the loss is:
 
 $$
-\mathcal{L}_{\text{edge-count}} =
-\mathrm{Huber}(\hat{m}_b, m^{\text{target}}_b)
+\mathcal{L}_{\mathrm{edge\_count}} =
+\mathrm{Huber}(\hat{m}_b, m^{\mathrm{target}}_b)
 $$
 
 This term encourages the soft edge field to match the requested graph density before the decoder’s discrete optimization stage.
@@ -522,7 +522,7 @@ $$
 The implementation turns the degree logits into expected degrees:
 
 $$
-\hat{d}_{b,i} = \sum_{k=0}^{D_{\max}} k \cdot \mathrm{softmax}(\ell^{\text{deg}}_{b,i})_k
+\hat{d}_{b,i} = \sum_{k=0}^{D_{\max}} k \cdot \mathrm{softmax}(\ell^{\mathrm{deg}}_{b,i})_k
 $$
 
 and forms the expected total degree:
@@ -536,8 +536,8 @@ over materialized nodes.
 It then compares that to twice the desired edge count:
 
 $$
-\mathcal{L}_{\text{deg-edge}} =
-\mathrm{Huber}(\hat{D}_b, 2 m^{\text{target}}_b)
+\mathcal{L}_{\mathrm{deg\_edge}} =
+\mathrm{Huber}(\hat{D}_b, 2 m^{\mathrm{target}}_b)
 $$
 
 This term is not a replacement for degree supervision or edge supervision. It is a soft graph-level compatibility penalty tying the degree head and the edge-count target together.
@@ -555,14 +555,14 @@ and weighted by:
 If edge labels are supervised and not collapsed to a constant, the edge-label head predicts categorical logits for supervised node pairs:
 
 $$
-\ell^{\text{edge-label}}_{(i,j)} \in \mathbb{R}^{C}
+\ell^{\mathrm{edge\_label}}_{(i,j)} \in \mathbb{R}^{C}
 $$
 
 and the loss is standard cross-entropy:
 
 $$
-\mathcal{L}_{\text{edge-label}} =
-\mathrm{CrossEntropy}(\ell^{\text{edge-label}}, y^{\text{edge-label}})
+\mathcal{L}_{\mathrm{edge\_label}} =
+\mathrm{CrossEntropy}(\ell^{\mathrm{edge\_label}}, y^{\mathrm{edge\_label}})
 $$
 
 This term is logged as:
@@ -580,8 +580,8 @@ If higher-horizon locality supervision is enabled, the model uses a second edge 
 The loss is again BCE with logits:
 
 $$
-\mathcal{L}_{\text{aux}} =
-\mathrm{BCEWithLogits}(\ell^{\text{aux}}, y^{\text{aux}})
+\mathcal{L}_{\mathrm{aux}} =
+\mathrm{BCEWithLogits}(\ell^{\mathrm{aux}}, y^{\mathrm{aux}})
 $$
 
 This term is intended as representation regularization rather than as the primary decoder-facing edge signal.
@@ -599,17 +599,17 @@ and weighted by:
 The implementation builds `total_loss` additively from whichever terms are active for the current dataset and supervision plan:
 
 $$
-\mathcal{L}_{\text{total}} =
-\mathcal{L}_{\text{equilibrium_matching}}
-+ \lambda_{\text{deg}} \mathcal{L}_{\text{deg}}
-+ \lambda_{\text{exist}} \mathcal{L}_{\text{exist}}
-+ \lambda_{\text{node-count}} \mathcal{L}_{\text{node-count}}
-+ \lambda_{\text{node-label}} \mathcal{L}_{\text{label}}
-+ \lambda_{\text{edge}} \mathcal{L}_{\text{edge}}
-+ \lambda_{\text{edge-count}} \mathcal{L}_{\text{edge-count}}
-+ \lambda_{\text{deg-edge}} \mathcal{L}_{\text{deg-edge}}
-+ \lambda_{\text{edge-label}} \mathcal{L}_{\text{edge-label}}
-+ \lambda_{\text{aux}} \mathcal{L}_{\text{aux}}
+\mathcal{L}_{\mathrm{total}} =
+\mathcal{L}_{\mathrm{equilibrium\_matching}}
++ \lambda_{\mathrm{deg}} \mathcal{L}_{\mathrm{deg}}
++ \lambda_{\mathrm{exist}} \mathcal{L}_{\mathrm{exist}}
++ \lambda_{\mathrm{node\_count}} \mathcal{L}_{\mathrm{node\_count}}
++ \lambda_{\mathrm{node\_label}} \mathcal{L}_{\mathrm{label}}
++ \lambda_{\mathrm{edge}} \mathcal{L}_{\mathrm{edge}}
++ \lambda_{\mathrm{edge\_count}} \mathcal{L}_{\mathrm{edge\_count}}
++ \lambda_{\mathrm{deg\_edge}} \mathcal{L}_{\mathrm{deg\_edge}}
++ \lambda_{\mathrm{edge\_label}} \mathcal{L}_{\mathrm{edge\_label}}
++ \lambda_{\mathrm{aux}} \mathcal{L}_{\mathrm{aux}}
 $$
 
 subject to these activation rules:

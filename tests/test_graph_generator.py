@@ -193,7 +193,6 @@ def test_decode_node_labels_assigns_dummy_constant_label_for_unlabelled_training
 
     labels = decoder.decode_node_labels(
         GeneratedNodeBatch(
-            node_embeddings_list=[np.zeros((2, 3), dtype=float)],
             node_presence_mask=np.asarray([[True, True]], dtype=bool),
         )
     )
@@ -205,7 +204,6 @@ def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
     decoder = EquilibriumMatchingDecompositionalGraphDecoder(verbose=False)
 
     generated_nodes = GeneratedNodeBatch(
-        node_embeddings_list=[np.zeros((5, 3), dtype=float)],
         node_presence_mask=np.asarray([[True, True]], dtype=bool),
         node_degree_predictions=np.asarray([[1, 1]], dtype=float),
         edge_probability_matrices=[np.asarray([[0.0, 0.9], [0.9, 0.0]], dtype=float)],
@@ -222,10 +220,6 @@ def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
 
 def test_parallel_decode_matches_serial_decode():
     generated_nodes = GeneratedNodeBatch(
-        node_embeddings_list=[
-            np.zeros((2, 3), dtype=float),
-            np.zeros((2, 3), dtype=float),
-        ],
         node_presence_mask=np.asarray([[True, True], [True, True]], dtype=bool),
         node_degree_predictions=np.asarray([[1, 1], [1, 1]], dtype=float),
         edge_probability_matrices=[

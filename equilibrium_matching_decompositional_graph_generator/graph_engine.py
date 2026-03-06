@@ -1498,13 +1498,17 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
         """
         if int(self.verbose) < 3:
             return
-        total_graphs = len(generated_nodes.node_embeddings_list)
+        total_graphs = len(generated_nodes)
         for graph_idx in range(total_graphs):
-            node_embeddings = generated_nodes.node_embeddings_list[graph_idx]
-            predicted_node_count = (
-                int(np.sum(generated_nodes.node_presence_mask[graph_idx][: node_embeddings.shape[0]]))
+            node_row_count = (
+                int(generated_nodes.node_presence_mask.shape[1])
                 if generated_nodes.node_presence_mask is not None
-                else node_embeddings.shape[0]
+                else int(generated_nodes.node_degree_predictions.shape[1])
+            )
+            predicted_node_count = (
+                int(np.sum(generated_nodes.node_presence_mask[graph_idx][:node_row_count]))
+                if generated_nodes.node_presence_mask is not None
+                else node_row_count
             )
             conditioning_node_count = int(graph_conditioning.node_counts[graph_idx])
             conditioning_edge_count = int(graph_conditioning.edge_counts[graph_idx])
@@ -1516,12 +1520,12 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
             )
             if generated_nodes.node_degree_predictions is not None:
                 valid_deg = np.asarray(
-                    generated_nodes.node_degree_predictions[graph_idx][: node_embeddings.shape[0]],
+                    generated_nodes.node_degree_predictions[graph_idx][:node_row_count],
                     dtype=float,
                 )
                 if generated_nodes.node_presence_mask is not None:
                     valid_mask = np.asarray(
-                        generated_nodes.node_presence_mask[graph_idx][: node_embeddings.shape[0]],
+                        generated_nodes.node_presence_mask[graph_idx][:node_row_count],
                         dtype=bool,
                     )
                     valid_deg = valid_deg[valid_mask]

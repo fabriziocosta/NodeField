@@ -7,7 +7,7 @@ Implementation anchors:
 - [`../equilibrium_matching_decompositional_graph_generator/graph_engine.py`](../equilibrium_matching_decompositional_graph_generator/graph_engine.py)
 - [`../equilibrium_matching_decompositional_graph_generator/node_engine.py`](../equilibrium_matching_decompositional_graph_generator/node_engine.py)
 - [`DECODER_README.md`](DECODER_README.md)
-- [`EquilibriumMatching_README.md`](EquilibriumMatching_README.md)
+- [`EQUILIBRIUM_MATCHING_README.md`](EQUILIBRIUM_MATCHING_README.md)
 
 ## Scope
 
@@ -58,14 +58,13 @@ It receives:
 
 It predicts:
 
-- node embeddings,
 - node existence,
 - node degrees,
 - optional node labels,
 - optional edge probabilities,
 - optional edge labels.
 
-The internal Equilibrium Matching mechanics are described in [`EquilibriumMatching_README.md`](EquilibriumMatching_README.md).
+The internal Equilibrium Matching mechanics are described in [`EQUILIBRIUM_MATCHING_README.md`](EQUILIBRIUM_MATCHING_README.md).
 
 ### 4. Graph Decoder
 
@@ -121,7 +120,6 @@ This distinction matters because generation is not treated as “the first `k` r
 
 This is the output of the conditional node generator during inference:
 
-- generated node embeddings,
 - node presence mask,
 - predicted degrees,
 - optional predicted node labels,
@@ -261,7 +259,6 @@ The conditioning always stays in the `GraphConditioningBatch` format.
 
 This produces `GeneratedNodeBatch`, which may contain:
 
-- node embeddings,
 - node presence predictions,
 - degree predictions,
 - node labels,
@@ -457,7 +454,7 @@ For someone new to the codebase, the fastest way to build accurate context is:
 
 1. [`../README.md`](../README.md)
 2. this file
-3. [`EquilibriumMatching_README.md`](EquilibriumMatching_README.md)
+3. [`EQUILIBRIUM_MATCHING_README.md`](EQUILIBRIUM_MATCHING_README.md)
 4. [`DECODER_README.md`](DECODER_README.md)
 5. [`../equilibrium_matching_decompositional_graph_generator/graph_engine.py`](../equilibrium_matching_decompositional_graph_generator/graph_engine.py)
 6. [`../equilibrium_matching_decompositional_graph_generator/node_engine.py`](../equilibrium_matching_decompositional_graph_generator/node_engine.py)

@@ -30,7 +30,7 @@ def test_node_generation_and_generated_batch_len():
         node_degree_targets=np.zeros((2, 3), dtype=np.int64),
     )
     generated = GeneratedNodeBatch(
-        node_embeddings_list=[np.zeros((2, 4)), np.zeros((3, 4)), np.zeros((1, 4))]
+        node_presence_mask=np.ones((3, 2), dtype=bool)
     )
     assert len(node_batch) == 2
     assert len(generated) == 3
