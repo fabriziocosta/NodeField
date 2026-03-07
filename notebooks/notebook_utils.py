@@ -106,6 +106,7 @@ def load_graph_generator(model_name, model_dir=None):
         graph_generator = pickle.load(handle)
     print(f"Loaded graph generator: {path.name}")
     print(path)
+    print("Note: this is a clean-break Conditional Node Field artifact path; older pre-refactor pickles may not reload.")
     return graph_generator
 
 

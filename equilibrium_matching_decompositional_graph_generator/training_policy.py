@@ -110,7 +110,7 @@ def format_restored_checkpoint_summary(
     early_stopping_monitor: str,
     best_checkpoint_score,
     best_checkpoint_epoch,
-    raw_best_val_equilibrium_matching_loss,
+    raw_best_val_node_field_loss,
     stopped_epoch: int,
 ) -> str:
     """Format the restored-checkpoint summary with key fields first."""
@@ -122,9 +122,9 @@ def format_restored_checkpoint_summary(
         if best_checkpoint_score is not None
         else f"{early_stopping_monitor}=unknown"
     )
-    if raw_best_val_equilibrium_matching_loss is not None:
+    if raw_best_val_node_field_loss is not None:
         summary_parts.append(
-            f"raw_val_equilibrium_matching={raw_best_val_equilibrium_matching_loss:.4f}"
+            f"raw_val_node_field={raw_best_val_node_field_loss:.4f}"
         )
     summary_parts.append(f"stopped_epoch={stopped_epoch}")
     return "Restored best checkpoint: " + ", ".join(summary_parts)

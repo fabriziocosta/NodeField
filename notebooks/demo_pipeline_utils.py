@@ -28,10 +28,10 @@ try:
 except ModuleNotFoundError:
     from nsppk import NSPPK, NodeNSPPK
 
-from equilibrium_matching_decompositional_graph_generator.node_engine import EquilibriumMatchingDecompositionalNodeGenerator
+from equilibrium_matching_decompositional_graph_generator.node_engine import ConditionalNodeFieldGenerator
 from equilibrium_matching_decompositional_graph_generator.graph_engine import (
-    EquilibriumMatchingDecompositionalGraphDecoder,
-    EquilibriumMatchingDecompositionalGraphGenerator,
+    ConditionalNodeFieldGraphDecoder,
+    ConditionalNodeFieldGraphGenerator,
 )
 
 
@@ -157,7 +157,7 @@ def build_graph_generator(
     lambda_auxiliary_edge_importance=1.0,
     degree_temperature=1,
     pool_condition_tokens=False,
-    equilibrium_matching_sigma=0.2,
+    node_field_sigma=0.2,
     sampling_step_size=0.05,
     sampling_steps=None,
     langevin_noise_scale=0.0,
@@ -236,7 +236,7 @@ def build_graph_generator(
         [feasibility_size, feasibility_valence, feasibility_cycle, feasibility_unlabeled_structure]
     )
 
-    conditional_node_generator_model = EquilibriumMatchingDecompositionalNodeGenerator(
+    conditional_node_generator_model = ConditionalNodeFieldGenerator(
         latent_embedding_dimension=latent_embedding_dimension,
         number_of_transformer_layers=number_of_transformer_layers,
         transformer_attention_head_count=transformer_attention_head_count,
@@ -255,7 +255,7 @@ def build_graph_generator(
         lambda_degree_edge_consistency_importance=lambda_degree_edge_consistency_importance,
         lambda_auxiliary_edge_importance=lambda_auxiliary_edge_importance,
         degree_temperature=degree_temperature,
-        equilibrium_matching_sigma=equilibrium_matching_sigma,
+        node_field_sigma=node_field_sigma,
         sampling_step_size=sampling_step_size,
         langevin_noise_scale=langevin_noise_scale,
         verbose=verbose,
@@ -277,7 +277,7 @@ def build_graph_generator(
         pool_condition_tokens=pool_condition_tokens,
         sampling_steps=sampling_steps,
     )
-    graph_decoder = EquilibriumMatchingDecompositionalGraphDecoder(
+    graph_decoder = ConditionalNodeFieldGraphDecoder(
         verbose=verbose,
         existence_threshold=decoder_existence_threshold,
         enforce_connectivity=decoder_enforce_connectivity,
@@ -285,7 +285,7 @@ def build_graph_generator(
         warm_start_mst=decoder_warm_start_mst,
         n_jobs=decoder_n_jobs,
     )
-    return EquilibriumMatchingDecompositionalGraphGenerator(
+    return ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=graph_vectorizer,
         node_graph_vectorizer=node_graph_vectorizer,
         conditional_node_generator_model=conditional_node_generator_model,

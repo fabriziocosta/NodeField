@@ -1,4 +1,4 @@
-"""Metric plotting helpers for Equilibrium Matching training."""
+"""Metric plotting helpers for Conditional Node Field training."""
 
 from typing import Dict, Sequence
 
@@ -97,7 +97,7 @@ def plot_metrics(
         else ["blue", "red", "green", "purple", "orange"]
     )
     panel_specs = [
-        ("Structural Losses", ["total", "equilibrium_matching", "deg_ce", "exist"]),
+        ("Structural Losses", ["total", "node_field", "deg_ce", "exist"]),
         ("Semantic And Pairwise Losses", ["node_label_ce", "edge_label_ce", "edge_ce", "aux_locality"]),
     ]
     active_panels = [

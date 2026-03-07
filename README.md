@@ -7,7 +7,7 @@ The framework uses two distinct vectorization processes: one to derive node embe
 Training is supplemented by auxiliary objectives, including node-degree prediction, node-label prediction, edge-label prediction, and edge-existence prediction. The resulting structural and semantic predictions are passed to a decoder that reconstructs the final graph through constrained combinatorial optimization, formulated as an integer programming problem that reconciles predicted degrees and edge probabilities in a globally coherent manner.
 
 Technical documentation lives under [`docs/`](docs/):
-- [`docs/EQUILIBRIUM_MATCHING_README.md`](docs/EQUILIBRIUM_MATCHING_README.md): Equilibrium Matching node-generator internals and training/sampling behavior.
+- [`docs/CONDITIONAL_NODE_FIELD_README.md`](docs/CONDITIONAL_NODE_FIELD_README.md): Conditional Node Field internals and training/sampling behavior.
 - [`docs/GRAPH_GENERATOR_README.md`](docs/GRAPH_GENERATOR_README.md): graph-generator orchestration architecture.
 - [`docs/DECODER_README.md`](docs/DECODER_README.md): decoder and constraint-solver details.
 - [`docs/PREFERENCES.md`](docs/PREFERENCES.md): local documentation and notebook conventions.
@@ -22,7 +22,7 @@ The repository includes:
 
 - `equilibrium_matching_decompositional_graph_generator/`
   Core package:
-  - `node_engine.py`: Equilibrium Matching node model, batch dataclasses, and shared NN/callback blocks.
+  - `node_engine.py`: Conditional Node Field model, batch dataclasses, and shared NN/callback blocks.
   - `graph_engine.py`: graph generator/decoder orchestration and interpolation helpers.
   - `support.py`: runtime decorators/helpers plus artificial graph dataset constructors.
 - `notebooks/`
@@ -30,7 +30,7 @@ The repository includes:
 - `tests/`
   Pytest suite for generator behavior and helper modules.
 - `docs/`
-  Architecture notes, decoder details, Equilibrium Matching internals, and local development preferences.
+  Architecture notes, decoder details, Conditional Node Field internals, and local development preferences.
 - `.artifacts/`
   Local artifacts (checkpoints/models); ignored by git.
 
@@ -51,17 +51,17 @@ pip install "numpy<2" torch pytorch-lightning scipy pandas scikit-learn networkx
 
 ```python
 from equilibrium_matching_decompositional_graph_generator import (
-    EquilibriumMatchingDecompositionalNodeGenerator,
-    EquilibriumMatchingDecompositionalGraphDecoder,
-    EquilibriumMatchingDecompositionalGraphGenerator,
+    ConditionalNodeFieldGenerator,
+    ConditionalNodeFieldGraphDecoder,
+    ConditionalNodeFieldGraphGenerator,
 )
 ```
 
 Typical high-level workflow:
 1. Prepare graphs (`networkx.Graph`) with node/edge labels as needed.
 2. Build vectorizers for graph-level and node-level embeddings.
-3. Instantiate `EquilibriumMatchingDecompositionalNodeGenerator`.
-4. Wrap it in `EquilibriumMatchingDecompositionalGraphGenerator` (optionally with a decoder).
+3. Instantiate `ConditionalNodeFieldGenerator`.
+4. Wrap it in `ConditionalNodeFieldGraphGenerator` (optionally with a decoder).
 5. Train with `.fit(...)`.
 6. Generate with `.sample(...)` or `.sample_conditioned_on_random(...)`.
 

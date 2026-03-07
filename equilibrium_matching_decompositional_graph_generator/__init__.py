@@ -1,13 +1,13 @@
 """Maintained GraphGen modules."""
 
-from .node_engine import EquilibriumMatchingDecompositionalNodeGenerator
+from .node_engine import ConditionalNodeFieldGenerator
 from .graph_engine import (
-    EquilibriumMatchingDecompositionalGraphDecoder,
-    EquilibriumMatchingDecompositionalGraphGenerator,
+    ConditionalNodeFieldGraphDecoder,
+    ConditionalNodeFieldGraphGenerator,
 )
 
 __all__ = [
-    "EquilibriumMatchingDecompositionalGraphDecoder",
-    "EquilibriumMatchingDecompositionalGraphGenerator",
-    "EquilibriumMatchingDecompositionalNodeGenerator",
+    "ConditionalNodeFieldGraphDecoder",
+    "ConditionalNodeFieldGraphGenerator",
+    "ConditionalNodeFieldGenerator",
 ]

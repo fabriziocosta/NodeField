@@ -153,7 +153,7 @@ def _decode_single_adjacency_job(
     warm_start_mst: bool,
     verbose: bool,
 ) -> np.ndarray:
-    decoder = EquilibriumMatchingDecompositionalGraphDecoder(
+    decoder = ConditionalNodeFieldGraphDecoder(
         verbose=verbose,
         degree_slack_penalty=degree_slack_penalty,
         enforce_connectivity=enforce_connectivity,
@@ -216,10 +216,10 @@ def _assemble_graph_job_star(args) -> nx.Graph:
 
 
 # =============================================================================
-# EquilibriumMatchingDecompositionalGraphDecoder Class
+# ConditionalNodeFieldGraphDecoder Class
 # =============================================================================
 
-class EquilibriumMatchingDecompositionalGraphDecoder(object):
+class ConditionalNodeFieldGraphDecoder(object):
     """Graph decoder that turns generator outputs into final NetworkX graphs."""
     
     def __init__(
@@ -906,31 +906,31 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
         with open(filename, 'wb') as f:
             pickle.dump(self, f)
     
-    def load(self, filename: str = 'generative_model.obj') -> 'EquilibriumMatchingDecompositionalGraphDecoder':
+    def load(self, filename: str = 'generative_model.obj') -> 'ConditionalNodeFieldGraphDecoder':
         """Load a previously saved instance from disk and return it.
 
         Args:
             filename (str): Optional input value.
 
         Returns:
-            'EquilibriumMatchingDecompositionalGraphDecoder': Computed result.
+            'ConditionalNodeFieldGraphDecoder': Computed result.
         """
         with open(filename, 'rb') as f:
             self = pickle.load(f)
         return self
 
 # =============================================================================
-# EquilibriumMatchingDecompositionalGraphGenerator Class 
+# ConditionalNodeFieldGraphGenerator Class 
 # =============================================================================
 
-class EquilibriumMatchingDecompositionalGraphGenerator(object):
+class ConditionalNodeFieldGraphGenerator(object):
     """End-to-end manager that vectorises graphs, trains generators, and rebuilds structures."""
     def __init__(
             self,
             graph_vectorizer: Any = None,
             node_graph_vectorizer: Any = None,
             conditional_node_generator_model: Optional[ConditionalNodeGeneratorBase] = None,
-            graph_decoder: Optional[EquilibriumMatchingDecompositionalGraphDecoder] = None,
+            graph_decoder: Optional[ConditionalNodeFieldGraphDecoder] = None,
             verbose: bool = True,
             locality_sample_fraction: float = 1.0,
             locality_horizon: int = 1,
@@ -949,7 +949,7 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
             graph_vectorizer (Any): Optional input value.
             node_graph_vectorizer (Any): Optional input value.
             conditional_node_generator_model (Optional[ConditionalNodeGeneratorBase]): Optional input value.
-            graph_decoder (Optional[EquilibriumMatchingDecompositionalGraphDecoder]): Optional input value.
+            graph_decoder (Optional[ConditionalNodeFieldGraphDecoder]): Optional input value.
             verbose (bool): Optional input value.
             locality_sample_fraction (float): Optional input value.
             locality_horizon (int): Optional input value.
@@ -1204,28 +1204,28 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
     def _require_fitted_for_generation(self) -> None:
         if not self.is_fitted_:
             raise RuntimeError(
-                "EquilibriumMatchingDecompositionalGraphGenerator is not fitted. Call fit() before decode(), sample(), or other generation methods."
+                "ConditionalNodeFieldGraphGenerator is not fitted. Call fit() before decode(), sample(), or other generation methods."
             )
         if self.conditional_node_generator_model is None:
             raise RuntimeError(
-                "EquilibriumMatchingDecompositionalGraphGenerator cannot generate graphs because conditional_node_generator_model is None."
+                "ConditionalNodeFieldGraphGenerator cannot generate graphs because conditional_node_generator_model is None."
             )
         if self.graph_decoder is None:
             raise RuntimeError(
-                "EquilibriumMatchingDecompositionalGraphGenerator cannot generate graphs because graph_decoder is None."
+                "ConditionalNodeFieldGraphGenerator cannot generate graphs because graph_decoder is None."
             )
 
     def _require_training_graph_conditioning(self) -> GraphConditioningBatch:
         conditioning = getattr(self, "training_graph_conditioning_", None)
         if conditioning is None:
             raise RuntimeError(
-                "EquilibriumMatchingDecompositionalGraphGenerator cannot sample graph-level conditions "
+                "ConditionalNodeFieldGraphGenerator cannot sample graph-level conditions "
                 "because fit() did not cache training graph conditioning."
             )
         graph_embeddings = np.asarray(conditioning.graph_embeddings)
         if graph_embeddings.ndim == 0 or len(graph_embeddings) == 0:
             raise RuntimeError(
-                "EquilibriumMatchingDecompositionalGraphGenerator cannot sample graph-level conditions "
+                "ConditionalNodeFieldGraphGenerator cannot sample graph-level conditions "
                 "because the cached training conditioning is empty."
             )
         return conditioning
@@ -1234,20 +1234,20 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
         """Validate that fit-time collaborators are configured before dereferencing them."""
         if self.graph_vectorizer is None:
             raise ValueError(
-                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires graph_vectorizer to be configured."
+                "ConditionalNodeFieldGraphGenerator.fit() requires graph_vectorizer to be configured."
             )
         if self.node_graph_vectorizer is None:
             raise ValueError(
-                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires node_graph_vectorizer to be configured."
+                "ConditionalNodeFieldGraphGenerator.fit() requires node_graph_vectorizer to be configured."
             )
         if train_node_generator and self.conditional_node_generator_model is None:
             raise ValueError(
-                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires "
+                "ConditionalNodeFieldGraphGenerator.fit() requires "
                 "conditional_node_generator_model when train_node_generator=True."
             )
         if train_node_generator and self.graph_decoder is None:
             raise ValueError(
-                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires "
+                "ConditionalNodeFieldGraphGenerator.fit() requires "
                 "graph_decoder when train_node_generator=True."
             )
 
@@ -1388,7 +1388,7 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
         graphs: List[nx.Graph],
         train_node_generator: bool = True,
         targets: Optional[Sequence[Any]] = None,
-    ) -> 'EquilibriumMatchingDecompositionalGraphGenerator':
+    ) -> 'ConditionalNodeFieldGraphGenerator':
         if self.verbose:
             print(f"Fitting model on {len(graphs)} graphs")
         self._require_fit_components(train_node_generator=train_node_generator)
@@ -2242,4 +2242,3 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
                 edge_counts=np.asarray([mean_edge_count], dtype=np.int64),
             )
         )[0]
-    

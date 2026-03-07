@@ -1,11 +1,11 @@
 # Graph Decoder And Constraint Solver
 
-This document explains the decoder used by `EquilibriumMatchingDecompositionalGraphGenerator`, with a focus on how graph structure is reconstructed from node-generator outputs and how the constraint solver turns soft edge scores into valid adjacency matrices.
+This document explains the decoder used by `ConditionalNodeFieldGraphGenerator`, with a focus on how graph structure is reconstructed from node-generator outputs and how the constraint solver turns soft edge scores into valid adjacency matrices.
 
 The implementation lives in [`../equilibrium_matching_decompositional_graph_generator/graph_engine.py`](../equilibrium_matching_decompositional_graph_generator/graph_engine.py), mainly inside:
 
-- `EquilibriumMatchingDecompositionalGraphDecoder`
-- `EquilibriumMatchingDecompositionalGraphGenerator._decode_*`
+- `ConditionalNodeFieldGraphDecoder`
+- `ConditionalNodeFieldGraphGenerator._decode_*`
 
 ## Scope
 
@@ -25,9 +25,9 @@ It is not a neural decoder in the usual sense. The neural model predicts soft gr
 
 At generation time the overall flow is:
 
-1. `EquilibriumMatchingDecompositionalGraphGenerator.decode(...)` receives graph-level conditioning.
+1. `ConditionalNodeFieldGraphGenerator.decode(...)` receives graph-level conditioning.
 2. The conditional node generator predicts a `GeneratedNodeBatch`.
-3. `EquilibriumMatchingDecompositionalGraphDecoder.decode(...)` reconstructs final `networkx.Graph` objects.
+3. `ConditionalNodeFieldGraphDecoder.decode(...)` reconstructs final `networkx.Graph` objects.
 
 ```mermaid
 flowchart LR

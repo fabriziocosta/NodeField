@@ -3,15 +3,22 @@ import pytest
 import torch
 import warnings
 
+import equilibrium_matching_decompositional_graph_generator as graphgen
 from equilibrium_matching_decompositional_graph_generator.node_engine import (
     GeneratedNodeBatch,
-    EquilibriumMatchingDecompositionalNodeGenerator,
-    EquilibriumMatchingDecompositionalNodeGeneratorModule,
+    ConditionalNodeFieldGenerator,
+    ConditionalNodeFieldModule,
     GraphConditioningBatch,
     MetricsLogger,
     NodeGenerationBatch,
 )
 from equilibrium_matching_decompositional_graph_generator.support import run_trainer_fit
+from equilibrium_matching_decompositional_graph_generator.metrics_visualization import (
+    plot_metrics,
+)
+from equilibrium_matching_decompositional_graph_generator.training_policy import (
+    format_restored_checkpoint_summary,
+)
 
 
 def test_graph_conditioning_batch_len():
@@ -103,7 +110,7 @@ def test_run_trainer_fit_suppresses_lightning_worker_warnings():
 def test_build_train_val_subsets_reuses_single_example_for_train_and_val():
     dataset = torch.utils.data.TensorDataset(torch.tensor([[1.0]], dtype=torch.float32))
 
-    train_dataset, val_dataset = EquilibriumMatchingDecompositionalNodeGenerator._build_train_val_subsets(dataset)
+    train_dataset, val_dataset = ConditionalNodeFieldGenerator._build_train_val_subsets(dataset)
 
     assert len(train_dataset) == 1
     assert len(val_dataset) == 1
@@ -111,12 +118,20 @@ def test_build_train_val_subsets_reuses_single_example_for_train_and_val():
     assert val_dataset[0][0].item() == 1.0
 
 
+def test_package_exports_only_new_primary_names():
+    assert sorted(graphgen.__all__) == [
+        "ConditionalNodeFieldGenerator",
+        "ConditionalNodeFieldGraphDecoder",
+        "ConditionalNodeFieldGraphGenerator",
+    ]
+
+
 def test_build_train_val_subsets_keeps_both_sides_non_empty_for_two_examples():
     dataset = torch.utils.data.TensorDataset(
         torch.tensor([[1.0], [2.0]], dtype=torch.float32)
     )
 
-    train_dataset, val_dataset = EquilibriumMatchingDecompositionalNodeGenerator._build_train_val_subsets(dataset)
+    train_dataset, val_dataset = ConditionalNodeFieldGenerator._build_train_val_subsets(dataset)
 
     assert len(train_dataset) == 1
     assert len(val_dataset) == 1
@@ -126,21 +141,33 @@ def test_build_train_val_subsets_rejects_empty_dataset():
     dataset = torch.utils.data.TensorDataset(torch.empty((0, 1), dtype=torch.float32))
 
     with pytest.raises(ValueError, match="must contain at least one example"):
-        EquilibriumMatchingDecompositionalNodeGenerator._build_train_val_subsets(dataset)
+        ConditionalNodeFieldGenerator._build_train_val_subsets(dataset)
 
 
 def test_update_ema_metric_tracks_smoothed_validation_signal():
     trainer = type("_Trainer", (), {"callback_metrics": {}, "logged_metrics": {}})()
     pl_module = type("_Module", (), {"_ema_metrics": {}, "early_stopping_ema_alpha": 0.25})()
 
-    first = MetricsLogger._update_ema_metric(trainer, pl_module, "val_equilibrium_matching", 100.0)
-    second = MetricsLogger._update_ema_metric(trainer, pl_module, "val_equilibrium_matching", 60.0)
+    first = MetricsLogger._update_ema_metric(trainer, pl_module, "val_node_field", 100.0)
+    second = MetricsLogger._update_ema_metric(trainer, pl_module, "val_node_field", 60.0)
 
     assert first == pytest.approx(100.0)
     assert second == pytest.approx(90.0)
-    assert pl_module._ema_metrics["val_equilibrium_matching"] == pytest.approx(90.0)
-    assert trainer.callback_metrics["val_equilibrium_matching_ema"].item() == pytest.approx(90.0)
-    assert trainer.logged_metrics["val_equilibrium_matching_ema"].item() == pytest.approx(90.0)
+    assert pl_module._ema_metrics["val_node_field"] == pytest.approx(90.0)
+    assert trainer.callback_metrics["val_node_field_ema"].item() == pytest.approx(90.0)
+    assert trainer.logged_metrics["val_node_field_ema"].item() == pytest.approx(90.0)
+
+
+def test_restored_checkpoint_summary_uses_node_field_label():
+    summary = format_restored_checkpoint_summary(
+        early_stopping_monitor="val_total",
+        best_checkpoint_score=12.5,
+        best_checkpoint_epoch=3,
+        raw_best_val_node_field_loss=8.75,
+        stopped_epoch=11,
+    )
+
+    assert "raw_val_node_field=8.7500" in summary
 
 
 def test_compute_edge_count_loss_matches_target_on_consistent_probabilities():
@@ -151,7 +178,7 @@ def test_compute_edge_count_loss_matches_target_on_consistent_probabilities():
     node_presence_mask = torch.tensor([[True, True]])
     target_edge_counts = torch.tensor([1.0], dtype=torch.float32)
 
-    loss = EquilibriumMatchingDecompositionalNodeGeneratorModule._compute_edge_count_loss(
+    loss = ConditionalNodeFieldModule._compute_edge_count_loss(
         edge_probs=edge_probs,
         node_presence_mask=node_presence_mask,
         target_edge_counts=target_edge_counts,
@@ -168,7 +195,7 @@ def test_compute_degree_edge_consistency_loss_is_zero_when_handshake_identity_ma
     node_presence_mask = torch.tensor([[True, True]])
     target_edge_counts = torch.tensor([1.0], dtype=torch.float32)
 
-    loss = EquilibriumMatchingDecompositionalNodeGeneratorModule(
+    loss = ConditionalNodeFieldModule(
         number_of_rows_per_example=2,
         input_feature_dimension=2,
         condition_feature_dimension=3,
@@ -192,9 +219,17 @@ def test_compute_node_count_loss_is_zero_when_expected_count_matches():
     )
     target_node_counts = torch.tensor([2.0], dtype=torch.float32)
 
-    loss = EquilibriumMatchingDecompositionalNodeGeneratorModule._compute_node_count_loss(
+    loss = ConditionalNodeFieldModule._compute_node_count_loss(
         logits_exist=logits_exist,
         target_node_counts=target_node_counts,
     )
 
     assert loss.item() == pytest.approx(0.0, abs=1e-4)
+
+
+def test_plot_metrics_accepts_node_field_key():
+    plot_metrics(
+        train_metrics={"total": [10.0, 9.0], "node_field": [8.0, 7.0]},
+        val_metrics={"total": [11.0, 10.0], "node_field": [9.0, 8.0]},
+        window=2,
+    )

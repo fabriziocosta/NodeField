@@ -1,4 +1,4 @@
-"""Metric collection callbacks for Equilibrium Matching training."""
+"""Metric collection callbacks for Conditional Node Field training."""
 
 from typing import Dict
 import time
@@ -24,7 +24,7 @@ class MetricsLogger(pl.callbacks.Callback):
     @staticmethod
     def _component_summary(pl_module, metrics: Dict[str, torch.Tensor], prefix: str):
         component_specs = [
-            ("equilibrium_matching", "equilibrium_matching", 1.0),
+            ("node_field", "node_field", 1.0),
             ("deg", "deg_ce", float(getattr(pl_module, "lambda_degree_importance", 1.0))),
             ("exist", "exist", float(getattr(pl_module, "lambda_node_exist_importance", 1.0))),
             ("node_count", "node_count_loss", float(getattr(pl_module, "lambda_node_count_importance", 0.0))),
@@ -90,8 +90,8 @@ class MetricsLogger(pl.callbacks.Callback):
         m = trainer.callback_metrics
         pl_module.train_losses.append(m.get("train_total", torch.tensor(0.0)).item())
         pl_module.train_deg_ce.append(m.get("train_deg_ce", torch.tensor(0.0)).item())
-        pl_module.train_equilibrium_matching.append(
-            m.get("train_equilibrium_matching", torch.tensor(0.0)).item()
+        pl_module.train_node_field.append(
+            m.get("train_node_field", torch.tensor(0.0)).item()
         )
         if hasattr(pl_module, "train_exist"):
             pl_module.train_exist.append(m.get("train_exist", torch.tensor(0.0)).item())
@@ -112,8 +112,8 @@ class MetricsLogger(pl.callbacks.Callback):
         m = trainer.callback_metrics
         pl_module.val_losses.append(m.get("val_total", torch.tensor(0.0)).item())
         pl_module.val_deg_ce.append(m.get("val_deg_ce", torch.tensor(0.0)).item())
-        pl_module.val_equilibrium_matching.append(
-            m.get("val_equilibrium_matching", torch.tensor(0.0)).item()
+        pl_module.val_node_field.append(
+            m.get("val_node_field", torch.tensor(0.0)).item()
         )
         if hasattr(pl_module, "val_exist"):
             pl_module.val_exist.append(m.get("val_exist", torch.tensor(0.0)).item())
@@ -133,8 +133,8 @@ class MetricsLogger(pl.callbacks.Callback):
         self._update_ema_metric(
             trainer,
             pl_module,
-            "val_equilibrium_matching",
-            pl_module.val_equilibrium_matching[-1],
+            "val_node_field",
+            pl_module.val_node_field[-1],
         )
 
         verbose_level = 0

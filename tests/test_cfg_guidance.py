@@ -6,11 +6,11 @@ import pytest
 import torch
 
 from equilibrium_matching_decompositional_graph_generator.graph_engine import (
-    EquilibriumMatchingDecompositionalGraphGenerator,
+    ConditionalNodeFieldGraphGenerator,
 )
 from equilibrium_matching_decompositional_graph_generator.node_engine import (
-    EquilibriumMatchingDecompositionalNodeGenerator,
-    EquilibriumMatchingDecompositionalNodeGeneratorModule,
+    ConditionalNodeFieldGenerator,
+    ConditionalNodeFieldModule,
 )
 from equilibrium_matching_decompositional_graph_generator.node_engine import (
     GeneratedNodeBatch,
@@ -92,7 +92,7 @@ def test_graph_generator_fit_forwards_targets_to_conditional_model():
     graphs = [_graph(), _graph()]
     targets = [0, 1]
     cond = _ConditionalStub()
-    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+    generator = ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=_GraphVectorizer(),
         node_graph_vectorizer=_NodeVectorizer(),
         conditional_node_generator_model=cond,
@@ -108,7 +108,7 @@ def test_graph_generator_fit_forwards_targets_to_conditional_model():
 
 def test_graph_generator_decode_passes_cfg_args_to_predict():
     cond = _ConditionalStub()
-    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+    generator = ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=_GraphVectorizer(),
         node_graph_vectorizer=_NodeVectorizer(),
         conditional_node_generator_model=cond,
@@ -123,7 +123,7 @@ def test_graph_generator_decode_passes_cfg_args_to_predict():
 
 
 def test_graph_generator_decode_requires_fit():
-    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+    generator = ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=_GraphVectorizer(),
         node_graph_vectorizer=_NodeVectorizer(),
         conditional_node_generator_model=_ConditionalStub(),
@@ -142,7 +142,7 @@ def test_graph_generator_decode_requires_fit():
 
 
 def test_node_generator_target_mode_inference_classification_vs_regression():
-    generator = EquilibriumMatchingDecompositionalNodeGenerator(target_classification_max_distinct=3)
+    generator = ConditionalNodeFieldGenerator(target_classification_max_distinct=3)
     generator._fit_target_encoder([0, 1, 1, 0])
     assert generator.target_mode_ == "classification"
     assert generator.target_condition_dim_ == 2
@@ -153,7 +153,7 @@ def test_node_generator_target_mode_inference_classification_vs_regression():
 
 
 def test_cfg_dropout_zeros_target_slice_when_probability_is_one():
-    module = EquilibriumMatchingDecompositionalNodeGeneratorModule(
+    module = ConditionalNodeFieldModule(
         number_of_rows_per_example=2,
         input_feature_dimension=1,
         condition_feature_dimension=5,
@@ -173,7 +173,7 @@ def test_cfg_dropout_zeros_target_slice_when_probability_is_one():
 
 
 def test_cfg_score_mixing_in_generate_uses_uncond_plus_scaled_delta():
-    module = EquilibriumMatchingDecompositionalNodeGeneratorModule(
+    module = ConditionalNodeFieldModule(
         number_of_rows_per_example=2,
         input_feature_dimension=1,
         condition_feature_dimension=4,
@@ -235,7 +235,7 @@ def test_cfg_score_mixing_in_generate_uses_uncond_plus_scaled_delta():
 
 
 def test_predict_rejects_negative_guidance_scale():
-    generator = EquilibriumMatchingDecompositionalNodeGenerator()
+    generator = ConditionalNodeFieldGenerator()
     generator.model = types.SimpleNamespace(parameters=lambda: iter([torch.tensor(0.0)]))
     with pytest.raises(ValueError, match="guidance_scale must be >= 0"):
         generator.predict(
@@ -249,7 +249,7 @@ def test_predict_rejects_negative_guidance_scale():
 
 
 def test_node_generator_predict_requires_setup_or_fit():
-    generator = EquilibriumMatchingDecompositionalNodeGenerator()
+    generator = ConditionalNodeFieldGenerator()
 
     with pytest.raises(RuntimeError, match="Call setup\\(\\) or fit\\(\\) before predict\\(\\)"):
         generator.predict(

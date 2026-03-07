@@ -1,4 +1,4 @@
-"""Node-level Equilibrium Matching model engine."""
+"""Node-level Conditional Node Field engine."""
 
 from dataclasses import dataclass
 from typing import List, Any, Optional, Tuple, Sequence, Union
@@ -374,8 +374,8 @@ def collate_equilibrium_matching_graph_with_edges(batch):
     return X, Y, edge_idx, edge_lbl, edge_label_idx, edge_label_tgt, aux_edge_idx, aux_edge_lbl, M, D
 
 
-class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
-    """Conditional Equilibrium Matching model with an explicit scalar energy and score via autograd."""
+class ConditionalNodeFieldModule(pl.LightningModule):
+    """Conditional node-field module with an explicit scalar energy and score via autograd."""
 
     def __init__(
         self,
@@ -421,7 +421,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         use_node_label_head: bool = False,
         num_edge_label_classes: int = 0,
         use_edge_label_head: bool = False,
-        equilibrium_matching_sigma: float = 0.2,
+        node_field_sigma: float = 0.2,
         sampling_step_size: float = 0.05,
         sampling_steps: int = 100,
         langevin_noise_scale: float = 0.0,
@@ -442,9 +442,9 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         self.save_hyperparameters(ignore=["verbose"])
 
         if max_degree is None:
-            raise ValueError("max_degree must be provided when initializing the Equilibrium Matching model.")
-        if equilibrium_matching_sigma <= 0:
-            raise ValueError(f"equilibrium_matching_sigma must be positive (got {equilibrium_matching_sigma}).")
+            raise ValueError("max_degree must be provided when initializing the Conditional Node Field model.")
+        if node_field_sigma <= 0:
+            raise ValueError(f"node_field_sigma must be positive (got {node_field_sigma}).")
         if sampling_step_size <= 0:
             raise ValueError(f"sampling_step_size must be positive (got {sampling_step_size}).")
         if sampling_steps <= 0:
@@ -484,7 +484,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
             artifact_root_dir = os.path.join(repo_root, ".artifacts")
         self.artifact_root_dir = str(artifact_root_dir)
         if checkpoint_root_dir is None:
-            checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "equilibrium_matching")
+            checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "node_field")
         self.checkpoint_root_dir = str(checkpoint_root_dir)
         self.important_feature_index = important_feature_index
         self.max_degree = int(max_degree)
@@ -504,7 +504,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         self.use_node_label_head = bool(use_node_label_head and num_node_label_classes > 0)
         self.num_edge_label_classes = int(num_edge_label_classes)
         self.use_edge_label_head = bool(use_edge_label_head and num_edge_label_classes > 0)
-        self.equilibrium_matching_sigma = float(equilibrium_matching_sigma)
+        self.node_field_sigma = float(node_field_sigma)
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
@@ -559,8 +559,8 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         self.val_node_label_ce = []
         self.train_edge_label_ce = []
         self.val_edge_label_ce = []
-        self.train_equilibrium_matching = []
-        self.val_equilibrium_matching = []
+        self.train_node_field = []
+        self.val_node_field = []
         if self.use_locality_supervision:
             self.train_edge_loss = []
             self.val_edge_loss = []
@@ -807,7 +807,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         return latent_tokens
 
     def _build_noise_scale(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.full_like(x, self.equilibrium_matching_sigma)
+        return torch.full_like(x, self.node_field_sigma)
 
     def _has_target_conditioning(self) -> bool:
         return self.guidance_enabled and self.target_condition_feature_count > 0
@@ -858,7 +858,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         )[0]
         return score, phi, latent_tokens
 
-    def _equilibrium_matching_loss(
+    def _node_field_loss(
         self,
         input_examples: torch.Tensor,
         global_condition: torch.Tensor,
@@ -884,8 +884,8 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
             create_graph=create_graph,
         )
         target_score = -eps / noise_scale
-        equilibrium_matching_error = (score - target_score).pow(2) * score_mask
-        loss_equilibrium_matching = equilibrium_matching_error.sum() / score_mask.sum().clamp_min(1.0)
+        node_field_error = (score - target_score).pow(2) * score_mask
+        loss_node_field = node_field_error.sum() / score_mask.sum().clamp_min(1.0)
 
         denoised = noisy_input + noise_scale.pow(2) * score
         latent_clean = self._encode_with_condition(denoised, global_condition, node_mask=node_presence_mask)
@@ -944,7 +944,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
             loss_label_ce = input_examples.new_zeros(())
 
         total_loss = (
-            loss_equilibrium_matching
+            loss_node_field
             + self.lambda_degree_importance * loss_deg_ce
         )
         if self.use_existence_head:
@@ -955,7 +955,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         return (
             {
                 "total": total_loss,
-                "equilibrium_matching": loss_equilibrium_matching,
+                "node_field": loss_node_field,
                 "exist": loss_exist,
                 "deg_ce": loss_deg_ce,
                 "label_ce": loss_label_ce,
@@ -988,7 +988,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
 
         batch_size = int(node_presence_mask.shape[0])
         conditioned_global = self._apply_cfg_dropout(global_condition)
-        losses, latent_tokens = self._equilibrium_matching_loss(
+        losses, latent_tokens = self._node_field_loss(
             input_examples,
             conditioned_global,
             node_presence_mask=node_presence_mask,
@@ -1081,8 +1081,8 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
 
         self.log("train_total", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.log(
-            "train_equilibrium_matching",
-            losses["equilibrium_matching"],
+            "train_node_field",
+            losses["node_field"],
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
@@ -1119,7 +1119,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
                 aux_edge_labels = torch.empty((0,), dtype=torch.float32, device=input_examples.device)
 
             batch_size = int(node_presence_mask.shape[0])
-            losses, latent_tokens = self._equilibrium_matching_loss(
+            losses, latent_tokens = self._node_field_loss(
                 input_examples,
                 global_condition,
                 node_presence_mask=node_presence_mask,
@@ -1210,8 +1210,8 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
 
             self.log("val_total", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
             self.log(
-                "val_equilibrium_matching",
-                losses["equilibrium_matching"],
+                "val_node_field",
+                losses["node_field"],
                 on_step=False,
                 on_epoch=True,
                 batch_size=batch_size,
@@ -1230,7 +1230,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
             train_metrics={
                 "total": self.train_losses,
                 "deg_ce": self.train_deg_ce,
-                "equilibrium_matching": self.train_equilibrium_matching,
+                "node_field": self.train_node_field,
                 **({"exist": self.train_exist} if self.use_existence_head else {}),
                 **({"node_label_ce": self.train_node_label_ce} if self.use_node_label_head else {}),
                 **({"edge_label_ce": self.train_edge_label_ce} if self.use_edge_label_head else {}),
@@ -1240,7 +1240,7 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
             val_metrics={
                 "total": self.val_losses,
                 "deg_ce": self.val_deg_ce,
-                "equilibrium_matching": self.val_equilibrium_matching,
+                "node_field": self.val_node_field,
                 **({"exist": self.val_exist} if self.use_existence_head else {}),
                 **({"node_label_ce": self.val_node_label_ce} if self.use_node_label_head else {}),
                 **({"edge_label_ce": self.val_edge_label_ce} if self.use_edge_label_head else {}),
@@ -1255,10 +1255,10 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
     def set_guidance_classifier(self, num_classes: int) -> None:
-        raise NotImplementedError("Classifier guidance is not implemented for EquilibriumMatchingDecompositionalNodeGenerator.")
+        raise NotImplementedError("Classifier guidance is not implemented for ConditionalNodeFieldGenerator.")
 
     def train_guidance_classifier(self, *args, **kwargs):
-        raise NotImplementedError("Classifier guidance is not implemented for EquilibriumMatchingDecompositionalNodeGenerator.")
+        raise NotImplementedError("Classifier guidance is not implemented for ConditionalNodeFieldGenerator.")
 
     def generate(
         self,
@@ -1360,8 +1360,8 @@ class EquilibriumMatchingDecompositionalNodeGeneratorModule(pl.LightningModule):
         return x.detach()
 
 
-class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBase):
-    """Scikit-learn friendly facade for a conditional Equilibrium Matching node generator."""
+class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
+    """Scikit-learn friendly facade for a conditional node-field generator."""
 
     def __init__(
         self,
@@ -1397,7 +1397,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
         lambda_auxiliary_edge_importance: float = 1.0,
         lambda_edge_label_importance: float = 1.0,
         pool_condition_tokens: bool = False,
-        equilibrium_matching_sigma: float = 0.2,
+        node_field_sigma: float = 0.2,
         sampling_step_size: float = 0.05,
         sampling_steps: Optional[int] = None,
         langevin_noise_scale: float = 0.0,
@@ -1427,7 +1427,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
             artifact_root_dir = os.path.join(repo_root, ".artifacts")
         self.artifact_root_dir = str(artifact_root_dir)
         if checkpoint_root_dir is None:
-            checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "equilibrium_matching")
+            checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "node_field")
         self.checkpoint_root_dir = str(checkpoint_root_dir)
         self.important_feature_index = important_feature_index
         self.lambda_degree_importance = lambda_degree_importance
@@ -1444,7 +1444,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
         self.pool_condition_tokens = bool(pool_condition_tokens)
         self.use_guidance = False
         self.use_locality_supervision = False
-        self.equilibrium_matching_sigma = float(equilibrium_matching_sigma)
+        self.node_field_sigma = float(node_field_sigma)
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps if sampling_steps is not None else total_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
@@ -1761,7 +1761,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
     def _require_fitted_for_prediction(self) -> None:
         if self.model is None or self.x_scaler is None or self.y_scaler is None or not self.is_setup_:
             raise RuntimeError(
-                "EquilibriumMatchingDecompositionalNodeGenerator is not fitted. Call setup() or fit() before predict()."
+                "ConditionalNodeFieldGenerator is not fitted. Call setup() or fit() before predict()."
             )
 
     def setup(
@@ -1977,7 +1977,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
             if effective_auxiliary_locality:
                 print(f"Auxiliary-locality BCE positive weight: {auxiliary_edge_pos_weight:.3f}.")
 
-        self.model = EquilibriumMatchingDecompositionalNodeGeneratorModule(
+        self.model = ConditionalNodeFieldModule(
             number_of_rows_per_example=self.number_of_rows_per_example,
             input_feature_dimension=self.input_feature_dimension,
             condition_feature_dimension=self.condition_feature_dimension,
@@ -2011,7 +2011,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
             use_node_label_head=self.use_node_label_head,
             num_edge_label_classes=0 if self.edge_label_classes_ is None else len(self.edge_label_classes_),
             use_edge_label_head=self.use_edge_label_head,
-            equilibrium_matching_sigma=self.equilibrium_matching_sigma,
+            node_field_sigma=self.node_field_sigma,
             sampling_step_size=self.sampling_step_size,
             sampling_steps=self.sampling_steps,
             langevin_noise_scale=self.langevin_noise_scale,
@@ -2189,21 +2189,21 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
             self.model.to(self.device)
             if int(self.verbose) >= 1:
                 stopped_epoch = int(getattr(trainer, "current_epoch", -1)) + 1
-                raw_best_val_equilibrium_matching_loss = None
+                raw_best_val_node_field_loss = None
                 if (
                     self.best_checkpoint_epoch_ is not None
-                    and hasattr(self.model, "val_equilibrium_matching")
-                    and self.best_checkpoint_epoch_ < len(self.model.val_equilibrium_matching)
+                    and hasattr(self.model, "val_node_field")
+                    and self.best_checkpoint_epoch_ < len(self.model.val_node_field)
                 ):
-                    raw_best_val_equilibrium_matching_loss = float(
-                        self.model.val_equilibrium_matching[self.best_checkpoint_epoch_]
+                    raw_best_val_node_field_loss = float(
+                        self.model.val_node_field[self.best_checkpoint_epoch_]
                     )
                 print(
                     format_restored_checkpoint_summary(
                         early_stopping_monitor=self.early_stopping_monitor,
                         best_checkpoint_score=self.best_checkpoint_score_,
                         best_checkpoint_epoch=self.best_checkpoint_epoch_,
-                        raw_best_val_equilibrium_matching_loss=raw_best_val_equilibrium_matching_loss,
+                        raw_best_val_node_field_loss=raw_best_val_node_field_loss,
                         stopped_epoch=stopped_epoch,
                     )
                 )
@@ -2316,7 +2316,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
             train_metrics={
                 "total": self.model.train_losses,
                 "deg_ce": self.model.train_deg_ce,
-                "equilibrium_matching": self.model.train_equilibrium_matching,
+                "node_field": self.model.train_node_field,
                 **({"exist": self.model.train_exist} if self.model.use_existence_head else {}),
                 **({"node_label_ce": self.model.train_node_label_ce} if self.model.use_node_label_head else {}),
                 **({"edge_label_ce": self.model.train_edge_label_ce} if self.model.use_edge_label_head else {}),
@@ -2326,7 +2326,7 @@ class EquilibriumMatchingDecompositionalNodeGenerator(ConditionalNodeGeneratorBa
             val_metrics={
                 "total": self.model.val_losses,
                 "deg_ce": self.model.val_deg_ce,
-                "equilibrium_matching": self.model.val_equilibrium_matching,
+                "node_field": self.model.val_node_field,
                 **({"exist": self.model.val_exist} if self.model.use_existence_head else {}),
                 **({"node_label_ce": self.model.val_node_label_ce} if self.model.use_node_label_head else {}),
                 **({"edge_label_ce": self.model.val_edge_label_ce} if self.model.use_edge_label_head else {}),
