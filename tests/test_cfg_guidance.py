@@ -74,6 +74,9 @@ class _ConditionalStub:
         return GeneratedNodeBatch(
             node_presence_mask=np.ones((n, 2), dtype=bool),
             node_degree_predictions=np.ones((n, 2), dtype=np.int64),
+            node_labels=[np.asarray(["C", "O"], dtype=object) for _ in range(n)],
+            edge_probability_matrices=[np.asarray([[0.0, 0.9], [0.9, 0.0]], dtype=float) for _ in range(n)],
+            edge_label_matrices=[np.asarray([[None, "-"], ["-", None]], dtype=object) for _ in range(n)],
         )
 
 

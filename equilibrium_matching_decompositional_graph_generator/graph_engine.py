@@ -248,21 +248,6 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
         self.degree_slack_penalty       = degree_slack_penalty
         self.warm_start_mst             = warm_start_mst
         self.n_jobs                     = _normalize_n_jobs(n_jobs)
-        self.supervision_plan_          = None
-
-    def _plan_channel(self, channel_name: str) -> Optional[SupervisionChannelPlan]:
-        """Return the named supervision channel when a plan is available.
-
-        Args:
-            channel_name (str): Input value.
-
-        Returns:
-            Optional[SupervisionChannelPlan]: Computed result.
-        """
-        plan = getattr(self, "supervision_plan_", None)
-        if plan is None:
-            return None
-        return getattr(plan, channel_name, None)
 
     def optimize_adjacency_matrix(
         self,
@@ -735,7 +720,6 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
         Returns:
             List[np.ndarray]: Computed result.
         """
-        channel_plan = self._plan_channel("direct_edges")
         existence_masks = generated_nodes.node_presence_mask
         degree_predictions = generated_nodes.node_degree_predictions
 
@@ -750,11 +734,6 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
             )
 
         if predicted_edge_probability_matrices is None:
-            if channel_plan is not None and channel_plan.mode == "disabled":
-                raise RuntimeError(
-                    "decode_adjacency_matrix cannot reconstruct graph structure because direct_edges are disabled "
-                    "in the supervision plan."
-                )
             raise RuntimeError(
                 "decode_adjacency_matrix requires generator-provided edge probabilities."
             )
@@ -799,6 +778,7 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
     def decode_node_labels(
         self,
         generated_nodes: GeneratedNodeBatch,
+        predicted_node_labels_list: Optional[List[np.ndarray]] = None,
     ) -> List[np.ndarray]:
         """Predict node-level labels for each encoding matrix.
 
@@ -808,34 +788,16 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
         Returns:
             List[np.ndarray]: Computed result.
         """
-        channel_plan = self._plan_channel("node_labels")
-        if channel_plan is not None and channel_plan.mode == "constant":
-            predicted_node_labels_list = []
-            if generated_nodes.node_presence_mask is None:
-                raise RuntimeError("decode_node_labels requires node_presence_mask when using a constant node-label policy.")
-            for node_presence_mask in generated_nodes.node_presence_mask:
-                n = len(node_presence_mask)
-                predicted_node_labels_list.append(np.array([channel_plan.constant_value] * n, dtype=object))
-            return predicted_node_labels_list
-
-        if channel_plan is not None and channel_plan.mode == "disabled":
-            predicted_node_labels_list = []
-            if generated_nodes.node_presence_mask is None:
-                raise RuntimeError("decode_node_labels requires node_presence_mask when node labels are disabled.")
-            for node_presence_mask in generated_nodes.node_presence_mask:
-                n = len(node_presence_mask)
-                predicted_node_labels_list.append(np.array([None] * n, dtype=object))
-            return predicted_node_labels_list
-
-        raise RuntimeError(
-            "decode_node_labels requires generator-provided node labels."
-        )
+        if predicted_node_labels_list is None:
+            raise RuntimeError("decode_node_labels requires explicit node labels.")
+        return [np.asarray(node_labels, dtype=object) for node_labels in predicted_node_labels_list]
 
     def decode_edge_labels(
         self,
         generated_nodes: GeneratedNodeBatch,
         adj_mtx_list: List[np.ndarray],
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
+        predicted_edge_labels_list: Optional[List[np.ndarray]] = None,
     ) -> List[np.ndarray]:
         """Predict edge labels for every edge present in the supplied adjacency matrices.
 
@@ -847,7 +809,14 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
         Returns:
             List[np.ndarray]: Computed result.
         """
-        channel_plan = self._plan_channel("edge_labels")
+        if predicted_edge_labels_list is not None:
+            if len(predicted_edge_labels_list) != len(adj_mtx_list):
+                raise ValueError(
+                    "predicted_edge_labels_list must align with adj_mtx_list "
+                    f"(got {len(predicted_edge_labels_list)} label arrays for {len(adj_mtx_list)} graphs)."
+                )
+            return [np.asarray(edge_labels, dtype=object) for edge_labels in predicted_edge_labels_list]
+
         if predicted_edge_label_matrices is not None:
             if len(predicted_edge_label_matrices) != len(adj_mtx_list):
                 raise ValueError(
@@ -871,19 +840,7 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
                 predicted_edge_labels_list.append(np.asarray(edge_labels, dtype=object))
             return predicted_edge_labels_list
 
-        if channel_plan is not None and channel_plan.mode == "constant":
-            predicted_edge_labels_list = []
-            for adj in adj_mtx_list:
-                n_edges = int(np.sum(np.triu(adj, k=1)))
-                predicted_edge_labels_list.append(np.array([channel_plan.constant_value] * n_edges, dtype=object))
-            return predicted_edge_labels_list
-
-        if channel_plan is not None and channel_plan.mode == "disabled":
-            return [np.asarray([], dtype=object) for _ in adj_mtx_list]
-
-        raise RuntimeError(
-            "decode_edge_labels requires generator-provided edge labels."
-        )
+        raise RuntimeError("decode_edge_labels requires explicit edge labels or edge-label matrices.")
 
     @timeit
     def decode(
@@ -891,6 +848,7 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
         generated_nodes: GeneratedNodeBatch,
         predicted_node_labels_list: Optional[List[np.ndarray]] = None,
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
+        predicted_edge_labels_list: Optional[List[np.ndarray]] = None,
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
     ) -> List[nx.Graph]:
         """Reconstruct labelled graphs from predicted structural and semantic channels.
@@ -909,12 +867,15 @@ class EquilibriumMatchingDecompositionalGraphDecoder(object):
             predicted_edge_probability_matrices=predicted_edge_probability_matrices,
         )
         
-        if predicted_node_labels_list is None:
-            predicted_node_labels_list = self.decode_node_labels(generated_nodes)
+        predicted_node_labels_list = self.decode_node_labels(
+            generated_nodes,
+            predicted_node_labels_list=predicted_node_labels_list,
+        )
         
         predicted_edge_labels_list = self.decode_edge_labels(
             generated_nodes,
             adj_mtx_list,
+            predicted_edge_labels_list=predicted_edge_labels_list,
             predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
         
@@ -1174,6 +1135,60 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
             return None
         return getattr(plan, channel_name, None)
 
+    def _resolve_predicted_node_labels(
+        self,
+        generated_nodes: GeneratedNodeBatch,
+    ) -> List[np.ndarray]:
+        """Resolve node labels from explicit predictions or orchestration policy."""
+        node_label_plan = self._plan_channel("node_labels")
+        if generated_nodes.node_labels is not None:
+            return [np.asarray(node_labels, dtype=object) for node_labels in generated_nodes.node_labels]
+        if generated_nodes.node_presence_mask is None:
+            raise RuntimeError("Node-label resolution requires node_presence_mask predictions.")
+        if node_label_plan is None:
+            raise RuntimeError("Node-label resolution requires an orchestration supervision plan.")
+        if node_label_plan.mode == "constant":
+            return [
+                np.asarray([node_label_plan.constant_value] * len(node_presence_mask), dtype=object)
+                for node_presence_mask in generated_nodes.node_presence_mask
+            ]
+        if node_label_plan.mode == "disabled":
+            return [
+                np.asarray([None] * len(node_presence_mask), dtype=object)
+                for node_presence_mask in generated_nodes.node_presence_mask
+            ]
+        raise RuntimeError("Node-label channel is configured as learned, but the generator returned no node labels.")
+
+    def _resolve_predicted_edge_labels(
+        self,
+        generated_nodes: GeneratedNodeBatch,
+        predicted_edge_probability_matrices: Optional[List[np.ndarray]],
+    ) -> Tuple[Optional[List[np.ndarray]], Optional[List[np.ndarray]]]:
+        """Resolve edge labels from explicit predictions or orchestration policy."""
+        edge_label_plan = self._plan_channel("edge_labels")
+        if generated_nodes.edge_label_matrices is not None:
+            return None, [np.asarray(edge_label_matrix, dtype=object) for edge_label_matrix in generated_nodes.edge_label_matrices]
+        if predicted_edge_probability_matrices is None:
+            raise RuntimeError("Edge-label resolution requires edge probabilities to determine decoded edge counts.")
+        if edge_label_plan is None:
+            raise RuntimeError("Edge-label resolution requires an orchestration supervision plan.")
+        if edge_label_plan.mode == "constant":
+            predicted_edge_label_matrices = []
+            for prob_matrix in predicted_edge_probability_matrices:
+                prob_matrix = np.asarray(prob_matrix)
+                if prob_matrix.ndim != 2 or prob_matrix.shape[0] != prob_matrix.shape[1]:
+                    raise ValueError(
+                        "Constant edge-label resolution expects square edge-probability matrices "
+                        f"(got shape={prob_matrix.shape})."
+                    )
+                edge_label_matrix = np.full(prob_matrix.shape, edge_label_plan.constant_value, dtype=object)
+                np.fill_diagonal(edge_label_matrix, None)
+                predicted_edge_label_matrices.append(edge_label_matrix)
+            return None, predicted_edge_label_matrices
+        if edge_label_plan.mode == "disabled":
+            return [np.asarray([], dtype=object) for _ in predicted_edge_probability_matrices], None
+        raise RuntimeError("Edge-label channel is configured as learned, but the generator returned no edge labels.")
+
     def toggle_verbose(self) -> None:
         """Flip verbosity for this instance and any nested generators.
 
@@ -1214,6 +1229,27 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
                 "because the cached training conditioning is empty."
             )
         return conditioning
+
+    def _require_fit_components(self, train_node_generator: bool) -> None:
+        """Validate that fit-time collaborators are configured before dereferencing them."""
+        if self.graph_vectorizer is None:
+            raise ValueError(
+                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires graph_vectorizer to be configured."
+            )
+        if self.node_graph_vectorizer is None:
+            raise ValueError(
+                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires node_graph_vectorizer to be configured."
+            )
+        if train_node_generator and self.conditional_node_generator_model is None:
+            raise ValueError(
+                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires "
+                "conditional_node_generator_model when train_node_generator=True."
+            )
+        if train_node_generator and self.graph_decoder is None:
+            raise ValueError(
+                "EquilibriumMatchingDecompositionalGraphGenerator.fit() requires "
+                "graph_decoder when train_node_generator=True."
+            )
 
     def _sample_conditioning_rows(self, source: GraphConditioningBatch, indices: np.ndarray) -> GraphConditioningBatch:
         """Slice a conditioning batch by row indices.
@@ -1304,6 +1340,7 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
 
             pair_indices = []
             pair_weights = []
+            raw_pair_cosines = []
             for local_i in range(len(candidate_indices)):
                 for local_j in range(local_i + 1, len(candidate_indices)):
                     first_idx = int(candidate_indices[local_i])
@@ -1313,15 +1350,18 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
                     denom = float(np.linalg.norm(first_embedding) * np.linalg.norm(second_embedding))
                     cosine = 0.0 if denom == 0.0 else float(np.dot(first_embedding, second_embedding) / denom)
                     pair_indices.append((first_idx, second_idx))
+                    raw_pair_cosines.append(cosine)
                     pair_weights.append(max(cosine, 0.0))
 
             pair_weights_array = np.asarray(pair_weights, dtype=float)
             if np.all(pair_weights_array == 0.0):
-                pair_probabilities = None
+                raw_pair_cosines_array = np.asarray(raw_pair_cosines, dtype=float)
+                max_cosine = float(np.max(raw_pair_cosines_array))
+                candidate_pair_choices = np.flatnonzero(np.isclose(raw_pair_cosines_array, max_cosine))
+                pair_choice = int(np.random.choice(candidate_pair_choices))
             else:
                 pair_probabilities = pair_weights_array / pair_weights_array.sum()
-
-            pair_choice = int(np.random.choice(len(pair_indices), p=pair_probabilities))
+                pair_choice = int(np.random.choice(len(pair_indices), p=pair_probabilities))
             first_idx, second_idx = pair_indices[pair_choice]
             t = float(np.random.uniform(0.0, 1.0))
             interpolated_embedding, interpolated_node_count, interpolated_edge_count = (
@@ -1351,6 +1391,7 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
     ) -> 'EquilibriumMatchingDecompositionalGraphGenerator':
         if self.verbose:
             print(f"Fitting model on {len(graphs)} graphs")
+        self._require_fit_components(train_node_generator=train_node_generator)
         if targets is not None and len(targets) != len(graphs):
             raise ValueError(
                 "targets length must match the number of graphs "
@@ -1374,8 +1415,6 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
         self.supervision_plan_ = supervision_plan
         if self.conditional_node_generator_model is not None:
             setattr(self.conditional_node_generator_model, "supervision_plan_", supervision_plan)
-        if self.graph_decoder is not None:
-            setattr(self.graph_decoder, "supervision_plan_", supervision_plan)
 
         node_embeddings_list, graph_conditioning = self.encode(graphs)
         self.training_graph_conditioning_ = GraphConditioningBatch(
@@ -1778,11 +1817,22 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
             desired_class=desired_class,
         )
         self._log_generated_batch_info(graph_conditioning, generated_nodes)
+        predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
+        if predicted_edge_probability_matrices is None:
+            raise RuntimeError(
+                "Graph decoding requires explicit edge-probability matrices from the conditional node generator."
+            )
+        predicted_node_labels_list = self._resolve_predicted_node_labels(generated_nodes)
+        predicted_edge_labels_list, predicted_edge_label_matrices = self._resolve_predicted_edge_labels(
+            generated_nodes,
+            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+        )
         return self.graph_decoder.decode(
             generated_nodes,
-            predicted_node_labels_list=generated_nodes.node_labels,
-            predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
-            predicted_edge_label_matrices=generated_nodes.edge_label_matrices,
+            predicted_node_labels_list=predicted_node_labels_list,
+            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+            predicted_edge_labels_list=predicted_edge_labels_list,
+            predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
 
     def _decode_with_feasibility_slots(

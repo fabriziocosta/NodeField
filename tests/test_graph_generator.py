@@ -112,6 +112,58 @@ def test_graph_generator_init_validates_inputs():
         EquilibriumMatchingDecompositionalGraphGenerator(feasibility_failure_mode="drop")
 
 
+def test_fit_requires_graph_vectorizer():
+    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+        graph_vectorizer=None,
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=_Component(verbose=False),
+        graph_decoder=_Component(verbose=False),
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="requires graph_vectorizer"):
+        generator.fit([_labeled_graph()], train_node_generator=False)
+
+
+def test_fit_requires_node_graph_vectorizer():
+    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=None,
+        conditional_node_generator_model=_Component(verbose=False),
+        graph_decoder=_Component(verbose=False),
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="requires node_graph_vectorizer"):
+        generator.fit([_labeled_graph()], train_node_generator=False)
+
+
+def test_fit_requires_conditional_node_generator_when_training_enabled():
+    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=None,
+        graph_decoder=EquilibriumMatchingDecompositionalGraphDecoder(verbose=False),
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="requires conditional_node_generator_model"):
+        generator.fit([_labeled_graph()], train_node_generator=True)
+
+
+def test_fit_requires_graph_decoder_when_training_enabled():
+    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=_Component(verbose=False),
+        graph_decoder=None,
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="requires graph_decoder"):
+        generator.fit([_labeled_graph()], train_node_generator=True)
+
+
 def test_toggle_verbose_updates_nested_components():
     node_model = _Component(verbose=False)
     decoder = _Component(verbose=False)
@@ -202,9 +254,9 @@ def test_build_supervision_plan_uses_dummy_label_as_constant_when_nodes_are_unla
     assert plan.node_labels.constant_value == DEFAULT_DUMMY_NODE_LABEL
 
 
-def test_decode_node_labels_assigns_dummy_constant_label_for_unlabelled_training_setup():
-    decoder = EquilibriumMatchingDecompositionalGraphDecoder(verbose=False)
-    decoder.supervision_plan_ = type(
+def test_generator_resolves_dummy_constant_node_labels_for_unlabelled_training_setup():
+    generator = EquilibriumMatchingDecompositionalGraphGenerator(verbose=False)
+    generator.supervision_plan_ = type(
         "_Plan",
         (),
         {
@@ -216,13 +268,24 @@ def test_decode_node_labels_assigns_dummy_constant_label_for_unlabelled_training
         },
     )()
 
-    labels = decoder.decode_node_labels(
+    labels = generator._resolve_predicted_node_labels(
         GeneratedNodeBatch(
             node_presence_mask=np.asarray([[True, True]], dtype=bool),
         )
     )
 
     assert labels[0].tolist() == [DEFAULT_DUMMY_NODE_LABEL, DEFAULT_DUMMY_NODE_LABEL]
+
+
+def test_decoder_decode_node_labels_requires_explicit_labels():
+    decoder = EquilibriumMatchingDecompositionalGraphDecoder(verbose=False)
+
+    with pytest.raises(RuntimeError, match="requires explicit node labels"):
+        decoder.decode_node_labels(
+            GeneratedNodeBatch(
+                node_presence_mask=np.asarray([[True, True]], dtype=bool),
+            )
+        )
 
 
 def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
@@ -363,7 +426,7 @@ def test_sample_conditions_direct_mode_returns_cached_rows(monkeypatch):
     np.testing.assert_array_equal(conditioning.edge_counts, np.asarray([4, 2], dtype=np.int64))
 
 
-def test_sample_conditions_interpolation_clamps_negative_cosine_and_interpolates_counts(monkeypatch):
+def test_sample_conditions_interpolation_clamps_negative_cosine_and_avoids_worse_pairs(monkeypatch):
     generator = _make_fitted_sampling_generator()
     generator.training_graph_conditioning_ = type(generator.training_graph_conditioning_)(
         graph_embeddings=np.asarray(
@@ -381,7 +444,7 @@ def test_sample_conditions_interpolation_clamps_negative_cosine_and_interpolates
     choice_calls = iter(
         [
             np.asarray([0, 1, 2], dtype=np.int64),
-            2,
+            1,
         ]
     )
 
@@ -399,7 +462,7 @@ def test_sample_conditions_interpolation_clamps_negative_cosine_and_interpolates
     np.testing.assert_array_equal(conditioning.edge_counts, np.asarray([2], dtype=np.int64))
 
 
-def test_sample_conditions_interpolation_falls_back_to_uniform_pair_sampling_when_all_weights_zero(monkeypatch):
+def test_sample_conditions_interpolation_falls_back_to_uniform_best_pair_sampling_when_all_weights_zero(monkeypatch):
     generator = _make_fitted_sampling_generator()
     generator.training_graph_conditioning_ = type(generator.training_graph_conditioning_)(
         graph_embeddings=np.asarray(
@@ -415,11 +478,13 @@ def test_sample_conditions_interpolation_falls_back_to_uniform_pair_sampling_whe
     )
 
     sampled_probabilities = []
+    sampled_choice_args = []
     choice_calls = iter([np.asarray([0, 1, 2], dtype=np.int64), 1])
 
     def _fake_choice(a, size=None, replace=None, p=None):
         del size, replace
         sampled_probabilities.append(p)
+        sampled_choice_args.append(a)
         if isinstance(a, int):
             return next(choice_calls)
         return next(choice_calls)
@@ -430,6 +495,7 @@ def test_sample_conditions_interpolation_falls_back_to_uniform_pair_sampling_whe
     conditioning = generator._sample_conditions(1, interpolate_between_n_samples=3)
 
     assert sampled_probabilities[-1] is None
+    np.testing.assert_array_equal(np.asarray(sampled_choice_args[-1]), np.asarray([0, 1], dtype=np.int64))
     np.testing.assert_array_equal(conditioning.node_counts, np.asarray([4], dtype=np.int64))
     np.testing.assert_array_equal(conditioning.edge_counts, np.asarray([3], dtype=np.int64))
 
