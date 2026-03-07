@@ -2,7 +2,7 @@
 
 This document explains the decoder used by `ConditionalNodeFieldGraphGenerator`, with a focus on how graph structure is reconstructed from node-generator outputs and how the constraint solver turns soft edge scores into valid adjacency matrices.
 
-The implementation lives in [`../equilibrium_matching_decompositional_graph_generator/graph_engine.py`](../equilibrium_matching_decompositional_graph_generator/graph_engine.py), mainly inside:
+The implementation lives in [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py), mainly inside:
 
 - `ConditionalNodeFieldGraphDecoder`
 - `ConditionalNodeFieldGraphGenerator._decode_*`

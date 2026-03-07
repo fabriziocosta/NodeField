@@ -31,7 +31,7 @@ def _resolve_saved_generator_dir(model_dir=None):
         root = next(
             candidate.resolve()
             for candidate in [Path.cwd(), Path.cwd().parent]
-            if (candidate / "equilibrium_matching_decompositional_graph_generator").exists()
+            if (candidate / "conditional_node_field_graph_generator").exists()
         ) / ".artifacts" / "saved_generators"
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -106,7 +106,6 @@ def load_graph_generator(model_name, model_dir=None):
         graph_generator = pickle.load(handle)
     print(f"Loaded graph generator: {path.name}")
     print(path)
-    print("Note: this is a clean-break Conditional Node Field artifact path; older pre-refactor pickles may not reload.")
     return graph_generator
 
 
@@ -327,8 +326,8 @@ def graph_label_histogram(graph, label_classes):
 
 
 def summarize_label_histogram_alignment(graph_generator, graphs, n_compare=16):
-    equilibrium_matching_generator = graph_generator.conditional_node_generator_model
-    label_classes = [int(label) if isinstance(label, np.integer) else label for label in equilibrium_matching_generator.node_label_classes_]
+    node_field_generator = graph_generator.conditional_node_generator_model
+    label_classes = [int(label) if isinstance(label, np.integer) else label for label in node_field_generator.node_label_classes_]
 
     input_graphs = graphs[:n_compare]
     graph_conditioning = graph_generator.graph_encode(input_graphs)

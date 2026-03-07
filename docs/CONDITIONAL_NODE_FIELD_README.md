@@ -3,26 +3,26 @@
 This document explains the `ConditionalNodeFieldGenerator` implemented in this repository, what equations it uses during training and sampling, and how the surrounding graph-generation pipeline fits together.
 
 The implementation lives primarily in
-[`../equilibrium_matching_decompositional_graph_generator/node_engine.py`](../equilibrium_matching_decompositional_graph_generator/node_engine.py).
+[`../conditional_node_field_graph_generator/conditional_node_field_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_generator.py).
 
 ## Overview
 
 The maintained node generator in this repository is:
 
 - `ConditionalNodeFieldGenerator`
-  A stationary, energy-based conditional generator inspired by Equilibrium Matching.
+  A stationary, energy-based conditional generator for graph-conditioned node synthesis.
 
-The Equilibrium Matching model replaces diffusion time-conditioning and reverse-time denoising with:
+The Conditional Node Field model replaces diffusion time-conditioning and reverse-time denoising with:
 
 - a scalar conditional energy or potential,
 - a score field obtained as the gradient of that scalar,
 - a stationary score-matching objective,
 - iterative relaxation or Langevin-style sampling in feature space.
 
-In this repository, the Equilibrium Matching generator is used as the `conditioning -> node-level predictions` stage inside the broader decompositional pipeline:
+In this repository, the Conditional Node Field generator is used as the `conditioning -> node-level predictions` stage inside the broader decompositional pipeline:
 
 1. encode each training graph into node feature matrices and graph-level conditioning vectors,
-2. train the Equilibrium Matching conditional generator to map graph-level conditions to node-level structural and semantic predictions,
+2. train the Conditional Node Field generator to map graph-level conditions to node-level structural and semantic predictions,
 3. use the model heads and graph decoder to map generated node-level predictions back into graphs.
 
 ```mermaid
@@ -60,7 +60,7 @@ $$
 
 or equivalently a time-dependent score field.
 
-The Equilibrium Matching model implemented here learns a stationary conditional score field:
+The Conditional Node Field model implemented here learns a stationary conditional score field:
 
 $$
 g_\theta(x, c)
@@ -116,7 +116,7 @@ This is the field that drives both training and generation.
 
 ## What the Model Predicts
 
-The Equilibrium Matching module does not directly output node features. It outputs:
+The Conditional Node Field module does not directly output node features. It outputs:
 
 1. a scalar conditional potential through `potential_head`,
 2. a score field through autograd,
@@ -139,7 +139,7 @@ Node existence should be interpreted as a learned occupancy process over node sl
 
 ### Inputs
 
-For a batch of graphs, the Equilibrium Matching module consumes:
+For a batch of graphs, the Conditional Node Field module consumes:
 
 - `input_examples`
   Shape $(B, N, D)$, padded node features.
@@ -154,7 +154,7 @@ The important distinction is:
 - the conditioned node count is a global cardinality target,
 - `node_mask` is the per-slot realization of that target.
 
-Those are not equivalent. A scalar count does not identify which latent node positions are active, and the Equilibrium Matching dynamics are free to explore alternative support sets before settling on a final one.
+Those are not equivalent. A scalar count does not identify which latent node positions are active, and the Conditional Node Field dynamics are free to explore alternative support sets before settling on a final one.
 
 At training time, if node-label supervision is enabled, the model receives explicit
 per-node categorical targets rather than a graph-level label-composition summary.
@@ -171,11 +171,11 @@ Additionally, if node-label supervision is enabled, the wrapper stores the per-n
 predicted categorical labels from the final latent state in:
 
 ```python
-equilibrium_matching_generator.last_predicted_node_label_classes_
+conditional_node_field_generator.last_predicted_node_label_classes_
 ```
 
 These labels are not written directly into the node-feature tensor because node labels
-are categorical metadata, not continuous feature channels in the Equilibrium Matching state.
+are categorical metadata, not continuous feature channels in the Conditional Node Field state.
 
 ## Data Preprocessing
 
@@ -185,15 +185,15 @@ The wrapper preserves the established preprocessing behavior:
 - node features are scaled with `MinMaxScaler`,
 - conditional features are scaled separately,
 - degree scaling statistics are stored so discrete degree labels can be recovered,
-- padded positions are masked during Equilibrium Matching training and attention.
+- padded positions are masked during Conditional Node Field training and attention.
 
-This matters because the Equilibrium Matching model operates in scaled feature space, while the downstream decoder expects outputs back in the original feature space.
+This matters because the Conditional Node Field model operates in scaled feature space, while the downstream decoder expects outputs back in the original feature space.
 
 It also matters generatively: padding is not just a batching convenience. It provides a larger latent support over which the model can express tentative node occupancy decisions before the existence process sharpens into a final graph.
 
 ## Model Architecture
 
-The Equilibrium Matching generator uses a conditional transformer backbone:
+The Conditional Node Field generator uses a conditional transformer backbone:
 
 1. node features are layer-normalized,
 2. node features are projected into a latent dimension,
@@ -243,7 +243,7 @@ $$
 
 This is done with PyTorch autograd in the implementation.
 
-## Core Equilibrium Matching Training Objective
+## Core Conditional Node Field Training Objective
 
 The basic training construction is Gaussian corruption of clean data.
 
@@ -275,17 +275,17 @@ $$
 
 This is also the implementation target score.
 
-### Equilibrium Matching Loss Used Here
+### Conditional Node Field Loss Used Here
 
 The implementation minimizes masked mean squared error between learned score and target score:
 
-$$\mathcal{L}_{\mathrm{equilibrium\_matching}} = \mathbb{E}_{x,\varepsilon}\left[\left\|g_\theta(\tilde{x}, c) + \frac{\varepsilon}{\sigma}\right\|^2\right]$$
+$$\mathcal{L}_{\mathrm{node\_field}} = \mathbb{E}_{x,\varepsilon}\left[\left\|g_\theta(\tilde{x}, c) + \frac{\varepsilon}{\sigma}\right\|^2\right]$$
 
 with masking applied to padded node positions.
 
 Expanded with mask $m$:
 
-$$\mathcal{L}_{\mathrm{equilibrium\_matching}} = \frac{\sum_{b,i,d} m_{b,i}\left(g_\theta(\tilde{x}, c)_{b,i,d} + \frac{\varepsilon_{b,i,d}}{\sigma}\right)^2}{\sum_{b,i,d} m_{b,i}}$$
+$$\mathcal{L}_{\mathrm{node\_field}} = \frac{\sum_{b,i,d} m_{b,i}\left(g_\theta(\tilde{x}, c)_{b,i,d} + \frac{\varepsilon_{b,i,d}}{\sigma}\right)^2}{\sum_{b,i,d} m_{b,i}}$$
 
 This is the primary generative loss in the current code.
 
@@ -303,7 +303,7 @@ That estimate is then reused for auxiliary supervised heads.
 
 ## Auxiliary And Structural Losses
 
-The Equilibrium Matching generator is not only trained to learn a conditional energy landscape. It also predicts graph-structural properties through supervised heads and soft global consistency terms.
+The Conditional Node Field generator is not only trained to learn a conditional energy landscape. It also predicts graph-structural properties through supervised heads and soft global consistency terms.
 
 ```mermaid
 flowchart TD
@@ -338,12 +338,12 @@ The complete loss is easiest to understand as a sum of three groups:
 2. local supervised heads,
 3. graph-level soft consistency penalties.
 
-### 1. Equilibrium Matching Score Loss
+### 1. Conditional Node Field Score Loss
 
 This is the main generative term:
 
 $$
-\mathcal{L}_{\mathrm{equilibrium\_matching}}
+\mathcal{L}_{\mathrm{node\_field}}
 $$
 
 It teaches the model’s score field to match the denoising score implied by Gaussian corruption.
@@ -356,7 +356,7 @@ Operationally:
 
 This term is logged as:
 
-- `equilibrium_matching`
+- `node_field`
 
 ### 2. Node Existence Loss
 
@@ -666,7 +666,7 @@ $$
 
 subject to these activation rules:
 
-- `equilibrium_matching` and `deg` are always present,
+- `node_field` and `deg` are always present,
 - `exist` is present only if the existence head is enabled,
 - `node-count` is present only if the existence head is enabled and `lambda_node_count_importance > 0`,
 - `node-label` is present only if the node-label head is enabled,
@@ -722,7 +722,7 @@ This can improve diversity at the cost of noisier trajectories.
 
 ## Final Projection at Inference
 
-After the iterative Equilibrium Matching updates, the model runs one final pass on the final sample and applies auxiliary heads:
+After the iterative Conditional Node Field updates, the model runs one final pass on the final sample and applies auxiliary heads:
 
 - node existence logits are thresholded and overwrite channel 0,
 - degree logits are converted to class indices and used to overwrite the degree channel after inverse scaling.
@@ -732,7 +732,7 @@ This is a practical post-processing step that helps enforce discrete structure.
 
 ## Node-Label Supervision Behavior
 
-In the maintained Equilibrium Matching path, node labels are supervised locally through the per-node
+In the maintained Conditional Node Field path, node labels are supervised locally through the per-node
 categorical head. The graph-level conditioning vector does not include a separate
 node-label histogram.
 
@@ -750,7 +750,7 @@ $$
 c \in \mathbb{R}^{C}
 $$
 
-then the Equilibrium Matching model receives the same width-$C$ graph-level condition tensor, optionally
+then the Conditional Node Field model receives the same width-$C$ graph-level condition tensor, optionally
 augmented only by downstream target-guidance channels when classifier-free guidance is enabled.
 
 This keeps the roles separate:
@@ -764,11 +764,11 @@ if the conditioning input is tokenized.
 
 This is important for correctness.
 
-The Equilibrium Matching implementation explicitly masks padded node positions in several places:
+The Conditional Node Field implementation explicitly masks padded node positions in several places:
 
 - the latent encoder input,
 - energy aggregation,
-- Equilibrium Matching score loss,
+- Conditional Node Field score loss,
 - existence loss,
 - degree loss,
 - self-attention through key padding masks,
@@ -776,9 +776,9 @@ The Equilibrium Matching implementation explicitly masks padded node positions i
 
 Without this masking, padded rows would act like fake training examples and distort the learned energy landscape.
 
-## Equilibrium Matching Design Characteristics
+## Conditional Node Field Design Characteristics
 
-The most important characteristics of the maintained Equilibrium Matching implementation are:
+The most important characteristics of the maintained Conditional Node Field implementation are:
 
 ### 1. No time variable
 
@@ -796,7 +796,7 @@ $$
 
 and learns a time-dependent denoiser.
 
-Equilibrium Matching here is stationary:
+Conditional Node Field generation here is stationary:
 
 $$
 g_\theta(x, c)
@@ -812,7 +812,7 @@ $$
 \epsilon_\theta(x_t, c, t)
 $$
 
-Equilibrium Matching predicts:
+Conditional Node Field generation predicts:
 
 $$
 \phi_\theta(x, c)
@@ -824,7 +824,7 @@ and differentiates it to obtain the score.
 
 Diffusion sampling traverses a schedule from noisy to clean.
 
-Equilibrium Matching sampling repeatedly applies:
+Conditional Node Field sampling repeatedly applies:
 
 $$
 x \leftarrow x + \eta g_\theta(x, c)
@@ -834,7 +834,7 @@ in the stationary score field.
 
 ## Relationship to the Paper
 
-This repository implements an explicit-energy conditional Equilibrium Matching-style generator rather than a full paper-faithful reproduction of every Equilibrium Matching formulation detail.
+This repository implements an explicit-energy Conditional Node Field generator rather than a paper-faithful reproduction of any single prior formulation.
 
 The important design commitments are:
 
@@ -845,7 +845,6 @@ The important design commitments are:
 
 So this implementation is best thought of as:
 
-- Equilibrium Matching-inspired,
 - explicit-energy,
 - conditional,
 - adapted to padded node-feature tensors and downstream graph decoding.
@@ -875,7 +874,7 @@ Conceptually, `node_field_sigma` changes what score field the model learns, not 
 
 ### `sampling_step_size`
 
-Controls the magnitude of each Equilibrium Matching update at generation time.
+Controls the magnitude of each Conditional Node Field update at generation time.
 
 Too small:
 
@@ -896,7 +895,7 @@ Conceptually, `sampling_step_size` changes how aggressively the learned score fi
 
 ### `sampling_steps`
 
-Number of Equilibrium Matching sampling iterations.
+Number of Conditional Node Field sampling iterations.
 
 ### `langevin_noise_scale`
 
@@ -965,12 +964,12 @@ Weight on auxiliary higher-horizon locality supervision.
 
 ## Training Metrics
 
-The Equilibrium Matching generator records and plots:
+The Conditional Node Field generator records and plots:
 
 - `total`
   Full training objective.
-- `equilibrium_matching`
-  Core Equilibrium Matching score-matching loss.
+- `node_field`
+  Core Conditional Node Field score-matching loss.
 - `deg_ce`
   Degree classification loss.
 - `exist`
@@ -1016,7 +1015,7 @@ At a conceptual level, one training step is:
 
 ### 1. The model still depends on good preprocessing
 
-The Equilibrium Matching model is sensitive to scaling because it operates directly in feature space and uses gradients with respect to inputs.
+The Conditional Node Field model is sensitive to scaling because it operates directly in feature space and uses gradients with respect to inputs.
 
 ### 2. Sampling hyperparameters matter a lot
 
@@ -1024,15 +1023,15 @@ If generations are poor, `sampling_step_size`, `sampling_steps`, and `node_field
 
 ### 3. The auxiliary heads matter
 
-Without the existence and degree heads, the Equilibrium Matching field alone may produce softer outputs that are harder for the downstream decoder to interpret structurally.
+Without the existence and degree heads, the Conditional Node Field alone may produce softer outputs that are harder for the downstream decoder to interpret structurally.
 
 ### 4. Guidance is not implemented in phase 1
 
-Classifier guidance is not part of the maintained Equilibrium Matching decompositional API.
+Classifier guidance is not part of the maintained Conditional Node Field API.
 
 ## Source Notes
 
-The core intuition follows the Equilibrium Matching direction described by:
+Related background includes:
 
 - Wang and Du, *Equilibrium Matching: Generative Modeling with Implicit Energy-Based Models*
 
@@ -1050,7 +1049,7 @@ A supervised prediction layer attached to the latent representation, used here f
 
 ### Condition or conditioning vector
 
-Graph-level information supplied to the Equilibrium Matching generator so it can produce node features for a desired graph context.
+Graph-level information supplied to the Conditional Node Field generator so it can produce node features for a desired graph context.
 
 ### Conservative field
 
@@ -1064,9 +1063,9 @@ The feature dimension designated to represent node degree. In this repo the defa
 
 A scalar function $E(x, c)$ whose negative gradient defines the score or force field driving samples toward higher probability regions.
 
-### Equilibrium Matching
+### Conditional Node Field Lineage
 
-Equilibrium Matching. In this repo it refers to a stationary, energy-based score-learning approach used instead of diffusion.
+This implementation sits in the broader family of stationary, energy-based score-learning approaches used instead of diffusion.
 
 ### Existence channel
 
@@ -1094,7 +1093,7 @@ A boolean tensor indicating which node positions are real and which are padding.
 
 ### Potential
 
-The scalar function $\phi_\theta(x, c)$ implemented by the Equilibrium Matching module. In this code it acts as the conditional energy.
+The scalar function $\phi_\theta(x, c)$ implemented by the Conditional Node Field module. In this code it acts as the conditional energy.
 
 ### Score
 

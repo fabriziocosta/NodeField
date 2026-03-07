@@ -207,7 +207,7 @@ class EdgeMLP(nn.Module):
         out = self.mlp(x)
         return out.squeeze(-1) if self.output_dim == 1 else out
 
-class EquilibriumMatchingGraphDataset(Dataset):
+class ConditionalNodeFieldGraphDataset(Dataset):
     """Dataset carrying graph node features, conditioning, masks, and label targets."""
 
     def __init__(
@@ -235,7 +235,7 @@ class EquilibriumMatchingGraphDataset(Dataset):
         return self.X[idx], self.Y[idx], self.node_presence_mask[idx], self.node_degree_targets[idx], self.node_label_targets[idx]
 
 
-class EquilibriumMatchingGraphWithEdgesDataset(Dataset):
+class ConditionalNodeFieldGraphWithEdgesDataset(Dataset):
     """Dataset carrying edge supervision, auxiliary locality, and optional node labels."""
 
     def __init__(
@@ -317,8 +317,8 @@ class EquilibriumMatchingGraphWithEdgesDataset(Dataset):
         return self.X[idx], self.Y[idx], edge_idxs, edge_lbls, edge_label_idxs, edge_label_tgts, aux_edge_idxs, aux_edge_lbls, self.node_presence_mask[idx], self.node_degree_targets[idx], self.node_label_targets[idx]
 
 
-def collate_equilibrium_matching_graph_with_edges(batch):
-    """Batch EquilibriumMatchingGraphWithEdgesDataset items into tensors with optional label targets.
+def collate_conditional_node_field_graph_with_edges(batch):
+    """Batch ConditionalNodeFieldGraphWithEdgesDataset items into tensors with optional label targets.
 
     Args:
         batch (Any): Input value.
@@ -2106,7 +2106,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             auxiliary_edge_targets,
         )
         if effective_locality or effective_auxiliary_locality or effective_edge_labels:
-            dataset = EquilibriumMatchingGraphWithEdgesDataset(
+            dataset = ConditionalNodeFieldGraphWithEdgesDataset(
                 X_scaled,
                 y_scaled,
                 edge_pairs,
@@ -2124,13 +2124,13 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 train_dataset,
                 batch_size=self.batch_size,
                 shuffle=True,
-                collate_fn=collate_equilibrium_matching_graph_with_edges,
+                collate_fn=collate_conditional_node_field_graph_with_edges,
             )
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=self.batch_size,
                 shuffle=False,
-                collate_fn=collate_equilibrium_matching_graph_with_edges,
+                collate_fn=collate_conditional_node_field_graph_with_edges,
             )
         else:
             if encoded_node_label_targets is None:

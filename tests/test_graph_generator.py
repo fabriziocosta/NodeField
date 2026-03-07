@@ -3,12 +3,12 @@ import networkx as nx
 import pytest
 import pulp
 
-from equilibrium_matching_decompositional_graph_generator.graph_engine import (
+from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
     ConditionalNodeFieldGraphGenerator,
 )
-from equilibrium_matching_decompositional_graph_generator.node_engine import ConditionalNodeFieldGenerator, GeneratedNodeBatch
+from conditional_node_field_graph_generator.conditional_node_field_generator import ConditionalNodeFieldGenerator, GeneratedNodeBatch
 
 
 class _GraphVectorizer:

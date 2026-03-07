@@ -5,7 +5,7 @@ from functools import wraps
 
 
 def _verbosity_level(instance) -> int:
-    """Interpret legacy boolean verbosity as levels, defaulting to 0.
+    """Interpret verbosity values as numeric levels, defaulting to 0.
 
     Args:
         instance (Any): Input value.

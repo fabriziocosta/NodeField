@@ -1,7 +1,7 @@
 import re
 import time
 
-from equilibrium_matching_decompositional_graph_generator.support import _verbosity_level, timeit
+from conditional_node_field_graph_generator.support import _verbosity_level, timeit
 
 
 class _Worker:

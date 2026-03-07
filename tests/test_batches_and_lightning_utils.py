@@ -3,8 +3,8 @@ import pytest
 import torch
 import warnings
 
-import equilibrium_matching_decompositional_graph_generator as graphgen
-from equilibrium_matching_decompositional_graph_generator.node_engine import (
+import conditional_node_field_graph_generator as graphgen
+from conditional_node_field_graph_generator.conditional_node_field_generator import (
     GeneratedNodeBatch,
     ConditionalNodeFieldGenerator,
     ConditionalNodeFieldModule,
@@ -12,11 +12,11 @@ from equilibrium_matching_decompositional_graph_generator.node_engine import (
     MetricsLogger,
     NodeGenerationBatch,
 )
-from equilibrium_matching_decompositional_graph_generator.support import run_trainer_fit
-from equilibrium_matching_decompositional_graph_generator.metrics_visualization import (
+from conditional_node_field_graph_generator.support import run_trainer_fit
+from conditional_node_field_graph_generator.metrics_visualization import (
     plot_metrics,
 )
-from equilibrium_matching_decompositional_graph_generator.training_policy import (
+from conditional_node_field_graph_generator.training_policy import (
     format_restored_checkpoint_summary,
 )
 

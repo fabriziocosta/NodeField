@@ -20,10 +20,10 @@ The repository includes:
 
 ## Project Layout
 
-- `equilibrium_matching_decompositional_graph_generator/`
+- `conditional_node_field_graph_generator/`
   Core package:
-  - `node_engine.py`: Conditional Node Field model, batch dataclasses, and shared NN/callback blocks.
-  - `graph_engine.py`: graph generator/decoder orchestration and interpolation helpers.
+  - `conditional_node_field_generator.py`: Conditional Node Field model, batch dataclasses, and shared NN/callback blocks.
+  - `conditional_node_field_graph_generator.py`: graph generator/decoder orchestration and interpolation helpers.
   - `support.py`: runtime decorators/helpers plus artificial graph dataset constructors.
 - `notebooks/`
   Experiment and demo notebooks, plus notebook-specific helpers in `notebook_utils.py`.
@@ -50,7 +50,7 @@ pip install "numpy<2" torch pytorch-lightning scipy pandas scikit-learn networkx
 ## Quick Start
 
 ```python
-from equilibrium_matching_decompositional_graph_generator import (
+from conditional_node_field_graph_generator import (
     ConditionalNodeFieldGenerator,
     ConditionalNodeFieldGraphDecoder,
     ConditionalNodeFieldGraphGenerator,

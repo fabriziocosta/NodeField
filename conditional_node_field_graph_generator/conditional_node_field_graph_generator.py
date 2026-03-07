@@ -11,7 +11,7 @@ import pulp
 import dill as pickle
 from .support import timeit
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union
-from .node_engine import (
+from .conditional_node_field_generator import (
     ConditionalNodeGeneratorBase,
     GeneratedNodeBatch,
     GraphConditioningBatch,

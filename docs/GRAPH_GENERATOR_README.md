@@ -4,8 +4,8 @@ This document explains the architecture of `ConditionalNodeFieldGraphGenerator`,
 
 Implementation anchors:
 
-- [`../equilibrium_matching_decompositional_graph_generator/graph_engine.py`](../equilibrium_matching_decompositional_graph_generator/graph_engine.py)
-- [`../equilibrium_matching_decompositional_graph_generator/node_engine.py`](../equilibrium_matching_decompositional_graph_generator/node_engine.py)
+- [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py)
+- [`../conditional_node_field_graph_generator/conditional_node_field_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_generator.py)
 - [`DECODER_README.md`](DECODER_README.md)
 - [`CONDITIONAL_NODE_FIELD_README.md`](CONDITIONAL_NODE_FIELD_README.md)
 
@@ -552,5 +552,5 @@ For someone new to the codebase, the fastest way to build accurate context is:
 2. this file
 3. [`CONDITIONAL_NODE_FIELD_README.md`](CONDITIONAL_NODE_FIELD_README.md)
 4. [`DECODER_README.md`](DECODER_README.md)
-5. [`../equilibrium_matching_decompositional_graph_generator/graph_engine.py`](../equilibrium_matching_decompositional_graph_generator/graph_engine.py)
-6. [`../equilibrium_matching_decompositional_graph_generator/node_engine.py`](../equilibrium_matching_decompositional_graph_generator/node_engine.py)
+5. [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py)
+6. [`../conditional_node_field_graph_generator/conditional_node_field_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_generator.py)

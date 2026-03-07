@@ -5,14 +5,14 @@ import numpy as np
 import pytest
 import torch
 
-from equilibrium_matching_decompositional_graph_generator.graph_engine import (
+from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     ConditionalNodeFieldGraphGenerator,
 )
-from equilibrium_matching_decompositional_graph_generator.node_engine import (
+from conditional_node_field_graph_generator.conditional_node_field_generator import (
     ConditionalNodeFieldGenerator,
     ConditionalNodeFieldModule,
 )
-from equilibrium_matching_decompositional_graph_generator.node_engine import (
+from conditional_node_field_graph_generator.conditional_node_field_generator import (
     GeneratedNodeBatch,
     GraphConditioningBatch,
 )

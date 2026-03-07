@@ -2,10 +2,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from equilibrium_matching_decompositional_graph_generator.graph_engine import (
+from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     _interpolate_integer_series,
 )
-from equilibrium_matching_decompositional_graph_generator.node_engine import GraphConditioningBatch
+from conditional_node_field_graph_generator.conditional_node_field_generator import GraphConditioningBatch
 from notebooks.notebook_utils import sample_positive_endpoint_pair
 
 

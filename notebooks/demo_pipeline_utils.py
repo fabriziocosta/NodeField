@@ -28,8 +28,8 @@ try:
 except ModuleNotFoundError:
     from nsppk import NSPPK, NodeNSPPK
 
-from equilibrium_matching_decompositional_graph_generator.node_engine import ConditionalNodeFieldGenerator
-from equilibrium_matching_decompositional_graph_generator.graph_engine import (
+from conditional_node_field_graph_generator.conditional_node_field_generator import ConditionalNodeFieldGenerator
+from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     ConditionalNodeFieldGraphDecoder,
     ConditionalNodeFieldGraphGenerator,
 )
@@ -37,7 +37,7 @@ from equilibrium_matching_decompositional_graph_generator.graph_engine import (
 
 def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
     if dataset_type == "ARTIFICIAL":
-        from equilibrium_matching_decompositional_graph_generator.support import ArtificialGraphDatasetConstructor
+        from conditional_node_field_graph_generator.support import ArtificialGraphDatasetConstructor
         try:
             from notebooks.notebook_utils import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
         except ModuleNotFoundError:

@@ -1,7 +1,7 @@
 """Maintained GraphGen modules."""
 
-from .node_engine import ConditionalNodeFieldGenerator
-from .graph_engine import (
+from .conditional_node_field_generator import ConditionalNodeFieldGenerator
+from .conditional_node_field_graph_generator import (
     ConditionalNodeFieldGraphDecoder,
     ConditionalNodeFieldGraphGenerator,
 )
