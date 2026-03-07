@@ -183,22 +183,49 @@ class MetricsLogger(pl.callbacks.Callback):
                 def _format_row(prefix_label, total_value, component_map, dominant_label, dominant_share):
                     def _format_share(value: float) -> str:
                         if value <= 0:
-                            return "  0%"
+                            return "0%"
                         if value < 0.001:
                             return "<0.1%"
-                        return f"{value:>5.1%}"
+                        return f"{value:.1%}"
 
-                    row = f"{prefix_label:<5} total={total_value:>9.1f}"
-                    for label in ordered_labels:
-                        if label in component_map:
-                            _, weighted, share = component_map[label]
-                            row += f" | {label:>10} {weighted:>9.1f} {_format_share(share)}"
+                    first_row_width = 4
+                    continuation_row_width = 5
+                    chunks = []
+                    if ordered_labels:
+                        chunks.append(ordered_labels[:first_row_width])
+                        remaining_labels = ordered_labels[first_row_width:]
+                        chunks.extend(
+                            remaining_labels[index:index + continuation_row_width]
+                            for index in range(0, len(remaining_labels), continuation_row_width)
+                        )
+                    rows = []
+                    total_prefix = f"{prefix_label:<5} total={total_value:>9.1f}"
+                    continuation_prefix = " " * len(total_prefix)
+                    for chunk_index, labels_chunk in enumerate(chunks):
+                        row = f"{prefix_label:<5}"
+                        if chunk_index == 0:
+                            row += total_prefix[len(f"{prefix_label:<5}"):]
                         else:
-                            row += f" | {label:>10} {'-':>9} {'-':>5}"
+                            row += continuation_prefix[len(f"{prefix_label:<5}"):]
+                        for label in labels_chunk:
+                            if label in component_map:
+                                _, weighted, share = component_map[label]
+                                row += f" | {label:>10} {weighted:>9.1f} [{_format_share(share)}]"
+                            else:
+                                row += f" | {label:>10} {'-':>9} [{' - '}]"
+                        rows.append(row)
+                    if not rows:
+                        rows.append(total_prefix)
                     if dominant_label is not None:
-                        row += f" | dominant={dominant_label} ({_format_share(dominant_share).strip()})"
-                    return row
+                        rows[-1] += f" | dominant={dominant_label} [{_format_share(dominant_share)}]"
+                    return rows
 
                 print(f"{epoch_label}:")
-                print("  " + _format_row("train", train_total, train_map, train_dominant, train_dominant_share))
-                print("  " + _format_row("val", val_total, val_map, val_dominant, val_dominant_share))
+                train_rows = _format_row("train", train_total, train_map, train_dominant, train_dominant_share)
+                val_rows = _format_row("val", val_total, val_map, val_dominant, val_dominant_share)
+                block_count = max(len(train_rows), len(val_rows))
+                for block_index in range(block_count):
+                    if block_index < len(train_rows):
+                        print("  " + train_rows[block_index])
+                    if block_index < len(val_rows):
+                        print("  " + val_rows[block_index])
