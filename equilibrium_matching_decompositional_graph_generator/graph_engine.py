@@ -1007,6 +1007,7 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
         self.graph_decoder = graph_decoder
         self.verbose = verbose
         self.supervision_plan_: Optional[SupervisionPlan] = None
+        self.training_graph_conditioning_: Optional[GraphConditioningBatch] = None
         self.is_fitted_ = False
         if not 0.0 < locality_sample_fraction <= 1.0:
             raise ValueError("locality_sample_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
@@ -1199,6 +1200,148 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
                 "EquilibriumMatchingDecompositionalGraphGenerator cannot generate graphs because graph_decoder is None."
             )
 
+    def _require_training_graph_conditioning(self) -> GraphConditioningBatch:
+        conditioning = getattr(self, "training_graph_conditioning_", None)
+        if conditioning is None:
+            raise RuntimeError(
+                "EquilibriumMatchingDecompositionalGraphGenerator cannot sample graph-level conditions "
+                "because fit() did not cache training graph conditioning."
+            )
+        graph_embeddings = np.asarray(conditioning.graph_embeddings)
+        if graph_embeddings.ndim == 0 or len(graph_embeddings) == 0:
+            raise RuntimeError(
+                "EquilibriumMatchingDecompositionalGraphGenerator cannot sample graph-level conditions "
+                "because the cached training conditioning is empty."
+            )
+        return conditioning
+
+    def _sample_conditioning_rows(self, source: GraphConditioningBatch, indices: np.ndarray) -> GraphConditioningBatch:
+        """Slice a conditioning batch by row indices.
+
+        Args:
+            source (GraphConditioningBatch): Input value.
+            indices (np.ndarray): Input value.
+
+        Returns:
+            GraphConditioningBatch: Computed result.
+        """
+        idx = np.asarray(indices, dtype=np.int64)
+        return GraphConditioningBatch(
+            graph_embeddings=np.asarray(source.graph_embeddings)[idx],
+            node_counts=np.asarray(source.node_counts)[idx],
+            edge_counts=np.asarray(source.edge_counts)[idx],
+        )
+
+    def _interpolated_conditioning_from_pair(
+        self,
+        conditioning: GraphConditioningBatch,
+        first_idx: int,
+        second_idx: int,
+        t: float,
+    ) -> Tuple[np.ndarray, np.int64, np.int64]:
+        """Linearly interpolate one conditioning pair and clamp integer counts.
+
+        Args:
+            conditioning (GraphConditioningBatch): Input value.
+            first_idx (int): Input value.
+            second_idx (int): Input value.
+            t (float): Input value.
+
+        Returns:
+            Tuple[np.ndarray, np.int64, np.int64]: Computed result.
+        """
+        graph_embeddings = np.asarray(conditioning.graph_embeddings, dtype=float)
+        node_counts = np.asarray(conditioning.node_counts, dtype=float)
+        edge_counts = np.asarray(conditioning.edge_counts, dtype=float)
+
+        interpolated_embedding = (1.0 - t) * graph_embeddings[first_idx] + t * graph_embeddings[second_idx]
+        interpolated_node_count = np.int64(max(1, int(np.rint((1.0 - t) * node_counts[first_idx] + t * node_counts[second_idx]))))
+        interpolated_edge_count = np.int64(max(0, int(np.rint((1.0 - t) * edge_counts[first_idx] + t * edge_counts[second_idx]))))
+        return interpolated_embedding, interpolated_node_count, interpolated_edge_count
+
+    def _sample_conditions(
+        self,
+        n_samples: int,
+        interpolate_between_n_samples: Optional[int] = None,
+    ) -> GraphConditioningBatch:
+        """Sample graph-level conditioning from cached training embeddings.
+
+        Args:
+            n_samples (int): Input value.
+            interpolate_between_n_samples (Optional[int]): Optional input value.
+
+        Returns:
+            GraphConditioningBatch: Computed result.
+        """
+        conditioning = self._require_training_graph_conditioning()
+        if interpolate_between_n_samples is not None and int(interpolate_between_n_samples) < 2:
+            raise ValueError("interpolate_between_n_samples must be >= 2 when provided.")
+
+        n_training = len(conditioning)
+        if interpolate_between_n_samples is None or n_training == 1:
+            sample_indices = np.random.choice(n_training, size=int(n_samples), replace=True)
+            return self._sample_conditioning_rows(conditioning, sample_indices)
+
+        subset_size = min(int(interpolate_between_n_samples), n_training)
+        if subset_size < 2:
+            sample_indices = np.random.choice(n_training, size=int(n_samples), replace=True)
+            return self._sample_conditioning_rows(conditioning, sample_indices)
+
+        graph_embeddings = np.asarray(conditioning.graph_embeddings, dtype=float)
+        sampled_embeddings = []
+        sampled_node_counts = []
+        sampled_edge_counts = []
+
+        for _ in range(int(n_samples)):
+            candidate_indices = np.random.choice(n_training, size=subset_size, replace=False)
+            if len(candidate_indices) < 2:
+                fallback_idx = int(np.random.choice(n_training))
+                direct_conditioning = self._sample_conditioning_rows(conditioning, np.asarray([fallback_idx], dtype=np.int64))
+                sampled_embeddings.append(np.asarray(direct_conditioning.graph_embeddings[0], dtype=float))
+                sampled_node_counts.append(np.int64(direct_conditioning.node_counts[0]))
+                sampled_edge_counts.append(np.int64(direct_conditioning.edge_counts[0]))
+                continue
+
+            pair_indices = []
+            pair_weights = []
+            for local_i in range(len(candidate_indices)):
+                for local_j in range(local_i + 1, len(candidate_indices)):
+                    first_idx = int(candidate_indices[local_i])
+                    second_idx = int(candidate_indices[local_j])
+                    first_embedding = graph_embeddings[first_idx]
+                    second_embedding = graph_embeddings[second_idx]
+                    denom = float(np.linalg.norm(first_embedding) * np.linalg.norm(second_embedding))
+                    cosine = 0.0 if denom == 0.0 else float(np.dot(first_embedding, second_embedding) / denom)
+                    pair_indices.append((first_idx, second_idx))
+                    pair_weights.append(max(cosine, 0.0))
+
+            pair_weights_array = np.asarray(pair_weights, dtype=float)
+            if np.all(pair_weights_array == 0.0):
+                pair_probabilities = None
+            else:
+                pair_probabilities = pair_weights_array / pair_weights_array.sum()
+
+            pair_choice = int(np.random.choice(len(pair_indices), p=pair_probabilities))
+            first_idx, second_idx = pair_indices[pair_choice]
+            t = float(np.random.uniform(0.0, 1.0))
+            interpolated_embedding, interpolated_node_count, interpolated_edge_count = (
+                self._interpolated_conditioning_from_pair(
+                    conditioning,
+                    first_idx,
+                    second_idx,
+                    t,
+                )
+            )
+            sampled_embeddings.append(interpolated_embedding)
+            sampled_node_counts.append(interpolated_node_count)
+            sampled_edge_counts.append(interpolated_edge_count)
+
+        return GraphConditioningBatch(
+            graph_embeddings=np.asarray(sampled_embeddings, dtype=float),
+            node_counts=np.asarray(sampled_node_counts, dtype=np.int64),
+            edge_counts=np.asarray(sampled_edge_counts, dtype=np.int64),
+        )
+
     @timeit
     def fit(
         self,
@@ -1235,6 +1378,11 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
             setattr(self.graph_decoder, "supervision_plan_", supervision_plan)
 
         node_embeddings_list, graph_conditioning = self.encode(graphs)
+        self.training_graph_conditioning_ = GraphConditioningBatch(
+            graph_embeddings=np.asarray(graph_conditioning.graph_embeddings),
+            node_counts=np.asarray(graph_conditioning.node_counts, dtype=np.int64),
+            edge_counts=np.asarray(graph_conditioning.edge_counts, dtype=np.int64),
+        )
 
         if train_node_generator:
             edge_pairs_for_cond_gen = None
@@ -1829,6 +1977,7 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
     def sample(
         self,
         n_samples: int = 1,
+        interpolate_between_n_samples: Optional[int] = None,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         desired_class: Optional[Union[int, Sequence[int]]] = None,
@@ -1838,6 +1987,7 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
 
         Args:
             n_samples (int): Optional input value.
+            interpolate_between_n_samples (Optional[int]): Optional input value.
             desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
             guidance_scale (float): Optional input value.
             desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
@@ -1849,12 +1999,20 @@ class EquilibriumMatchingDecompositionalGraphGenerator(object):
         self._require_fitted_for_generation()
         if self.verbose:
             print(f"Sampling {n_samples} graphs")
+            if interpolate_between_n_samples is not None:
+                print(
+                    "Sampling conditioning via stochastic interpolation over "
+                    f"{interpolate_between_n_samples} cached training embeddings per output."
+                )
             if desired_target is not None:
                 print(f"Using CFG target guidance: {desired_target} (scale={guidance_scale})")
             if desired_class is not None:
                 print(f"Using classifier guidance toward class(es): {desired_class}")
         
-        sampled_conditioning = self._sample_conditions(n_samples)
+        sampled_conditioning = self._sample_conditions(
+            n_samples,
+            interpolate_between_n_samples=interpolate_between_n_samples,
+        )
         return self._decode_with_feasibility(
             sampled_conditioning,
             desired_target=desired_target,

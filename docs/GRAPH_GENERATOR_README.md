@@ -412,7 +412,9 @@ Use this when conditioning vectors are already available.
 
 ### `sample(n_samples, ...)`
 
-Sample graph-level conditions from the learned conditioning prior, then decode them.
+Sample graph-level conditions from cached training conditioning, then decode them.
+
+By default, this samples stored graph-conditioning rows directly. When `interpolate_between_n_samples` is provided, each requested output first draws a small subset of cached training conditioning rows, scores candidate pairs by cosine similarity on the cached graph-vectorizer embeddings, samples a pair, and linearly interpolates graph embedding, node count, and edge count to form a new conditioning vector.
 
 ### `conditional_sample(graphs, n_samples, ...)`
 

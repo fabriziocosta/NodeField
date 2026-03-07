@@ -70,6 +70,31 @@ def _unlabeled_node_graph():
     return graph
 
 
+def _sampling_graphs():
+    graphs = []
+    for node_count, edge_count in [(2, 1), (3, 2), (4, 3), (5, 4)]:
+        graph = nx.path_graph(node_count)
+        if edge_count > graph.number_of_edges():
+            next_node = node_count
+            while graph.number_of_edges() < edge_count:
+                graph.add_edge(0, next_node)
+                next_node += 1
+        graphs.append(graph)
+    return graphs
+
+
+def _make_fitted_sampling_generator():
+    generator = EquilibriumMatchingDecompositionalGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=_Component(verbose=False),
+        graph_decoder=_Component(verbose=False),
+        verbose=False,
+    )
+    generator.fit(_sampling_graphs(), train_node_generator=False)
+    return generator
+
+
 def test_graph_generator_init_validates_inputs():
     with pytest.raises(ValueError, match="locality_sample_fraction"):
         EquilibriumMatchingDecompositionalGraphGenerator(locality_sample_fraction=0.0)
@@ -310,6 +335,176 @@ def test_build_node_batch_masks_presence_and_degrees():
     assert batch.node_presence_mask.shape == (1, 2)
     assert batch.node_presence_mask.tolist() == [[True, True]]
     assert batch.node_degree_targets.tolist() == [[1, 1]]
+
+
+def test_fit_stores_training_graph_conditioning_without_training_graph_copy():
+    generator = _make_fitted_sampling_generator()
+
+    assert generator.training_graph_conditioning_ is not None
+    assert not hasattr(generator, "training_graphs_")
+    np.testing.assert_array_equal(
+        generator.training_graph_conditioning_.node_counts,
+        np.asarray([2, 3, 4, 5], dtype=np.int64),
+    )
+
+
+def test_sample_conditions_direct_mode_returns_cached_rows(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+
+    monkeypatch.setattr(np.random, "choice", lambda *args, **kwargs: np.asarray([3, 1], dtype=np.int64))
+
+    conditioning = generator._sample_conditions(2)
+
+    np.testing.assert_array_equal(
+        conditioning.graph_embeddings,
+        generator.training_graph_conditioning_.graph_embeddings[[3, 1]],
+    )
+    np.testing.assert_array_equal(conditioning.node_counts, np.asarray([5, 3], dtype=np.int64))
+    np.testing.assert_array_equal(conditioning.edge_counts, np.asarray([4, 2], dtype=np.int64))
+
+
+def test_sample_conditions_interpolation_clamps_negative_cosine_and_interpolates_counts(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    generator.training_graph_conditioning_ = type(generator.training_graph_conditioning_)(
+        graph_embeddings=np.asarray(
+            [
+                [1.0, 0.0],
+                [-1.0, 0.0],
+                [0.0, 1.0],
+            ],
+            dtype=float,
+        ),
+        node_counts=np.asarray([2, 8, 4], dtype=np.int64),
+        edge_counts=np.asarray([1, 7, 3], dtype=np.int64),
+    )
+
+    choice_calls = iter(
+        [
+            np.asarray([0, 1, 2], dtype=np.int64),
+            2,
+        ]
+    )
+
+    def _fake_choice(*args, **kwargs):
+        del args, kwargs
+        return next(choice_calls)
+
+    monkeypatch.setattr(np.random, "choice", _fake_choice)
+    monkeypatch.setattr(np.random, "uniform", lambda *args, **kwargs: 0.25)
+
+    conditioning = generator._sample_conditions(1, interpolate_between_n_samples=3)
+
+    np.testing.assert_allclose(conditioning.graph_embeddings[0], np.asarray([0.75, 0.25], dtype=float))
+    np.testing.assert_array_equal(conditioning.node_counts, np.asarray([2], dtype=np.int64))
+    np.testing.assert_array_equal(conditioning.edge_counts, np.asarray([2], dtype=np.int64))
+
+
+def test_sample_conditions_interpolation_falls_back_to_uniform_pair_sampling_when_all_weights_zero(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    generator.training_graph_conditioning_ = type(generator.training_graph_conditioning_)(
+        graph_embeddings=np.asarray(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [0.0, -1.0],
+            ],
+            dtype=float,
+        ),
+        node_counts=np.asarray([2, 4, 6], dtype=np.int64),
+        edge_counts=np.asarray([1, 3, 5], dtype=np.int64),
+    )
+
+    sampled_probabilities = []
+    choice_calls = iter([np.asarray([0, 1, 2], dtype=np.int64), 1])
+
+    def _fake_choice(a, size=None, replace=None, p=None):
+        del size, replace
+        sampled_probabilities.append(p)
+        if isinstance(a, int):
+            return next(choice_calls)
+        return next(choice_calls)
+
+    monkeypatch.setattr(np.random, "choice", _fake_choice)
+    monkeypatch.setattr(np.random, "uniform", lambda *args, **kwargs: 0.5)
+
+    conditioning = generator._sample_conditions(1, interpolate_between_n_samples=3)
+
+    assert sampled_probabilities[-1] is None
+    np.testing.assert_array_equal(conditioning.node_counts, np.asarray([4], dtype=np.int64))
+    np.testing.assert_array_equal(conditioning.edge_counts, np.asarray([3], dtype=np.int64))
+
+
+def test_sample_conditions_rejects_invalid_interpolation_subset_size():
+    generator = _make_fitted_sampling_generator()
+
+    with pytest.raises(ValueError, match="interpolate_between_n_samples must be >= 2"):
+        generator._sample_conditions(1, interpolate_between_n_samples=1)
+
+
+def test_sample_conditions_single_cached_row_falls_back_to_direct_sampling(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    generator.training_graph_conditioning_ = type(generator.training_graph_conditioning_)(
+        graph_embeddings=np.asarray([[9.0, 4.0]], dtype=float),
+        node_counts=np.asarray([7], dtype=np.int64),
+        edge_counts=np.asarray([6], dtype=np.int64),
+    )
+
+    monkeypatch.setattr(np.random, "choice", lambda *args, **kwargs: np.asarray([0, 0], dtype=np.int64))
+
+    conditioning = generator._sample_conditions(2, interpolate_between_n_samples=10)
+
+    np.testing.assert_array_equal(conditioning.graph_embeddings, np.asarray([[9.0, 4.0], [9.0, 4.0]], dtype=float))
+    np.testing.assert_array_equal(conditioning.node_counts, np.asarray([7, 7], dtype=np.int64))
+    np.testing.assert_array_equal(conditioning.edge_counts, np.asarray([6, 6], dtype=np.int64))
+
+
+def test_sample_passes_direct_conditioning_to_decode(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del kwargs
+        captured["conditioning"] = graph_conditioning
+        return ["decoded"]
+
+    monkeypatch.setattr(generator, "_decode_with_feasibility", _fake_decode)
+
+    result = generator.sample(1)
+
+    assert result == ["decoded"]
+    np.testing.assert_array_equal(captured["conditioning"].node_counts, np.asarray([3], dtype=np.int64))
+
+
+def test_sample_passes_interpolation_parameter_to_condition_sampler(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    captured = {}
+
+    def _fake_sample_conditions(n_samples, interpolate_between_n_samples=None):
+        captured["n_samples"] = n_samples
+        captured["interpolate_between_n_samples"] = interpolate_between_n_samples
+        return type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        )
+
+    monkeypatch.setattr(generator, "_sample_conditions", _fake_sample_conditions)
+    monkeypatch.setattr(generator, "_decode_with_feasibility", lambda graph_conditioning, **kwargs: [graph_conditioning])
+
+    result = generator.sample(1, interpolate_between_n_samples=10)
+
+    assert len(result) == 1
+    assert captured == {"n_samples": 1, "interpolate_between_n_samples": 10}
 
 
 def test_optimize_adjacency_matrix_raises_when_solver_status_is_not_optimal(monkeypatch):
