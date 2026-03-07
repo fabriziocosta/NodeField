@@ -73,6 +73,15 @@ def plot_metrics(
     alpha: float = 0.55,
 ) -> None:
     """Visualise train/validation metrics with LOESS-smoothed overlays."""
+    raw_train_alpha = min(alpha * 0.35, 0.18)
+    raw_val_alpha = min(alpha * 0.45, 0.22)
+    smoothed_train_alpha = 0.7
+    smoothed_val_alpha = 1.0
+    raw_train_linewidth = 1.0
+    raw_val_linewidth = 1.1
+    smoothed_train_linewidth = 1.8
+    smoothed_val_linewidth = 3.0
+
     metrics = [
         name
         for name in train_metrics.keys()
@@ -103,7 +112,7 @@ def plot_metrics(
     fig, axes = plt.subplots(
         len(active_panels),
         1,
-        figsize=(16, fig_height),
+        figsize=(18, fig_height),
         sharex=True,
         squeeze=False,
     )
@@ -118,7 +127,7 @@ def plot_metrics(
         for metric_idx, name in enumerate(panel_metrics):
             metric_ax = ax if metric_idx == 0 else ax.twinx()
             if metric_idx > 0:
-                metric_ax.spines["right"].set_position(("outward", 50 * (metric_idx - 1)))
+                metric_ax.spines["right"].set_position(("outward", 72 * (metric_idx - 1)))
                 metric_ax.spines["right"].set_visible(True)
 
             color = color_by_metric[name]
@@ -128,24 +137,38 @@ def plot_metrics(
             train = train_vals[:count]
             val = val_vals[:count]
             epochs = np.arange(1, count + 1)
-            metric_ax.plot(epochs, train, color=color, alpha=alpha, linewidth=1.35)
-            metric_ax.plot(epochs, val, color=color, linestyle="--", alpha=alpha, linewidth=1.35)
+            metric_ax.plot(
+                epochs,
+                train,
+                color=color,
+                alpha=raw_train_alpha,
+                linewidth=raw_train_linewidth,
+            )
+            metric_ax.plot(
+                epochs,
+                val,
+                color=color,
+                alpha=raw_val_alpha,
+                linewidth=raw_val_linewidth,
+                linestyle="--",
+            )
             sm_train = _loess_smooth(train, window)
             sm_val = _loess_smooth(val, window)
             line_train, = metric_ax.plot(
                 epochs,
                 sm_train,
                 color=color,
-                linewidth=2.2,
-                label=f"Train {name} (LOESS)",
+                alpha=smoothed_train_alpha,
+                linewidth=smoothed_train_linewidth,
+                label=f"{name}: train",
             )
             line_val, = metric_ax.plot(
                 epochs,
                 sm_val,
                 color=color,
-                linewidth=2.2,
-                linestyle="--",
-                label=f"Val {name} (LOESS)",
+                alpha=smoothed_val_alpha,
+                linewidth=smoothed_val_linewidth,
+                label=f"{name}: val",
             )
             _style_log_axis(metric_ax)
             metric_ax.set_ylabel(name, color=color, rotation=90)
@@ -157,12 +180,12 @@ def plot_metrics(
                 metric_ax.yaxis.set_label_position("right")
                 metric_ax.yaxis.tick_right()
             lines += [line_train, line_val]
-            labels += [f"Train {name} (LOESS)", f"Val {name} (LOESS)"]
+            labels += [f"{name}: train", f"{name}: val"]
 
         ax.set_title(panel_title)
         ax.grid(True, which="both", linestyle="--", linewidth=0.5)
 
     flat_axes[-1].set_xlabel("Epoch")
     fig.legend(lines, labels, loc="upper center", ncol=max(min(len(lines), 6), 1), fontsize="small")
-    fig.subplots_adjust(left=0.08, right=0.74, top=0.90, hspace=0.28)
+    fig.subplots_adjust(left=0.08, right=0.68, top=0.90, hspace=0.30)
     plt.show()
