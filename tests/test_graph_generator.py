@@ -210,6 +210,26 @@ def test_toggle_verbose_updates_nested_components():
     assert decoder.verbose is True
 
 
+def test_accept_feasible_candidates_counts_all_feasible_and_fills_one_per_slot(monkeypatch):
+    accepted_graphs_by_slot = [None, None]
+    decoded_graphs = ["s0_a", "s0_b", "s1_a", "s1_b"]
+    feasibility_mask = [True, True, False, True]
+    candidate_slot_indices = [0, 0, 1, 1]
+
+    monkeypatch.setattr(np.random, "randint", lambda high: 1 if high == 2 else 0)
+
+    feasible_count, filled_now = ConditionalNodeFieldGraphGenerator._accept_feasible_candidates_by_slot(
+        decoded_graphs=decoded_graphs,
+        feasibility_mask=feasibility_mask,
+        candidate_slot_indices=candidate_slot_indices,
+        accepted_graphs_by_slot=accepted_graphs_by_slot,
+    )
+
+    assert feasible_count == 3
+    assert filled_now == 2
+    assert accepted_graphs_by_slot == ["s0_b", "s1_b"]
+
+
 def test_build_supervision_plan_modes_depend_on_labels_and_horizon():
     generator = ConditionalNodeFieldGraphGenerator(locality_horizon=2, verbose=False)
     node_label_targets = [np.asarray(["C", "C"], dtype=object), np.asarray(["C"], dtype=object)]

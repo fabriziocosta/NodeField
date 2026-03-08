@@ -1859,6 +1859,32 @@ class ConditionalNodeFieldGraphGenerator(object):
             edge_counts=np.repeat(np.asarray(graph_conditioning.edge_counts), repeats, axis=0),
         )
 
+    @staticmethod
+    def _accept_feasible_candidates_by_slot(
+        decoded_graphs: Sequence[nx.Graph],
+        feasibility_mask: Sequence[bool],
+        candidate_slot_indices: Sequence[int],
+        accepted_graphs_by_slot: List[Optional[nx.Graph]],
+    ) -> Tuple[int, int]:
+        """Count all feasible candidates, then fill each empty slot with one random feasible graph."""
+        feasible_candidates_by_slot: Dict[int, List[nx.Graph]] = {}
+        feasible_candidate_count = 0
+        for graph, is_feasible, slot_idx in zip(decoded_graphs, feasibility_mask, candidate_slot_indices):
+            if not is_feasible:
+                continue
+            feasible_candidate_count += 1
+            if accepted_graphs_by_slot[slot_idx] is None:
+                feasible_candidates_by_slot.setdefault(slot_idx, []).append(graph)
+
+        filled_now = 0
+        for slot_idx, graphs_for_slot in feasible_candidates_by_slot.items():
+            if not graphs_for_slot or accepted_graphs_by_slot[slot_idx] is not None:
+                continue
+            selected_idx = int(np.random.randint(len(graphs_for_slot)))
+            accepted_graphs_by_slot[slot_idx] = graphs_for_slot[selected_idx]
+            filled_now += 1
+        return feasible_candidate_count, filled_now
+
     def _decode_conditioning_batch(
         self,
         graph_conditioning: GraphConditioningBatch,
@@ -1937,6 +1963,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         pending_slot_indices = list(range(len(graph_conditioning)))
         attempt = 0
         total_generated = 0
+        total_feasible = 0
         while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
             attempt += 1
             candidate_conditioning = self._repeat_graph_conditioning(
@@ -1963,29 +1990,30 @@ class ConditionalNodeFieldGraphGenerator(object):
                     "Feasibility estimator returned a mask of unexpected length "
                     f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
                 )
-            accepted_this_round = set()
-            for local_idx, (graph, is_feasible) in enumerate(zip(decoded_graphs, feasibility_mask.tolist())):
-                slot_idx = candidate_slot_indices[local_idx]
-                if is_feasible and accepted_graphs_by_slot[slot_idx] is None:
-                    accepted_graphs_by_slot[slot_idx] = graph
-                    accepted_this_round.add(slot_idx)
+            feasible_now, filled_now = self._accept_feasible_candidates_by_slot(
+                decoded_graphs=decoded_graphs,
+                feasibility_mask=feasibility_mask.tolist(),
+                candidate_slot_indices=candidate_slot_indices,
+                accepted_graphs_by_slot=accepted_graphs_by_slot,
+            )
+            total_feasible += feasible_now
             rejected_slot_indices = [
                 slot_idx for slot_idx in pending_slot_indices if accepted_graphs_by_slot[slot_idx] is None
             ]
             if int(self.verbose) >= 1:
-                accepted_now = len(accepted_this_round)
-                rejected_now = len(rejected_slot_indices)
-                accepted_total = sum(graph is not None for graph in accepted_graphs_by_slot)
-                missing_total = len(graph_conditioning) - accepted_total
+                pending_now = len(rejected_slot_indices)
+                filled_total = sum(graph is not None for graph in accepted_graphs_by_slot)
+                missing_total = len(graph_conditioning) - filled_total
                 attempted_total = len(decoded_graphs)
-                acceptance_rate = (accepted_now / attempted_total) if attempted_total > 0 else 0.0
+                acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
                 print(
                     f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
                     f"generated={attempted_total:>4} | "
-                    f"accepted={accepted_now:>2} | "
-                    f"rejected={rejected_now:>2} | "
+                    f"accepted={feasible_now:>2} | "
+                    f"filled={filled_now:>2} | "
+                    f"pending_slots={pending_now:>2} | "
                     f"rate={acceptance_rate:>6.1%} | "
-                    f"accepted_total={accepted_total:>2} | "
+                    f"filled_total={filled_total:>2} | "
                     f"missing_total={missing_total:>2}"
                 )
             if not rejected_slot_indices:
@@ -1998,11 +2026,12 @@ class ConditionalNodeFieldGraphGenerator(object):
 
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if int(self.verbose) >= 1:
-            overall_rate = (accepted_count / total_generated) if total_generated > 0 else 0.0
+            overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
             print(
                 "Feasibility filtering summary: "
-                f"generated={total_generated}, accepted={accepted_count}, "
-                f"acceptance_rate={overall_rate:.1%}."
+                f"generated={total_generated}, accepted={total_feasible}, "
+                f"acceptance_rate={overall_rate:.1%}, "
+                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
             )
         return accepted_graphs_by_slot
 
@@ -2133,6 +2162,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         pending_slot_indices = list(range(len(graph_conditioning)))
         attempt = 0
         total_generated = 0
+        total_feasible = 0
         while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
             attempt += 1
             candidate_conditioning = self._repeat_graph_conditioning(
@@ -2159,29 +2189,30 @@ class ConditionalNodeFieldGraphGenerator(object):
                     "Feasibility estimator returned a mask of unexpected length "
                     f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
                 )
-            accepted_this_round = set()
-            for local_idx, (graph, is_feasible) in enumerate(zip(decoded_graphs, feasibility_mask.tolist())):
-                slot_idx = candidate_slot_indices[local_idx]
-                if is_feasible and accepted_graphs_by_slot[slot_idx] is None:
-                    accepted_graphs_by_slot[slot_idx] = graph
-                    accepted_this_round.add(slot_idx)
+            feasible_now, filled_now = self._accept_feasible_candidates_by_slot(
+                decoded_graphs=decoded_graphs,
+                feasibility_mask=feasibility_mask.tolist(),
+                candidate_slot_indices=candidate_slot_indices,
+                accepted_graphs_by_slot=accepted_graphs_by_slot,
+            )
+            total_feasible += feasible_now
             rejected_slot_indices = [
                 slot_idx for slot_idx in pending_slot_indices if accepted_graphs_by_slot[slot_idx] is None
             ]
             if int(self.verbose) >= 1:
-                accepted_now = len(accepted_this_round)
-                rejected_now = len(rejected_slot_indices)
-                accepted_total = sum(graph is not None for graph in accepted_graphs_by_slot)
-                missing_total = len(graph_conditioning) - accepted_total
+                pending_now = len(rejected_slot_indices)
+                filled_total = sum(graph is not None for graph in accepted_graphs_by_slot)
+                missing_total = len(graph_conditioning) - filled_total
                 attempted_total = len(decoded_graphs)
-                acceptance_rate = (accepted_now / attempted_total) if attempted_total > 0 else 0.0
+                acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
                 print(
                     f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
                     f"generated={attempted_total:>4} | "
-                    f"accepted={accepted_now:>2} | "
-                    f"rejected={rejected_now:>2} | "
+                    f"accepted={feasible_now:>2} | "
+                    f"filled={filled_now:>2} | "
+                    f"pending_slots={pending_now:>2} | "
                     f"rate={acceptance_rate:>6.1%} | "
-                    f"accepted_total={accepted_total:>2} | "
+                    f"filled_total={filled_total:>2} | "
                     f"missing_total={missing_total:>2}"
                 )
             if not rejected_slot_indices:
@@ -2194,11 +2225,12 @@ class ConditionalNodeFieldGraphGenerator(object):
 
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if int(self.verbose) >= 1:
-            overall_rate = (accepted_count / total_generated) if total_generated > 0 else 0.0
+            overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
             print(
                 "Feasibility filtering summary: "
-                f"generated={total_generated}, accepted={accepted_count}, "
-                f"acceptance_rate={overall_rate:.1%}."
+                f"generated={total_generated}, accepted={total_feasible}, "
+                f"acceptance_rate={overall_rate:.1%}, "
+                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
             )
         return accepted_graphs_by_slot
 
@@ -2292,6 +2324,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         pending_slot_indices = list(range(len(graph_conditioning)))
         attempt = 0
         total_generated = 0
+        total_feasible = 0
         while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
             attempt += 1
             candidate_conditioning = self._repeat_graph_conditioning(
@@ -2318,29 +2351,30 @@ class ConditionalNodeFieldGraphGenerator(object):
                     "Feasibility estimator returned a mask of unexpected length "
                     f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
                 )
-            accepted_this_round = set()
-            for local_idx, (graph, is_feasible) in enumerate(zip(decoded_graphs, feasibility_mask.tolist())):
-                slot_idx = candidate_slot_indices[local_idx]
-                if is_feasible and accepted_graphs_by_slot[slot_idx] is None:
-                    accepted_graphs_by_slot[slot_idx] = graph
-                    accepted_this_round.add(slot_idx)
+            feasible_now, filled_now = self._accept_feasible_candidates_by_slot(
+                decoded_graphs=decoded_graphs,
+                feasibility_mask=feasibility_mask.tolist(),
+                candidate_slot_indices=candidate_slot_indices,
+                accepted_graphs_by_slot=accepted_graphs_by_slot,
+            )
+            total_feasible += feasible_now
             rejected_slot_indices = [
                 slot_idx for slot_idx in pending_slot_indices if accepted_graphs_by_slot[slot_idx] is None
             ]
             if int(self.verbose) >= 1:
-                accepted_now = len(accepted_this_round)
-                rejected_now = len(rejected_slot_indices)
-                accepted_total = sum(graph is not None for graph in accepted_graphs_by_slot)
-                missing_total = len(graph_conditioning) - accepted_total
+                pending_now = len(rejected_slot_indices)
+                filled_total = sum(graph is not None for graph in accepted_graphs_by_slot)
+                missing_total = len(graph_conditioning) - filled_total
                 attempted_total = len(decoded_graphs)
-                acceptance_rate = (accepted_now / attempted_total) if attempted_total > 0 else 0.0
+                acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
                 print(
                     f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
                     f"generated={attempted_total:>4} | "
-                    f"accepted={accepted_now:>2} | "
-                    f"rejected={rejected_now:>2} | "
+                    f"accepted={feasible_now:>2} | "
+                    f"filled={filled_now:>2} | "
+                    f"pending_slots={pending_now:>2} | "
                     f"rate={acceptance_rate:>6.1%} | "
-                    f"accepted_total={accepted_total:>2} | "
+                    f"filled_total={filled_total:>2} | "
                     f"missing_total={missing_total:>2}"
                 )
             if not rejected_slot_indices:
@@ -2353,11 +2387,12 @@ class ConditionalNodeFieldGraphGenerator(object):
 
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if int(self.verbose) >= 1:
-            overall_rate = (accepted_count / total_generated) if total_generated > 0 else 0.0
+            overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
             print(
                 "Feasibility filtering summary: "
-                f"generated={total_generated}, accepted={accepted_count}, "
-                f"acceptance_rate={overall_rate:.1%}."
+                f"generated={total_generated}, accepted={total_feasible}, "
+                f"acceptance_rate={overall_rate:.1%}, "
+                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
             )
         return accepted_graphs_by_slot
 
