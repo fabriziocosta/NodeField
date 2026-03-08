@@ -1,11 +1,8 @@
-"""Compatibility wrapper for notebook helper utilities."""
+"""Demo-oriented helpers for notebook workflows."""
 
-from conditional_node_field_graph_generator.extensions.demo.storage import (
-    list_saved_graph_generators,
-    load_graph_generator,
-    save_graph_generator,
-)
-from conditional_node_field_graph_generator.extensions.demo.visualization import (
+from .pipeline import build_dataset, build_graph_generator, prepare_experiment
+from .storage import list_saved_graph_generators, load_graph_generator, save_graph_generator
+from .visualization import (
     compare_real_vs_generated,
     fit_graph_generator,
     infer_display_mode,
@@ -22,6 +19,8 @@ from conditional_node_field_graph_generator.extensions.demo.visualization import
 )
 
 __all__ = [
+    "build_dataset",
+    "build_graph_generator",
     "compare_real_vs_generated",
     "fit_graph_generator",
     "infer_display_mode",
@@ -32,6 +31,7 @@ __all__ = [
     "plot_networkx_graphs",
     "plot_sample",
     "plot_similarity_distribution_with_iqr",
+    "prepare_experiment",
     "run_label_histogram_analysis",
     "sample_positive_endpoint_pair",
     "save_graph_generator",

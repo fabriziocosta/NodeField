@@ -439,6 +439,7 @@ fit(
     node_batch: NodeGenerationBatch,
     graph_conditioning: GraphConditioningBatch,
     targets: Optional[Sequence[Any]] = None,
+    ckpt_path: Optional[str] = None,
 )
 ```
 
@@ -454,6 +455,11 @@ Parameters:
   Optional target values used to activate and train CFG target-conditioning channels.
   Provide targets: enables CFG-capable training only if `cfg_target_mode` was set explicitly on the generator.
   Omit targets: trains without CFG target channels.
+
+- `ckpt_path`
+  Optional Lightning checkpoint path used to resume training state.
+  Provide a checkpoint path: resumes epoch/optimizer/trainer state from that checkpoint instead of starting fresh.
+  Omit it: starts a new training run while still writing fresh checkpoints under `checkpoint_root_dir`.
 
 #### `predict(...)`
 
@@ -819,6 +825,7 @@ fit(
     graphs: List[nx.Graph],
     train_node_generator: bool = True,
     targets: Optional[Sequence[Any]] = None,
+    ckpt_path: Optional[str] = None,
 ) -> ConditionalNodeFieldGraphGenerator
 ```
 
@@ -837,6 +844,11 @@ Parameters:
   Provide targets: enables CFG support in the fitted generator only if `cfg_target_mode` was configured explicitly
   on the node generator.
   Omit targets: no CFG target-conditioning path is trained.
+
+- `ckpt_path`
+  Optional checkpoint path forwarded to the underlying node generator fit call.
+  Provide a checkpoint path: resumes node-generator training from that checkpoint.
+  Omit it: trains from scratch.
 
 #### `encode(...)`
 

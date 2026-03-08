@@ -1388,6 +1388,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         graphs: List[nx.Graph],
         train_node_generator: bool = True,
         targets: Optional[Sequence[Any]] = None,
+        ckpt_path: Optional[str] = None,
     ) -> 'ConditionalNodeFieldGraphGenerator':
         if self.verbose:
             print(f"Fitting model on {len(graphs)} graphs")
@@ -1486,6 +1487,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                 node_batch=node_batch,
                 graph_conditioning=graph_conditioning,
                 targets=targets,
+                ckpt_path=ckpt_path,
             )
 
         self.is_fitted_ = True

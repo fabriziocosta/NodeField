@@ -45,7 +45,7 @@ def timeit(func):
     return wrapper
 
 
-def run_trainer_fit(trainer, model, train_loader, val_loader, context: str) -> None:
+def run_trainer_fit(trainer, model, train_loader, val_loader, context: str, ckpt_path: str | None = None) -> None:
     """Run Lightning training while surfacing notebook-hostile SystemExit failures."""
     try:
         with warnings.catch_warnings():
@@ -57,7 +57,12 @@ def run_trainer_fit(trainer, model, train_loader, val_loader, context: str) -> N
                 "ignore",
                 message=r"Starting from v1\.9\.0, `tensorboardX` has been removed as a dependency.*",
             )
-            trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+            trainer.fit(
+                model,
+                train_dataloaders=train_loader,
+                val_dataloaders=val_loader,
+                ckpt_path=ckpt_path,
+            )
     except SystemExit as exc:
         code = exc.code if exc.code is not None else "None"
         argv_preview = " ".join(sys.argv[:5])

@@ -30,6 +30,14 @@ This is the interface reference for the main public classes. It summarizes the c
 
 This is a local development conventions file. It covers documentation and notebook preferences rather than the model itself.
 
+[`docs/extensions/molecular/README.md`](docs/extensions/molecular/README.md)
+
+This extension document covers the chemistry-specific support layer. It points to the molecular conversion, dataset, and visualization utilities used for PubChem, ZINC, and notebook molecule workflows.
+
+[`docs/extensions/synthetic/README.md`](docs/extensions/synthetic/README.md)
+
+This extension document covers the synthetic-graph support layer. It points to the artificial graph primitives, synthetic dataset builders, and graph-composition helpers used mainly in demos and tests.
+
 The repository includes:
 - A trainable conditional node generator.
 - A graph-level generator that handles encoding, supervision construction, and decoding.
@@ -52,6 +60,11 @@ NodeField/
 │   ├── 2_CONDITIONAL_NODE_FIELD_README.md
 │   ├── 3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md
 │   ├── 4_MAIN_CLASS_INTERFACES_README.md
+│   ├── extensions/
+│   │   ├── molecular/
+│   │   │   └── README.md
+│   │   └── synthetic/
+│   │       └── README.md
 │   └── PREFERENCES.md
 ├── notebooks/
 │   ├── demo.ipynb
@@ -79,7 +92,7 @@ Key paths:
   Shared utilities, runtime helpers, and artificial graph/data constructors.
 
 - `docs/`
-  Technical documentation for the model, public interfaces, graph generator, decoder, and local development conventions.
+  Technical documentation for the model, public interfaces, graph generator, decoder, extension layers, and local development conventions.
 
 - `notebooks/`
   Demo and experiment notebooks, plus notebook-specific helper code.
@@ -120,6 +133,8 @@ Typical high-level workflow:
 4. Wrap it in `ConditionalNodeFieldGraphGenerator` (optionally with a decoder).
 5. Train with `.fit(...)`.
 6. Generate with `.sample(...)` or `.sample_conditioned_on_random(...)`.
+
+If training is interrupted, you can resume the training state by passing `ckpt_path=...` to `.fit(...)`, provided you point to one of the Lightning checkpoints written under the configured checkpoint root.
 
 By default, `.sample(...)` reuses cached graph-level conditioning rows from the training set. It can also be configured to stochastically interpolate between pairs of cached training embeddings in graph-conditioning space, with the same interpolation coefficient applied to graph embeddings, node counts, and edge counts.
 

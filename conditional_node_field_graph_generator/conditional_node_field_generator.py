@@ -2217,7 +2217,12 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         node_batch: NodeGenerationBatch,
         graph_conditioning: GraphConditioningBatch,
         targets: Optional[Sequence[Any]] = None,
+        ckpt_path: Optional[str] = None,
     ):
+        if ckpt_path is not None:
+            ckpt_path = os.path.expanduser(str(ckpt_path))
+            if not os.path.isfile(ckpt_path):
+                raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
         node_encodings_list = node_batch.node_embeddings_list
         edge_pairs = node_batch.edge_pairs
         edge_targets = node_batch.edge_targets
@@ -2329,6 +2334,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                     train_loader,
                     val_loader,
                     context=f"{self.__class__.__name__}.fit",
+                    ckpt_path=ckpt_path,
                 )
         else:
             run_trainer_fit(
@@ -2337,6 +2343,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 train_loader,
                 val_loader,
                 context=f"{self.__class__.__name__}.fit",
+                ckpt_path=ckpt_path,
             )
         self.best_checkpoint_path_ = checkpoint_callback.best_model_path or None
         best_score = checkpoint_callback.best_model_score

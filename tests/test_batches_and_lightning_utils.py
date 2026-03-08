@@ -47,12 +47,12 @@ class _OkTrainer:
     def __init__(self):
         self.called_with = None
 
-    def fit(self, model, train_dataloaders=None, val_dataloaders=None):
-        self.called_with = (model, train_dataloaders, val_dataloaders)
+    def fit(self, model, train_dataloaders=None, val_dataloaders=None, ckpt_path=None):
+        self.called_with = (model, train_dataloaders, val_dataloaders, ckpt_path)
 
 
 class _ExitTrainer:
-    def fit(self, model, train_dataloaders=None, val_dataloaders=None):
+    def fit(self, model, train_dataloaders=None, val_dataloaders=None, ckpt_path=None):
         raise SystemExit(2)
 
 
@@ -64,7 +64,25 @@ def test_run_trainer_fit_calls_fit_with_named_loaders():
 
     run_trainer_fit(trainer, model, train_loader, val_loader, context="unit-test")
 
-    assert trainer.called_with == (model, train_loader, val_loader)
+    assert trainer.called_with == (model, train_loader, val_loader, None)
+
+
+def test_run_trainer_fit_forwards_checkpoint_path():
+    trainer = _OkTrainer()
+    model = object()
+    train_loader = object()
+    val_loader = object()
+
+    run_trainer_fit(
+        trainer,
+        model,
+        train_loader,
+        val_loader,
+        context="unit-test",
+        ckpt_path="/tmp/resume.ckpt",
+    )
+
+    assert trainer.called_with == (model, train_loader, val_loader, "/tmp/resume.ckpt")
 
 
 def test_run_trainer_fit_wraps_system_exit():
@@ -76,8 +94,8 @@ class _WarnTrainer:
     def __init__(self):
         self.called = False
 
-    def fit(self, model, train_dataloaders=None, val_dataloaders=None):
-        del model, train_dataloaders, val_dataloaders
+    def fit(self, model, train_dataloaders=None, val_dataloaders=None, ckpt_path=None):
+        del model, train_dataloaders, val_dataloaders, ckpt_path
         self.called = True
         warnings.warn(
             "The 'train_dataloader' does not have many workers which may be a bottleneck. "

@@ -46,6 +46,19 @@ class _Component:
         self.verbose = verbose
 
 
+class _TrainableNodeModel(_Component):
+    def __init__(self, verbose=False):
+        super().__init__(verbose=verbose)
+        self.setup_calls = []
+        self.fit_calls = []
+
+    def setup(self, **kwargs):
+        self.setup_calls.append(kwargs)
+
+    def fit(self, **kwargs):
+        self.fit_calls.append(kwargs)
+
+
 def _labeled_graph():
     graph = nx.Graph()
     graph.add_node(0, label="C")
@@ -162,6 +175,23 @@ def test_fit_requires_graph_decoder_when_training_enabled():
 
     with pytest.raises(ValueError, match="requires graph_decoder"):
         generator.fit([_labeled_graph()], train_node_generator=True)
+
+
+def test_fit_forwards_resume_checkpoint_path_to_node_generator():
+    node_model = _TrainableNodeModel(verbose=False)
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False),
+        verbose=False,
+    )
+
+    generator.fit([_labeled_graph()], train_node_generator=True, ckpt_path="/tmp/resume.ckpt")
+
+    assert len(node_model.setup_calls) == 1
+    assert len(node_model.fit_calls) == 1
+    assert node_model.fit_calls[0]["ckpt_path"] == "/tmp/resume.ckpt"
 
 
 def test_toggle_verbose_updates_nested_components():
