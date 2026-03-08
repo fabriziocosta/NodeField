@@ -7,11 +7,15 @@ The implementation lives primarily in
 
 ## Documentation Map
 
-This document is the main conceptual reference for the Conditional Node Field model itself: what it is optimizing, how conditioning enters, how sampling works, and how CFG and separate post-hoc guidance fit into the generator.
+This document is the main conceptual reference for the Conditional Node Field model itself: what it is optimizing, how conditioning enters, how sampling works, and how the generator behaves structurally. The dedicated target-guidance discussion now lives in [`4_TARGET_GUIDANCE_README.md`](4_TARGET_GUIDANCE_README.md).
 
 The rest of the documentation is organized around the other layers of the stack:
 
-[`4_MAIN_CLASS_INTERFACES_README.md`](4_MAIN_CLASS_INTERFACES_README.md)
+[`4_TARGET_GUIDANCE_README.md`](4_TARGET_GUIDANCE_README.md)
+
+This document is the dedicated reference for the two supported target-guidance routes: classifier-free guidance (CFG) and separate post-hoc guidance through an auxiliary classifier or regressor.
+
+[`5_MAIN_CLASS_INTERFACES_README.md`](5_MAIN_CLASS_INTERFACES_README.md)
 
 This is the API reference. It collects the main public classes in one place, shows their primary constructors and workflow methods, explains the meaning of each important parameter, and summarizes the practical effect of increasing or decreasing those parameters. Use it when you want a user-facing interface guide rather than the modeling details.
 
@@ -738,214 +742,14 @@ where:
 
 This can improve diversity at the cost of noisier trajectories.
 
-## Guidance Support
+## Target Guidance
 
-The maintained implementation supports both guidance routes:
+The maintained implementation supports both:
 
-- classifier-free guidance (CFG) over explicit target-conditioning channels,
-- separate post-hoc guidance through an auxiliary classifier or regressor.
+- classifier-free guidance (CFG) over explicit target-conditioning channels
+- separate post-hoc guidance through an auxiliary classifier or regressor
 
-They are both first-class features in this repository, but they are intentionally exposed through
-different APIs because they operate differently at training and sampling time.
-
-### What Each Mode Means
-
-Classifier-free guidance trains the generator itself to work with and without the requested target
-conditioning, then mixes those two score evaluations during sampling.
-
-Separate post-hoc guidance leaves the generator sampling model unchanged and instead adds a gradient
-from a separately trained predictor during sampling.
-
-### Why Both Exist
-
-CFG is useful when the target should be part of the generator's native conditioning interface.
-
-Separate post-hoc guidance is useful when a pretrained generator should later be steered toward
-different downstream classification or regression objectives without retraining the generator.
-
-## Classifier-Free Conditioning
-
-The first supported guidance route is classifier-free guidance over explicit target-conditioning channels.
-
-This is not limited to classifier-free guidance. In the diffusion and score-based
-literature, the alternative post-hoc route is usually called `classifier guidance`: first train the generative
-model in the ordinary way, then train a separate predictor, and during sampling add a target-seeking
-gradient derived from that auxiliary model. For classification targets, that guidance takes the form
-
-```math
-g_{\mathrm{guided}}(x, c, y)
-\approx
-g_\theta(x, c)
-+
-\lambda \nabla_x \log p_\psi(y \mid x, c)
-```
-
-where:
-
-- $g_\theta(x, c)$ is the score from the generative model,
-- $p_\psi(y \mid x, c)$ is the separately trained classifier,
-- $\lambda$ controls how strongly sampling is pushed toward the requested target.
-
-For regression targets, the same idea becomes a post-hoc regressor objective, for example
-
-```math
-g_{\mathrm{guided}}(x, c, y^\star)
-\approx
-g_\theta(x, c)
-- \lambda \nabla_x \ell(r_\psi(x, c), y^\star)
-```
-
-where:
-
-- $r_\psi(x, c)$ is a separately trained regressor,
-- $y^\star$ is the desired scalar target,
-- $\ell$ can be a squared-error penalty that is minimized by guidance.
-
-The important distinction is that post-hoc guidance leaves the generator training unchanged and injects
-target pressure only at sampling time through the auxiliary predictor. By contrast, classifier-free guidance
-trains the generative model itself to operate with and without the target condition, then combines those
-two branches during sampling. The maintained implementation in this repository supports both routes, but
-keeps them on separate APIs so the workflows do not blur together.
-
-One practical advantage of post-hoc guidance is modularity: a generator can be pretrained once as a
-general conditional or unconditional model, and separate task-specific classifiers or regressors can be attached later for
-many different objectives without retraining the generator itself. That can be attractive when the same
-base generator is meant to support multiple downstream optimization or property-targeting tasks. The
-tradeoff is that sampling then depends on an additional predictor whose gradients must remain informative
-along the full noisy or iterative generation trajectory.
-
-Instead, the model can be trained with optional target-conditioning channels appended to the graph-level
-condition vector and can later interpolate between:
-
-- a conditional score using the requested target,
-- an unconditional score using a null version of those target channels.
-
-Conceptually, if the ordinary graph condition is:
-
-$$
-c
-$$
-
-and the optional target-conditioning channels are:
-
-$$
-t
-$$
-
-then the model is trained on an augmented condition:
-
-$$
-[\; c, t \;]
-$$
-
-When an unconditional branch is needed, the implementation keeps the base graph condition and nulls only
-the target-guidance slice:
-
-$$
-[\; c, 0 \;]
-$$
-
-This design is deliberate. The graph embedding, node count, and edge count still describe the requested
-graph context. Only the optional target request is removed.
-
-### Training Behavior
-
-Classifier-free conditioning is activated only when guidance is enabled in the wrapper and target values
-are provided during `fit()`.
-
-At that point the wrapper:
-
-- determines the target-conditioning width from the target encoding
-  (1 feature for regression, one-hot width for classification),
-- appends those features to the scaled graph condition array,
-- randomly drops them on a subset of training examples,
-- records that dropped examples should use the null target condition.
-
-Operationally, this teaches the same model to score both:
-
-$$
-g_\theta(x, [c, t])
-$$
-
-and
-
-$$
-g_\theta(x, [c, 0])
-$$
-
-using one shared backbone.
-
-The exact target semantics depend on the task-level targets passed through the sklearn-style wrapper, but
-the mechanism is always the same: preserve the graph context, optionally erase the target request, and let
-the model learn both regimes.
-
-### Sampling Behavior
-
-At inference time, classifier-free guidance is used only when:
-
-- guidance was enabled and trained,
-- `desired_target` is passed to `predict()` or the graph-generator decode/sample path,
-- `guidance_scale` is nonnegative.
-
-The implementation evaluates both branches and combines them as:
-
-```math
-g_{\mathrm{cfg}}(x, c, t)
-=
-g_\theta(x, [c, 0])
-+
-s \left(
-g_\theta(x, [c, t]) - g_\theta(x, [c, 0])
-\right)
-```
-
-where:
-
-- $s$ is `guidance_scale`,
-- $g_\theta(x, [c, t])$ is the conditional score,
-- $g_\theta(x, [c, 0])$ is the unconditional score.
-
-So:
-
-- `guidance_scale = 0` reduces to the unconditional score,
-- `guidance_scale = 1` uses the ordinary conditional score,
-- `guidance_scale > 1` amplifies the target-driven component.
-
-In the code, this is implemented inside the Conditional Node Field sampling loop by supplying both
-`global_condition` and `global_condition_unconditional`.
-
-### API Surface
-
-The maintained implementation supports both guidance strategies and keeps them separate in the public API.
-
-Classifier-free guidance uses the existing target-conditioning API:
-
-- configure the path explicitly at construction time with `cfg_target_mode="classification"` or
-  `cfg_target_mode="regression"`
-- node generator: `predict(..., desired_target=..., guidance_scale=...)`
-- graph generator: `decode(...)`, `sample(...)`, `conditional_sample(...)`
-
-Post-hoc guidance uses a separate predictor API:
-
-- generic training: `set_guidance_predictor(...)`, `train_guidance_predictor(...)`
-- classification training aliases: `set_guidance_classifier(...)`, `train_guidance_classifier(...)`
-- node generator classification: `predict_classifier_guided(..., desired_class=..., classifier_scale=...)`
-- node generator regression: `predict_regression_guided(..., desired_target=..., predictor_scale=...)`
-- graph generator classification: `decode_classifier_guided(...)`, `sample_classifier_guided(...)`,
-  `conditional_sample_classifier_guided(...)`
-- graph generator regression: `decode_regression_guided(...)`, `sample_regression_guided(...)`,
-  `conditional_sample_regression_guided(...)`
-
-If `desired_target` is omitted, CFG generation falls back to the ordinary unguided conditional path even
-when the model was trained with CFG support.
-
-If post-hoc guidance is requested, the generator uses the null-target branch for the generative condition
-and injects target pressure only through the separate predictor gradient.
-
-The implementation does not combine both mechanisms in a single sampling call. Choose either:
-
-- CFG through `desired_target` plus `guidance_scale`, or
-- post-hoc classifier/regression guidance through the predictor-specific guided methods.
+The full discussion of how those two routes differ, how they are trained, how they are used at sampling time, and how the public APIs are separated now lives in [`4_TARGET_GUIDANCE_README.md`](4_TARGET_GUIDANCE_README.md).
 
 ## Final Projection at Inference
 

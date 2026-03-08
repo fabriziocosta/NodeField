@@ -1,10 +1,10 @@
 # Conditional Node Field for Graph Generation
 
-NodeField is a conditional graph generation framework based on decompositional encoding and decoding, coupled with stationary node-field dynamics. Its central premise is to use an explicit graph kernel to derive node embeddings without end-to-end training while incorporating user-defined priors, thereby enabling the rapid injection of structured prior knowledge independently of the available data.
+NodeField is a conditional graph generation framework based on decompositional encoding and decoding, coupled with stationary node-field dynamics. Its central premise is to use an explicit graph kernel to derive node embeddings without end-to-end training while incorporating user-defined priors, thereby enabling the rapid injection of structured prior knowledge independently of the available data. The framework supports both classifier-free guidance (CFG) for target-conditioned sampling and separate post-hoc guidance through an auxiliary classifier or regressor.
 
 The framework uses two distinct vectorization processes: one to derive node embeddings, and another to construct a graph-level context vector used as conditioning information. These representations need not coincide and may capture substantially different aspects of the graph. Conditioned on this graph-level context, which acts as an explicit latent representation, the model employs a conditional energy-based generator trained through denoising score matching under Gaussian corruption and sampled via Langevin-style dynamics. Unlike diffusion-based methods, this formulation does not rely on an explicit time variable or a reverse diffusion schedule. The explicit latent space further supports operations such as interpolation, which can be translated into meaningful graph interpolations.
 
-Training is supplemented by auxiliary objectives, including node-degree prediction, node-label prediction, edge-label prediction, and edge-existence prediction. The resulting structural and semantic predictions are passed to a decoder that reconstructs the final graph through constrained combinatorial optimization, formulated as an integer programming problem that reconciles predicted degrees and edge probabilities in a globally coherent manner.
+Training is supplemented by auxiliary objectives, including node-degree prediction, node-label prediction, edge-label prediction, and edge-existence prediction. At sampling time, the model can either use CFG on the target-conditioning path or use a separately trained post-hoc guidance predictor, depending on the workflow. The resulting structural and semantic predictions are passed to a decoder that reconstructs the final graph through constrained combinatorial optimization, formulated as an integer programming problem that reconciles predicted degrees and edge probabilities in a globally coherent manner.
 
 ## Documentation
 
@@ -16,13 +16,17 @@ This document focuses on the graph-generator orchestration layer. It explains ho
 
 [`docs/2_CONDITIONAL_NODE_FIELD_README.md`](docs/2_CONDITIONAL_NODE_FIELD_README.md)
 
-This is the main conceptual and modeling document. It explains the Conditional Node Field formulation itself, including the score-matching objective, the stationary energy-based interpretation, the conditioning pathway, the iterative sampling dynamics, and the distinction between classifier-free guidance and separate post-hoc guidance.
+This is the main conceptual and modeling document. It explains the Conditional Node Field formulation itself, including the score-matching objective, the stationary energy-based interpretation, the conditioning pathway, and the iterative sampling dynamics. The dedicated discussion of target guidance is separated into its own document.
 
 [`docs/3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md`](docs/3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md)
 
 This document covers the decoder and constraint-solving stage. It explains how node-level predictions are converted into final `networkx` graphs, how edge probabilities and predicted degrees are reconciled, how connectivity constraints are enforced, and how the ILP-based adjacency projection behaves.
 
-[`docs/4_MAIN_CLASS_INTERFACES_README.md`](docs/4_MAIN_CLASS_INTERFACES_README.md)
+[`docs/4_TARGET_GUIDANCE_README.md`](docs/4_TARGET_GUIDANCE_README.md)
+
+This document is dedicated to target guidance. It explains the two supported approaches, classifier-free guidance (CFG) and separate post-hoc guidance through an auxiliary classifier or regressor, and makes the API split between them explicit.
+
+[`docs/5_MAIN_CLASS_INTERFACES_README.md`](docs/5_MAIN_CLASS_INTERFACES_README.md)
 
 This is the interface reference for the main public classes. It summarizes the constructor and workflow methods for the batch dataclasses, the node generator, the graph decoder, and the graph generator, and it explains what the main parameters mean together with the practical effect of increasing or decreasing them.
 
@@ -59,7 +63,8 @@ NodeField/
 │   ├── 1_CONDITIONAL_NODE_FIELD_GRAPH_GENERATOR_README.md
 │   ├── 2_CONDITIONAL_NODE_FIELD_README.md
 │   ├── 3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md
-│   ├── 4_MAIN_CLASS_INTERFACES_README.md
+│   ├── 4_TARGET_GUIDANCE_README.md
+│   ├── 5_MAIN_CLASS_INTERFACES_README.md
 │   ├── extensions/
 │   │   ├── molecular/
 │   │   │   └── README.md
@@ -140,7 +145,7 @@ By default, `.sample(...)` reuses cached graph-level conditioning rows from the 
 
 When guidance targets are available, sampling can also use classifier-free conditioning through
 `desired_target` and `guidance_scale`. The detailed mechanics are documented in
-[`docs/2_CONDITIONAL_NODE_FIELD_README.md`](docs/2_CONDITIONAL_NODE_FIELD_README.md).
+[`docs/4_TARGET_GUIDANCE_README.md`](docs/4_TARGET_GUIDANCE_README.md).
 
 Notebook examples:
 - `notebooks/demo.ipynb`
