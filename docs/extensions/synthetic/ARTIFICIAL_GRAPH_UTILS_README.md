@@ -10,11 +10,6 @@ The maintained implementation now lives in:
 - [`conditional_node_field_graph_generator/extensions/synthetic/datasets.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/datasets.py)
 - [`conditional_node_field_graph_generator/extensions/synthetic/composition.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/composition.py)
 
-The root-level files remain available only as compatibility wrappers:
-- [`synthetic_graph_primitives.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/synthetic_graph_primitives.py)
-- [`synthetic_graph_datasets.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/synthetic_graph_datasets.py)
-- [`graph_composition.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/graph_composition.py)
-
 ## Main Responsibilities
 
 ### 1. Primitive synthetic graph samplers

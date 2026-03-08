@@ -7,7 +7,7 @@ The tests are mostly unit and small integration checks. They are designed to pro
 - supervision and batching logic
 - guidance-path behavior
 - decoder invariants
-- lightweight notebook/helper utilities
+- extension helper behavior
 - local molecular helper behavior
 
 The suite is intentionally biased toward fast, deterministic checks rather than long end-to-end training runs.
@@ -56,10 +56,20 @@ This module checks the verbose timing helpers:
 
 [`tests/test_interpolate.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_interpolate.py)
 
-This module covers lightweight interpolation and notebook-helper behavior:
+This module covers lightweight interpolation and demo-extension behavior:
 - integer interpolation utilities
 - positive-endpoint sampling for interpolation demos
 - summary object structure for interpolation results
+
+[`tests/test_demo_extension.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_demo_extension.py)
+
+This module covers the demo extension directly:
+- dataset split orchestration
+- resume-argument validation
+- display-mode inference
+- positive/negative graph selection helpers
+- temporary decoder parallelism overrides
+- comparison-summary generation for real vs generated graphs
 
 [`tests/test_molecular_graph_utils.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_molecular_graph_utils.py)
 
@@ -113,8 +123,8 @@ pytest -q -k interpolate
 
 - Some tests rely on bundled local assay files under `notebooks/datasets/PUBCHEM/`.
 - The molecular tests are still lightweight, but they can be slower than the pure unit tests because they parse local SDF files.
-- Notebook behavior is tested only through selected helper functions, not by replaying full notebooks.
-- The remaining tests increasingly target the extension and core modules directly rather than transitional compatibility layers.
+- Notebook behavior is tested only indirectly through core and extension helper functions, not by replaying full notebooks.
+- The suite targets only core package modules and extension package modules; it no longer targets transitional compatibility layers.
 
 ## Intended Role Of This Directory
 
