@@ -266,6 +266,49 @@ def test_update_ema_metric_tracks_smoothed_validation_signal():
     assert trainer.logged_metrics["val_node_field_ema"].item() == pytest.approx(90.0)
 
 
+def test_component_summary_uses_display_normalized_node_field_scale():
+    pl_module = type(
+        "_Module",
+        (),
+        {
+            "input_feature_dimension": 2048,
+            "lambda_degree_importance": 1.0,
+            "lambda_node_exist_importance": 0.0,
+            "lambda_node_count_importance": 0.0,
+            "lambda_node_label_importance": 1.0,
+            "lambda_edge_label_importance": 0.0,
+            "lambda_direct_edge_importance": 1.0,
+            "lambda_edge_count_importance": 0.0,
+            "lambda_degree_edge_consistency_importance": 0.0,
+            "lambda_auxiliary_edge_importance": 0.0,
+        },
+    )()
+    metrics = {
+        "train_total": torch.tensor(121845.5),
+        "train_node_field": torch.tensor(102374.0),
+        "train_deg_ce": torch.tensor(4873.4),
+        "train_node_label_ce": torch.tensor(5725.7),
+        "train_edge_ce": torch.tensor(8872.4),
+    }
+
+    display_total, components, dominant_label, dominant_share = MetricsLogger._component_summary(
+        pl_module,
+        metrics,
+        "train",
+    )
+    component_map = {label: (display_raw, display_weighted, share) for label, _, _, display_raw, display_weighted, share in components}
+
+    assert component_map["node_field"][0] == pytest.approx(102374.0 / 2048.0)
+    assert component_map["deg"][0] == pytest.approx(4873.4)
+    assert component_map["node_label"][0] == pytest.approx(5725.7)
+    assert component_map["edge"][0] == pytest.approx(8872.4)
+    assert display_total == pytest.approx(
+        (102374.0 / 2048.0) + 4873.4 + 5725.7 + 8872.4
+    )
+    assert dominant_label == "edge"
+    assert 0.0 < dominant_share < 1.0
+
+
 def test_restored_checkpoint_summary_uses_node_field_label():
     summary = format_restored_checkpoint_summary(
         early_stopping_monitor="val_total",

@@ -281,6 +281,7 @@ ConditionalNodeFieldGenerator(
   Logging interval during training.
   Increase: less log noise.
   Decrease: more detailed training traces.
+  Important: the verbose epoch summary uses display-normalized component values for readability, especially for `node_field`; see the `Training Metrics` section in [`2_CONDITIONAL_NODE_FIELD_README.md`](2_CONDITIONAL_NODE_FIELD_README.md).
 
 - `enable_early_stopping`
   Whether to stop based on validation behavior.

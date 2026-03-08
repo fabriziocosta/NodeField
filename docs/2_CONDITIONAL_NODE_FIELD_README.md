@@ -1128,6 +1128,202 @@ Additional loss terms may be logged even if they are not plotted by default:
 
 With `verbose=True`, the model plots these at the end of training through `on_train_end()`.
 
+### Raw Optimization Losses Versus Display-Normalized Epoch Summaries
+
+There is an important distinction between:
+
+- the raw losses that are actually optimized and logged internally, and
+- the display-normalized losses used in the verbose epoch summary printed during training.
+
+The optimization itself is unchanged. `total_loss` is still built from the raw terms:
+
+$$
+\mathcal{L}_{\mathrm{total}} =
+\mathcal{L}_{\mathrm{node\_field}}
+ \lambda_{\mathrm{deg}} \mathcal{L}_{\mathrm{deg}}
+ \lambda_{\mathrm{exist}} \mathcal{L}_{\mathrm{exist}}
+ \cdots
+$$
+
+Those are the values that drive backpropagation, checkpoint selection, and early stopping.
+
+The printed epoch summary is different. It is meant to give a human-readable breakdown of which
+loss families are large relative to one another. To make that display less misleading, the summary
+uses a display-normalized version of the node-field term before computing percentages and the
+`dominant=...` label.
+
+#### Why this normalization is needed
+
+The raw node-field loss is computed as:
+
+$$
+\mathcal{L}_{\mathrm{node\_field}}
+=
+\frac{
+\sum_{b,n,d}
+\mathbf{1}_{\mathrm{active}}(b,n)
+\left(g_\theta(\tilde{x}_{bnd}, c_b) - \left(-\varepsilon_{bnd}/s_{bnd}\right)\right)^2
+}{
+\sum_{b,n}
+\mathbf{1}_{\mathrm{active}}(b,n)
+}
+$$
+
+So the numerator sums over:
+
+- batch items,
+- active node slots,
+- feature dimensions.
+
+But the denominator averages only over active node slots, not over feature dimensions.
+
+That means the raw node-field loss naturally grows with `input_feature_dimension`.
+By contrast:
+
+- `deg_ce` is more like a per-node classification loss,
+- `exist` is more like a per-slot BCE loss,
+- `node_label_ce` is more like a per-node label loss,
+- `edge_ce` is more like a per-edge supervision loss.
+
+So a raw printed line such as:
+
+```text
+train total= 121845.5 | node_field 102374.0 [84.0%] | deg 4873.4 [4.0%] | ...
+```
+
+would be numerically correct as a decomposition of the raw weighted objective, but it would be a
+poor cross-loss comparison because the node-field term is inflated by feature dimension.
+
+#### What the verbose epoch summary does now
+
+For display only, the epoch summary uses:
+
+$$
+\mathcal{L}^{\mathrm{display}}_{\mathrm{node\_field}}
+=
+\frac{\mathcal{L}_{\mathrm{node\_field}}}{D}
+$$
+
+where:
+
+- $D$ is `input_feature_dimension`.
+
+All the other displayed components keep their usual raw supervised scale:
+
+- `deg_ce`
+- `exist`
+- `node_count_loss`
+- `node_label_ce`
+- `edge_ce`
+- `edge_count_loss`
+- `degree_edge_consistency_loss`
+- `edge_label_ce`
+- `aux_locality_ce`
+
+The verbose epoch summary then computes:
+
+1. a display-weighted component value for each active term,
+2. a display total as the sum of those display-weighted values,
+3. percentages from that display total,
+4. the `dominant=...` label from the largest display-weighted component.
+
+So the printed percentages are now percentages of the display-normalized breakdown, not percentages
+of the raw optimized `total_loss`.
+
+#### Explicit worked example
+
+Suppose the training code has these raw weighted values at one epoch:
+
+- `node_field = 102374.0`
+- `deg_ce = 4873.4`
+- `node_label_ce = 5725.7`
+- `edge_ce = 8872.4`
+
+and suppose the input node feature dimension is:
+
+- `input_feature_dimension = 2048`
+
+Then the raw optimization breakdown would be:
+
+- node field: `102374.0`
+- deg: `4873.4`
+- node label: `5725.7`
+- edge: `8872.4`
+
+Raw total:
+
+$$
+102374.0 + 4873.4 + 5725.7 + 8872.4 = 121845.5
+$$
+
+If you formed raw percentages from that total, you would get:
+
+- node field: `102374.0 / 121845.5 = 84.0%`
+- deg: `4873.4 / 121845.5 = 4.0%`
+- node label: `5725.7 / 121845.5 = 4.7%`
+- edge: `8872.4 / 121845.5 = 7.3%`
+
+Those raw percentages are mathematically correct, but they are not a fair visual comparison because
+the node-field term carries the extra factor of feature dimension.
+
+The display-normalized epoch summary instead uses:
+
+$$
+\mathcal{L}^{\mathrm{display}}_{\mathrm{node\_field}}
+=
+102374.0 / 2048
+\approx 49.99
+$$
+
+So the display breakdown becomes:
+
+- node field: `50.0`
+- deg: `4873.4`
+- node label: `5725.7`
+- edge: `8872.4`
+
+Display total:
+
+$$
+50.0 + 4873.4 + 5725.7 + 8872.4 = 19521.5
+$$
+
+Display percentages:
+
+- node field: `50.0 / 19521.5 ≈ 0.26%`
+- deg: `4873.4 / 19521.5 ≈ 25.0%`
+- node label: `5725.7 / 19521.5 ≈ 29.3%`
+- edge: `8872.4 / 19521.5 ≈ 45.5%`
+
+So in this example:
+
+- the raw optimization objective is still dominated numerically by the node-field term,
+- but the display-normalized summary says the edge term is the largest human-readable component.
+
+That is exactly the intended behavior:
+
+- optimize the real raw loss,
+- display a more interpretable cross-loss comparison.
+
+#### How to interpret the metrics now
+
+- `train_total` and `val_total`
+  Still refer to the raw optimized objective.
+
+- `train_node_field` and `val_node_field`
+  Still refer to the raw score-matching loss, before display normalization.
+
+- the verbose epoch line
+  Uses display-normalized values for readability, especially for `node_field`.
+
+- the percentages in that line
+  Are display shares, not raw optimization shares.
+
+So the safest interpretation is:
+
+- use `train_total` / `val_total` for optimization and checkpointing meaning,
+- use the printed component percentages only as a qualitative dashboard of relative displayed scale.
+
 ## Typical Training Flow
 
 At a conceptual level, one training step is:

@@ -48,28 +48,40 @@ class MetricsLogger(pl.callbacks.Callback):
             ),
         ]
 
-        raw_total = float(metrics.get(f"{prefix}_total", torch.tensor(0.0)).item())
         components = []
-        weighted_sum = 0.0
+        display_total = 0.0
         for label, metric_name, scale in component_specs:
             key = f"{prefix}_{metric_name}"
             if key not in metrics:
                 continue
             raw_value = float(metrics[key].item())
+            display_raw_value = MetricsLogger._display_normalized_metric_value(
+                pl_module,
+                metric_name=metric_name,
+                raw_value=raw_value,
+            )
             weighted_value = raw_value * scale
-            weighted_sum += weighted_value
-            components.append((label, raw_value, weighted_value))
+            display_weighted_value = display_raw_value * scale
+            display_total += display_weighted_value
+            components.append((label, raw_value, weighted_value, display_raw_value, display_weighted_value))
 
         if not components:
-            return raw_total, [], None, 0.0
+            return 0.0, [], None, 0.0
 
-        denominator = weighted_sum if weighted_sum > 0 else 1.0
-        dominant_label, _, dominant_weighted = max(components, key=lambda item: item[2])
+        denominator = display_total if display_total > 0 else 1.0
+        dominant_label, *_rest, dominant_display_weighted = max(components, key=lambda item: item[4])
         normalized_components = [
-            (label, raw, weighted, weighted / denominator)
-            for label, raw, weighted in components
+            (label, raw, weighted, display_raw, display_weighted, display_weighted / denominator)
+            for label, raw, weighted, display_raw, display_weighted in components
         ]
-        return raw_total, normalized_components, dominant_label, dominant_weighted / denominator
+        return display_total, normalized_components, dominant_label, dominant_display_weighted / denominator
+
+    @staticmethod
+    def _display_normalized_metric_value(pl_module, metric_name: str, raw_value: float) -> float:
+        if metric_name == "node_field":
+            feature_dim = float(getattr(pl_module, "input_feature_dimension", 1) or 1)
+            return raw_value / max(1.0, feature_dim)
+        return raw_value
 
     @staticmethod
     def _update_ema_metric(trainer, pl_module, metric_name: str, metric_value: float) -> float:
@@ -175,7 +187,10 @@ class MetricsLogger(pl.callbacks.Callback):
                         ordered_labels.append(label)
 
                 def _components_to_map(components):
-                    return {label: (raw, weighted, share) for label, raw, weighted, share in components}
+                    return {
+                        label: (raw, weighted, display_raw, display_weighted, share)
+                        for label, raw, weighted, display_raw, display_weighted, share in components
+                    }
 
                 train_map = _components_to_map(train_components)
                 val_map = _components_to_map(val_components)
@@ -209,8 +224,8 @@ class MetricsLogger(pl.callbacks.Callback):
                             row += continuation_prefix[len(f"{prefix_label:<5}"):]
                         for label in labels_chunk:
                             if label in component_map:
-                                _, weighted, share = component_map[label]
-                                row += f" | {label:>10} {weighted:>9.1f} [{_format_share(share)}]"
+                                _, _, _, display_weighted, share = component_map[label]
+                                row += f" | {label:>10} {display_weighted:>9.1f} [{_format_share(share)}]"
                             else:
                                 row += f" | {label:>10} {'-':>9} [{' - '}]"
                         rows.append(row)
