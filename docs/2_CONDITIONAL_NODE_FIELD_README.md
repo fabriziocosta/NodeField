@@ -920,6 +920,8 @@ The maintained implementation supports both guidance strategies and keeps them s
 
 Classifier-free guidance uses the existing target-conditioning API:
 
+- configure the path explicitly at construction time with `cfg_target_mode="classification"` or
+  `cfg_target_mode="regression"`
 - node generator: `predict(..., desired_target=..., guidance_scale=...)`
 - graph generator: `decode(...)`, `sample(...)`, `conditional_sample(...)`
 

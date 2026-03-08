@@ -188,12 +188,19 @@ def test_graph_generator_decode_requires_fit():
         )
 
 
-def test_node_generator_target_mode_inference_classification_vs_regression():
-    generator = ConditionalNodeFieldGenerator(target_classification_max_distinct=3)
+def test_node_generator_cfg_target_mode_requires_explicit_choice():
+    generator = ConditionalNodeFieldGenerator()
+    with pytest.raises(ValueError, match="cfg_target_mode is not set"):
+        generator._fit_target_encoder([0, 1, 1, 0])
+
+
+def test_node_generator_cfg_target_mode_controls_classification_vs_regression():
+    generator = ConditionalNodeFieldGenerator(cfg_target_mode="classification")
     generator._fit_target_encoder([0, 1, 1, 0])
     assert generator.target_mode_ == "classification"
     assert generator.target_condition_dim_ == 2
 
+    generator = ConditionalNodeFieldGenerator(cfg_target_mode="regression")
     generator._fit_target_encoder(np.arange(10))
     assert generator.target_mode_ == "regression"
     assert generator.target_condition_dim_ == 1

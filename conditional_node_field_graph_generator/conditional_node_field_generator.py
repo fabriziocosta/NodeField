@@ -1478,6 +1478,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         sampling_step_size: float = 0.05,
         sampling_steps: Optional[int] = None,
         langevin_noise_scale: float = 0.0,
+        cfg_target_mode: Optional[str] = None,
         cfg_condition_dropout_prob: float = 0.1,
         cfg_null_target_strategy: str = "zero",
         target_classification_max_distinct: int = 20,
@@ -1525,6 +1526,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps if sampling_steps is not None else total_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
+        self.cfg_target_mode = self._normalize_cfg_target_mode(cfg_target_mode)
         self.cfg_condition_dropout_prob = float(cfg_condition_dropout_prob)
         self.cfg_null_target_strategy = str(cfg_null_target_strategy)
         self.target_classification_max_distinct = int(target_classification_max_distinct)
@@ -1588,6 +1590,18 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.best_checkpoint_score_ = None
         self.best_checkpoint_epoch_ = None
         self.is_setup_ = False
+
+    @staticmethod
+    def _normalize_cfg_target_mode(cfg_target_mode: Optional[str]) -> Optional[str]:
+        if cfg_target_mode is None:
+            return None
+        normalized_mode = str(cfg_target_mode).strip().lower()
+        if normalized_mode not in {"classification", "regression"}:
+            raise ValueError(
+                "cfg_target_mode must be 'classification', 'regression', or None "
+                f"(got {cfg_target_mode!r})."
+            )
+        return normalized_mode
 
     def _plan_channel(self, channel_name: str):
         """Return the named channel from the orchestration supervision plan when available.
@@ -1751,9 +1765,15 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         return np.concatenate([graph_embeddings, node_counts, edge_counts], axis=1)
 
     def _fit_target_encoder(self, targets: Sequence[Any]) -> None:
+        if self.cfg_target_mode is None:
+            raise ValueError(
+                "CFG targets were provided, but cfg_target_mode is not set. "
+                "Choose cfg_target_mode='classification' or cfg_target_mode='regression' "
+                "to configure the classifier-free target-conditioning path explicitly."
+            )
         targets_array = np.asarray(targets, dtype=object)
         unique_targets = np.unique(targets_array)
-        if unique_targets.size <= self.target_classification_max_distinct:
+        if self.cfg_target_mode == "classification":
             self.target_mode_ = "classification"
             self.target_classes_ = unique_targets
             self.target_to_index_ = {

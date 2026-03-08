@@ -216,6 +216,7 @@ ConditionalNodeFieldGenerator(
     sampling_step_size: float = 0.05,
     sampling_steps: Optional[int] = None,
     langevin_noise_scale: float = 0.0,
+    cfg_target_mode: Optional[str] = None,
     cfg_condition_dropout_prob: float = 0.1,
     cfg_null_target_strategy: str = "zero",
     target_classification_max_distinct: int = 20,
@@ -409,6 +410,11 @@ ConditionalNodeFieldGenerator(
 
 #### CFG-Specific Parameters
 
+- `cfg_target_mode`
+  Explicit target mode for the classifier-free target-conditioning path.
+  Use `"classification"` for categorical CFG targets and `"regression"` for scalar numeric CFG targets.
+  Leave as `None`: CFG target-conditioning is not configured, and passing CFG training targets will raise an error.
+
 - `cfg_condition_dropout_prob`
   Probability of dropping target-conditioning channels during CFG training.
   Increase: stronger unconditional branch training, but weaker conditional specialization if too high.
@@ -419,9 +425,10 @@ ConditionalNodeFieldGenerator(
   Currently only `"zero"` is supported.
 
 - `target_classification_max_distinct`
-  If the number of unique target values is at most this threshold, target guidance is treated as classification; otherwise regression.
-  Increase: more target sets are handled as classification.
-  Decrease: more target sets are handled as regression.
+  Threshold used only by the separate post-hoc guidance-predictor path when `train_guidance_predictor(..., mode=None)`
+  is allowed to infer classification vs regression automatically.
+  Increase: more predictor-training target sets are handled as classification.
+  Decrease: more predictor-training target sets are handled as regression.
 
 ### Main Public Methods
 
@@ -445,7 +452,7 @@ Parameters:
 
 - `targets`
   Optional target values used to activate and train CFG target-conditioning channels.
-  Provide targets: enables CFG-capable training.
+  Provide targets: enables CFG-capable training only if `cfg_target_mode` was set explicitly on the generator.
   Omit targets: trains without CFG target channels.
 
 #### `predict(...)`
@@ -827,7 +834,8 @@ Parameters:
 
 - `targets`
   Optional target values used to train CFG-ready target-conditioning in the node generator.
-  Provide targets: enables CFG support in the fitted generator.
+  Provide targets: enables CFG support in the fitted generator only if `cfg_target_mode` was configured explicitly
+  on the node generator.
   Omit targets: no CFG target-conditioning path is trained.
 
 #### `encode(...)`
