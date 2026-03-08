@@ -9,6 +9,10 @@ It complements the architecture documents:
 - [`3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md`](3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md)
 - [`4_TARGET_GUIDANCE_README.md`](4_TARGET_GUIDANCE_README.md)
 
+The conceptual discussion of the conditioning interface itself, including single-vector conditioning
+versus token-sequence conditioning under cross-attention, lives in
+[`2_CONDITIONAL_NODE_FIELD_README.md`](2_CONDITIONAL_NODE_FIELD_README.md).
+
 The goal here is practical:
 
 - show the main public interfaces in one place,

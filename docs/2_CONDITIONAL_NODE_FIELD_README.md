@@ -199,6 +199,116 @@ conditional_node_field_generator.last_predicted_node_label_classes_
 These labels are not written directly into the node-feature tensor because node labels
 are categorical metadata, not continuous feature channels in the Conditional Node Field state.
 
+## Conditioning Interface
+
+The maintained node generator supports two conditioning layouts:
+
+- a single graph-level conditioning vector with shape `(B, C)`
+- a sequence of conditioning tokens with shape `(B, M, C)`
+
+Those two forms are handled by the same backbone.
+
+If the condition arrives as a single vector, the implementation treats it as one condition token.
+If it arrives as a sequence, the full token sequence is preserved and exposed to cross-attention.
+
+So conceptually:
+
+- `(B, C)` means one global condition token per graph
+- `(B, M, C)` means a small condition memory made of `M` tokens per graph
+
+This matters because the node generator is not restricted to conditioning on a single pooled graph
+embedding. It can also condition on a richer tokenized representation in which different condition
+tokens can carry different pieces of graph-level context.
+
+### Use Cases For Vector Conditioning
+
+One important workflow is to use a graph encoder that produces one embedding for the whole graph.
+
+In that case, the conditioning input behaves like a direct latent representation of the graph itself.
+That is useful because the graph generator can then map operations performed in that conditioning
+space back into reconstructed graph space.
+
+Practically, this supports workflows such as:
+
+- interpolation between two graph embeddings and decoding the intermediate graphs
+- similarity-driven retrieval or sampling near a reference graph embedding
+- means, barycentres, or other averages in conditioning space followed by graph reconstruction
+- other vector operations in the conditioning space, followed by node-field generation and graph decoding
+
+This is the simplest and most direct interpretation of the conditioning path:
+
+- one graph
+- one embedding
+- one conditioning vector
+- one reconstructed graph sampled from that conditioning state
+
+That is why the graph-level generator exposes operations such as interpolation, conditioning-space
+sampling, and centroid-style decoding.
+
+### Use Cases For Tokenized Conditioning
+
+Conditioning on a set of embeddings is more flexible.
+
+Instead of describing the whole graph with one pooled vector, the condition can describe the graph
+through multiple tokens, each carrying part of the higher-level structure. The node generator can then
+attend selectively to those tokens during generation.
+
+One use case is sequential or causal graph modeling:
+
+- take one graph
+- derive a set of node embeddings or other token embeddings from it
+- use those embeddings as the condition memory for generating the next graph
+
+In that setup, the model does not just condition on a compressed global summary. It conditions on a
+structured memory extracted from the previous graph, which is a better fit for temporal, causal, or
+state-transition relationships between graphs.
+
+Another use case is conditioning on an abstract graph representation rather than on the final graph
+directly.
+
+For example:
+
+- an abstract graph could contain nodes representing motifs such as cycles, chains, or trees
+- edges in that abstract graph could represent high-level attachment structure
+- the conditioning tokens would then encode that abstract graph
+- the generated graph would be a concrete realization consistent with that higher-level scaffold
+
+For molecular graphs, this can be interpreted as conditioning on a coarse structural plan. A large
+molecule might first be abstracted into a small graph whose nodes stand for motifs such as cycles and
+trees. Generation can then be conditioned on that abstract motif graph, so the model reconstructs a
+full molecular graph from a high-level structural representation rather than from a single pooled vector.
+
+So the two conditioning styles emphasize different use cases:
+
+- vector conditioning is best when the graph should be manipulated as one latent point in a graph-level space
+- tokenized conditioning is best when the condition should preserve internal structure, memory, temporal context, or abstraction structure
+
+Operationally, the backbone does this:
+
+1. project node features into latent node tokens
+2. project condition vectors or condition tokens into the same latent space
+3. use the projected condition tokens as cross-attention memory for the node tokens
+
+So the node tokens attend to the conditioning representation, rather than just concatenating one
+global vector to every node row.
+
+In the implementation, this behavior is explicit in
+[`../conditional_node_field_graph_generator/conditional_node_field_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_generator.py):
+
+- if `global_condition_vector` has shape `(B, C)`, it is unsqueezed to `(B, 1, C)`
+- if it already has shape `(B, M, C)`, it is kept as-is
+- the resulting condition tokens are projected and passed as `k` and `v` to the cross-attention layers
+
+There is also one optional simplification:
+
+- `pool_condition_tokens=False`
+  keep the full token sequence and let the node tokens attend to all condition tokens
+- `pool_condition_tokens=True`
+  mean-pool the condition tokens into a single token before cross-attention
+
+That switch is useful when the conditioning representation is naturally tokenized but a simpler,
+more compressed conditioning path is preferred.
+
 ## Data Preprocessing
 
 The wrapper preserves the established preprocessing behavior:

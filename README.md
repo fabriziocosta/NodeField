@@ -16,7 +16,7 @@ This document focuses on the graph-generator orchestration layer. It explains ho
 
 [`docs/2_CONDITIONAL_NODE_FIELD_README.md`](docs/2_CONDITIONAL_NODE_FIELD_README.md)
 
-This is the main conceptual and modeling document. It explains the Conditional Node Field formulation itself, including the score-matching objective, the stationary energy-based interpretation, the conditioning pathway, and the iterative sampling dynamics. The dedicated discussion of target guidance is separated into its own document.
+This is the main conceptual and modeling document. It explains the Conditional Node Field formulation itself, including the score-matching objective, the stationary energy-based interpretation, the conditioning pathway, the vector-versus-token conditioning interface used by cross-attention, and the iterative sampling dynamics. The dedicated discussion of target guidance is separated into its own document.
 
 [`docs/3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md`](docs/3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md)
 
