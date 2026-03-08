@@ -1,6 +1,6 @@
 # Conditional Node Field for Graph Generation
 
-GraphGen is a conditional graph generation framework based on decompositional encoding and decoding, coupled with stationary node-field dynamics. Its central premise is to use an explicit graph kernel to derive node embeddings without end-to-end training while incorporating user-defined priors, thereby enabling the rapid injection of structured prior knowledge independently of the available data.
+NodeField is a conditional graph generation framework based on decompositional encoding and decoding, coupled with stationary node-field dynamics. Its central premise is to use an explicit graph kernel to derive node embeddings without end-to-end training while incorporating user-defined priors, thereby enabling the rapid injection of structured prior knowledge independently of the available data.
 
 The framework uses two distinct vectorization processes: one to derive node embeddings, and another to construct a graph-level context vector used as conditioning information. These representations need not coincide and may capture substantially different aspects of the graph. Conditioned on this graph-level context, which acts as an explicit latent representation, the model employs a conditional energy-based generator trained through denoising score matching under Gaussian corruption and sampled via Langevin-style dynamics. Unlike diffusion-based methods, this formulation does not rely on an explicit time variable or a reverse diffusion schedule. The explicit latent space further supports operations such as interpolation, which can be translated into meaningful graph interpolations.
 
@@ -39,7 +39,7 @@ The repository includes:
 ## Project Layout
 
 ```text
-GraphGen/
+NodeField/
 ├── conditional_node_field_graph_generator/
 │   ├── conditional_node_field_generator.py
 │   ├── conditional_node_field_graph_generator.py
