@@ -58,6 +58,7 @@ class _ConditionalStub:
         self.fit_targets = None
         self.last_predict_kwargs = None
         self.last_classifier_predict_kwargs = None
+        self.last_regression_predict_kwargs = None
 
     def setup(self, node_batch, graph_conditioning, targets=None):
         self.setup_targets = targets
@@ -83,6 +84,13 @@ class _ConditionalStub:
         self.last_classifier_predict_kwargs = {
             "desired_class": desired_class,
             "classifier_scale": classifier_scale,
+        }
+        return self.predict(graph_conditioning)
+
+    def predict_regression_guided(self, graph_conditioning, desired_target, predictor_scale=1.0):
+        self.last_regression_predict_kwargs = {
+            "desired_target": desired_target,
+            "predictor_scale": predictor_scale,
         }
         return self.predict(graph_conditioning)
 
@@ -145,6 +153,22 @@ def test_graph_generator_decode_classifier_guided_uses_separate_api():
     assert cond.last_classifier_predict_kwargs["classifier_scale"] == 3.0
 
 
+def test_graph_generator_decode_regression_guided_uses_separate_api():
+    cond = _ConditionalStub()
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=cond,
+        graph_decoder=_DecoderStub(),
+        verbose=False,
+    )
+    generator.is_fitted_ = True
+    conditioning = generator.graph_encode([_graph()])
+    generator.decode_regression_guided(conditioning, desired_target=0.8, predictor_scale=2.0)
+    assert cond.last_regression_predict_kwargs["desired_target"] == 0.8
+    assert cond.last_regression_predict_kwargs["predictor_scale"] == 2.0
+
+
 def test_graph_generator_decode_requires_fit():
     generator = ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=_GraphVectorizer(),
@@ -173,6 +197,12 @@ def test_node_generator_target_mode_inference_classification_vs_regression():
     generator._fit_target_encoder(np.arange(10))
     assert generator.target_mode_ == "regression"
     assert generator.target_condition_dim_ == 1
+
+
+def test_guidance_predictor_mode_inference_classification_vs_regression():
+    generator = ConditionalNodeFieldGenerator(target_classification_max_distinct=3)
+    assert generator._infer_guidance_predictor_mode([0, 1, 1, 0]) == "classification"
+    assert generator._infer_guidance_predictor_mode(np.arange(10)) == "regression"
 
 
 def test_cfg_dropout_zeros_target_slice_when_probability_is_one():
@@ -283,6 +313,21 @@ def test_predict_classifier_guided_rejects_negative_classifier_scale():
             ),
             desired_class=0,
             classifier_scale=-1.0,
+        )
+
+
+def test_predict_regression_guided_rejects_negative_predictor_scale():
+    generator = ConditionalNodeFieldGenerator()
+    generator.model = types.SimpleNamespace(parameters=lambda: iter([torch.tensor(0.0)]))
+    with pytest.raises(ValueError, match="predictor_scale must be >= 0"):
+        generator.predict_regression_guided(
+            graph_conditioning=GraphConditioningBatch(
+                graph_embeddings=np.zeros((1, 2), dtype=float),
+                node_counts=np.ones((1,), dtype=np.int64),
+                edge_counts=np.zeros((1,), dtype=np.int64),
+            ),
+            desired_target=0.5,
+            predictor_scale=-1.0,
         )
 
 

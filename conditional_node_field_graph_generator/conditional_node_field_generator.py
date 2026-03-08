@@ -77,15 +77,15 @@ class GeneratedNodeBatch:
         return 0
 
 
-class GuidanceClassifierMLP(nn.Module):
-    """Post-hoc classifier used only for classifier-guided sampling."""
+class GuidancePredictorMLP(nn.Module):
+    """Post-hoc predictor used only for separate guidance during sampling."""
 
     def __init__(
         self,
         number_of_rows_per_example: int,
         input_feature_dimension: int,
         condition_feature_dimension: int,
-        num_classes: int,
+        output_dimension: int,
         hidden_dimension: int = 256,
         dropout: float = 0.1,
     ):
@@ -93,7 +93,7 @@ class GuidanceClassifierMLP(nn.Module):
         self.number_of_rows_per_example = int(number_of_rows_per_example)
         self.input_feature_dimension = int(input_feature_dimension)
         self.condition_feature_dimension = int(condition_feature_dimension)
-        self.num_classes = int(num_classes)
+        self.output_dimension = int(output_dimension)
         flattened_input_dimension = (
             self.number_of_rows_per_example * self.input_feature_dimension
             + self.condition_feature_dimension
@@ -105,7 +105,7 @@ class GuidanceClassifierMLP(nn.Module):
             nn.Linear(hidden_dimension, hidden_dimension),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dimension, self.num_classes),
+            nn.Linear(hidden_dimension, self.output_dimension),
         )
 
     def forward(self, node_state: torch.Tensor, global_condition: torch.Tensor) -> torch.Tensor:
@@ -164,6 +164,14 @@ class ConditionalNodeGeneratorBase:
         classifier_scale: float = 1.0,
     ):
         raise NotImplementedError("predict_classifier_guided() must be implemented by subclasses.")
+
+    def predict_regression_guided(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_target: Union[float, Sequence[Any]],
+        predictor_scale: float = 1.0,
+    ):
+        raise NotImplementedError("predict_regression_guided() must be implemented by subclasses.")
 
 class CrossTransformerEncoderLayer(nn.Module):
     """Pre-norm transformer block with self-attention followed by cross-attention."""
@@ -1559,11 +1567,13 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.guidance_enabled_ = False
         self.node_count_condition_index_ = None
         self.edge_count_condition_index_ = None
-        self.guidance_classifier_ = None
-        self.guidance_classifier_label_to_index_ = None
-        self.guidance_classifier_classes_ = None
-        self.guidance_classifier_num_classes_ = 0
-        self.guidance_classifier_noise_scale_ = float(node_field_sigma)
+        self.guidance_predictor_ = None
+        self.guidance_predictor_mode_ = None
+        self.guidance_predictor_label_to_index_ = None
+        self.guidance_predictor_classes_ = None
+        self.guidance_predictor_output_dimension_ = 0
+        self.guidance_predictor_target_scaler_ = None
+        self.guidance_predictor_noise_scale_ = float(node_field_sigma)
 
         self.number_of_rows_per_example = None
         self.input_feature_dimension = None
@@ -1854,37 +1864,57 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 "ConditionalNodeFieldGenerator is not fitted. Call setup() or fit() before predict()."
             )
 
-    def _require_trained_guidance_classifier(self) -> None:
-        if self.guidance_classifier_ is None or self.guidance_classifier_label_to_index_ is None:
+    def _require_trained_guidance_predictor(self) -> None:
+        if self.guidance_predictor_ is None or self.guidance_predictor_mode_ is None:
             raise RuntimeError(
-                "Classifier guidance is not available. Call set_guidance_classifier() and "
-                "train_guidance_classifier() first."
+                "Separate guidance is not available. Call set_guidance_predictor() and "
+                "train_guidance_predictor() first."
             )
 
-    def _normalize_desired_class(
+    def _normalize_guidance_target(
         self,
-        desired_class: Union[int, Sequence[Any]],
+        desired_target: Union[Any, Sequence[Any]],
         batch_size: int,
     ) -> List[Any]:
-        if isinstance(desired_class, (list, tuple, np.ndarray)):
-            values = list(desired_class)
+        if isinstance(desired_target, (list, tuple, np.ndarray)):
+            values = list(desired_target)
             if len(values) != batch_size:
                 raise ValueError(
-                    "desired_class sequence length must match the batch size "
+                    "guidance target sequence length must match the batch size "
                     f"(got {len(values)} values for batch size {batch_size})."
                 )
             return values
-        return [desired_class] * batch_size
+        return [desired_target] * batch_size
 
-    def _encode_guidance_classifier_targets(self, targets: Sequence[Any]) -> np.ndarray:
-        if self.guidance_classifier_label_to_index_ is None:
-            raise RuntimeError("Guidance classifier label mapping is not initialized.")
+    def _infer_guidance_predictor_mode(self, targets: Sequence[Any], mode: Optional[str] = None) -> str:
+        if mode is not None:
+            normalized_mode = str(mode).strip().lower()
+            if normalized_mode not in {"classification", "regression"}:
+                raise ValueError(
+                    f"guidance predictor mode must be 'classification' or 'regression' (got {mode!r})."
+                )
+            return normalized_mode
+        targets_array = np.asarray(targets, dtype=object)
+        unique_targets = np.unique(targets_array)
+        if unique_targets.size <= self.target_classification_max_distinct:
+            return "classification"
+        return "regression"
+
+    def _encode_guidance_class_targets(self, targets: Sequence[Any]) -> np.ndarray:
+        if self.guidance_predictor_label_to_index_ is None:
+            raise RuntimeError("Guidance predictor label mapping is not initialized.")
         encoded = np.empty(len(targets), dtype=np.int64)
         for index, target in enumerate(targets):
-            if target not in self.guidance_classifier_label_to_index_:
-                raise ValueError(f"Unknown classifier-guidance target value: {target!r}")
-            encoded[index] = self.guidance_classifier_label_to_index_[target]
+            if target not in self.guidance_predictor_label_to_index_:
+                raise ValueError(f"Unknown guidance classification target value: {target!r}")
+            encoded[index] = self.guidance_predictor_label_to_index_[target]
         return encoded
+
+    def _scale_guidance_regression_targets(self, targets: Sequence[Any]) -> np.ndarray:
+        if self.guidance_predictor_target_scaler_ is None:
+            raise RuntimeError("Guidance predictor target scaler is not initialized.")
+        numeric_targets = np.asarray(targets, dtype=float).reshape(-1, 1)
+        return self.guidance_predictor_target_scaler_.transform(numeric_targets).reshape(-1)
 
     def setup(
         self,
@@ -2320,33 +2350,62 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 )
                 print(f"  path={self.best_checkpoint_path_}")
 
-    def set_guidance_classifier(self, num_classes: int, hidden_dimension: Optional[int] = None) -> None:
+    def set_guidance_predictor(
+        self,
+        mode: str,
+        output_dimension: Optional[int] = None,
+        hidden_dimension: Optional[int] = None,
+    ) -> None:
         self._require_fitted_for_prediction()
         self.device = next(self.model.parameters()).device
-        if num_classes < 2:
-            raise ValueError(f"num_classes must be >= 2 (got {num_classes}).")
-        classifier_hidden_dimension = (
+        predictor_mode = self._infer_guidance_predictor_mode([], mode=mode)
+        predictor_output_dimension = int(output_dimension or 0)
+        if predictor_mode == "classification":
+            if predictor_output_dimension < 2:
+                raise ValueError(
+                    "classification guidance predictors require output_dimension >= 2 "
+                    f"(got {predictor_output_dimension})."
+                )
+        else:
+            if predictor_output_dimension == 0:
+                predictor_output_dimension = 1
+            if predictor_output_dimension != 1:
+                raise ValueError(
+                    "regression guidance predictors require output_dimension == 1 "
+                    f"(got {predictor_output_dimension})."
+                )
+        predictor_hidden_dimension = (
             max(64, 2 * self.latent_embedding_dimension)
             if hidden_dimension is None
             else int(hidden_dimension)
         )
-        self.guidance_classifier_ = GuidanceClassifierMLP(
+        self.guidance_predictor_ = GuidancePredictorMLP(
             number_of_rows_per_example=self.number_of_rows_per_example,
             input_feature_dimension=self.input_feature_dimension,
             condition_feature_dimension=self.base_condition_feature_dimension,
-            num_classes=int(num_classes),
-            hidden_dimension=classifier_hidden_dimension,
+            output_dimension=predictor_output_dimension,
+            hidden_dimension=predictor_hidden_dimension,
             dropout=self.transformer_dropout,
         ).to(self.device)
-        self.guidance_classifier_num_classes_ = int(num_classes)
-        self.guidance_classifier_label_to_index_ = None
-        self.guidance_classifier_classes_ = None
+        self.guidance_predictor_mode_ = predictor_mode
+        self.guidance_predictor_output_dimension_ = predictor_output_dimension
+        self.guidance_predictor_label_to_index_ = None
+        self.guidance_predictor_classes_ = None
+        self.guidance_predictor_target_scaler_ = None
 
-    def train_guidance_classifier(
+    def set_guidance_classifier(self, num_classes: int, hidden_dimension: Optional[int] = None) -> None:
+        self.set_guidance_predictor(
+            mode="classification",
+            output_dimension=int(num_classes),
+            hidden_dimension=hidden_dimension,
+        )
+
+    def train_guidance_predictor(
         self,
         node_batch: NodeGenerationBatch,
         graph_conditioning: GraphConditioningBatch,
         targets: Sequence[Any],
+        mode: Optional[str] = None,
         learning_rate: float = 1e-3,
         maximum_epochs: int = 30,
         batch_size: Optional[int] = None,
@@ -2360,20 +2419,36 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 "targets length must match node batch size "
                 f"(got {targets_array.shape[0]} targets for {len(node_batch.node_embeddings_list)} graphs)."
             )
+        predictor_mode = self._infer_guidance_predictor_mode(targets_array.tolist(), mode=mode)
         unique_targets = np.unique(targets_array)
-        if unique_targets.size < 2:
-            raise ValueError("Classifier guidance requires at least two distinct target classes.")
-        if self.guidance_classifier_ is None:
-            self.set_guidance_classifier(int(unique_targets.size))
-        if unique_targets.size > self.guidance_classifier_num_classes_:
-            raise ValueError(
-                "Configured guidance classifier does not have enough output classes "
-                f"({self.guidance_classifier_num_classes_} for {unique_targets.size} targets)."
-            )
-        self.guidance_classifier_classes_ = unique_targets
-        self.guidance_classifier_label_to_index_ = {
-            label: int(index) for index, label in enumerate(unique_targets.tolist())
-        }
+        if predictor_mode == "classification":
+            if unique_targets.size < 2:
+                raise ValueError("Classification guidance requires at least two distinct target classes.")
+            if self.guidance_predictor_ is None or self.guidance_predictor_mode_ != "classification":
+                self.set_guidance_predictor(
+                    mode="classification",
+                    output_dimension=int(unique_targets.size),
+                )
+            if unique_targets.size > self.guidance_predictor_output_dimension_:
+                raise ValueError(
+                    "Configured guidance classifier does not have enough output classes "
+                    f"({self.guidance_predictor_output_dimension_} for {unique_targets.size} targets)."
+                )
+            self.guidance_predictor_classes_ = unique_targets
+            self.guidance_predictor_label_to_index_ = {
+                label: int(index) for index, label in enumerate(unique_targets.tolist())
+            }
+            self.guidance_predictor_target_scaler_ = None
+            transformed_targets = self._encode_guidance_class_targets(targets_array.tolist())
+        else:
+            if self.guidance_predictor_ is None or self.guidance_predictor_mode_ != "regression":
+                self.set_guidance_predictor(mode="regression", output_dimension=1)
+            self.guidance_predictor_classes_ = None
+            self.guidance_predictor_label_to_index_ = None
+            self.guidance_predictor_target_scaler_ = MinMaxScaler()
+            numeric_targets = np.asarray(targets, dtype=float).reshape(-1, 1)
+            self.guidance_predictor_target_scaler_.fit(numeric_targets)
+            transformed_targets = self._scale_guidance_regression_targets(targets_array.tolist())
         padded_nodes = self._build_padded_node_array(
             node_batch.node_embeddings_list,
             self.number_of_rows_per_example,
@@ -2385,22 +2460,24 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         if self.base_condition_scaler_ is None:
             self.base_condition_scaler_ = MinMaxScaler().fit(base_condition_array)
         base_condition_scaled = self.base_condition_scaler_.transform(base_condition_array)
-        target_indices = self._encode_guidance_classifier_targets(targets_array.tolist())
         dataset = TensorDataset(
             torch.tensor(node_states, dtype=torch.float32),
             torch.tensor(base_condition_scaled, dtype=torch.float32),
-            torch.tensor(target_indices, dtype=torch.long),
+            torch.tensor(
+                transformed_targets,
+                dtype=torch.long if predictor_mode == "classification" else torch.float32,
+            ),
         )
         train_dataset, val_dataset = self._build_train_val_subsets(dataset)
         classifier_batch_size = int(batch_size if batch_size is not None else self.batch_size)
         train_loader = DataLoader(train_dataset, batch_size=classifier_batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=classifier_batch_size, shuffle=False)
-        optimizer = torch.optim.Adam(self.guidance_classifier_.parameters(), lr=float(learning_rate))
-        effective_noise_scale = self.guidance_classifier_noise_scale_ if noise_scale is None else float(noise_scale)
+        optimizer = torch.optim.Adam(self.guidance_predictor_.parameters(), lr=float(learning_rate))
+        effective_noise_scale = self.guidance_predictor_noise_scale_ if noise_scale is None else float(noise_scale)
         best_state = None
         best_val_loss = None
         for _ in range(int(maximum_epochs)):
-            self.guidance_classifier_.train()
+            self.guidance_predictor_.train()
             for batch_nodes, batch_condition, batch_targets in train_loader:
                 batch_nodes = batch_nodes.to(self.device)
                 batch_condition = batch_condition.to(self.device)
@@ -2409,11 +2486,14 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 if effective_noise_scale > 0.0:
                     noisy_nodes = batch_nodes + effective_noise_scale * torch.randn_like(batch_nodes)
                 optimizer.zero_grad()
-                logits = self.guidance_classifier_(noisy_nodes, batch_condition)
-                loss = F.cross_entropy(logits, batch_targets)
+                prediction = self.guidance_predictor_(noisy_nodes, batch_condition)
+                if predictor_mode == "classification":
+                    loss = F.cross_entropy(prediction, batch_targets)
+                else:
+                    loss = F.mse_loss(prediction.squeeze(-1), batch_targets)
                 loss.backward()
                 optimizer.step()
-            self.guidance_classifier_.eval()
+            self.guidance_predictor_.eval()
             val_loss_total = 0.0
             val_count = 0
             with torch.no_grad():
@@ -2421,8 +2501,12 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                     batch_nodes = batch_nodes.to(self.device)
                     batch_condition = batch_condition.to(self.device)
                     batch_targets = batch_targets.to(self.device)
-                    logits = self.guidance_classifier_(batch_nodes, batch_condition)
-                    batch_loss = F.cross_entropy(logits, batch_targets, reduction="sum")
+                    prediction = self.guidance_predictor_(batch_nodes, batch_condition)
+                    if predictor_mode == "classification":
+                        batch_loss = F.cross_entropy(prediction, batch_targets, reduction="sum")
+                    else:
+                        squared_error = torch.square(prediction.squeeze(-1) - batch_targets)
+                        batch_loss = squared_error.sum()
                     val_loss_total += float(batch_loss.item())
                     val_count += int(batch_targets.numel())
             mean_val_loss = val_loss_total / max(val_count, 1)
@@ -2430,23 +2514,64 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 best_val_loss = mean_val_loss
                 best_state = {
                     key: value.detach().cpu().clone()
-                    for key, value in self.guidance_classifier_.state_dict().items()
+                    for key, value in self.guidance_predictor_.state_dict().items()
                 }
         if best_state is not None:
-            self.guidance_classifier_.load_state_dict(best_state)
-            self.guidance_classifier_.to(self.device)
+            self.guidance_predictor_.load_state_dict(best_state)
+            self.guidance_predictor_.to(self.device)
 
-    def _classifier_guidance_gradient(
+    def train_guidance_classifier(
+        self,
+        node_batch: NodeGenerationBatch,
+        graph_conditioning: GraphConditioningBatch,
+        targets: Sequence[Any],
+        learning_rate: float = 1e-3,
+        maximum_epochs: int = 30,
+        batch_size: Optional[int] = None,
+        noise_scale: Optional[float] = None,
+    ) -> None:
+        self.train_guidance_predictor(
+            node_batch=node_batch,
+            graph_conditioning=graph_conditioning,
+            targets=targets,
+            mode="classification",
+            learning_rate=learning_rate,
+            maximum_epochs=maximum_epochs,
+            batch_size=batch_size,
+            noise_scale=noise_scale,
+        )
+
+    def _classification_guidance_gradient(
         self,
         x: torch.Tensor,
         base_condition: torch.Tensor,
         desired_class_indices: torch.Tensor,
     ) -> torch.Tensor:
-        self._require_trained_guidance_classifier()
-        logits = self.guidance_classifier_(x, base_condition)
+        self._require_trained_guidance_predictor()
+        if self.guidance_predictor_mode_ != "classification":
+            raise RuntimeError(
+                "Classification guidance was requested, but the trained guidance predictor is not a classifier."
+            )
+        logits = self.guidance_predictor_(x, base_condition)
         log_probs = F.log_softmax(logits, dim=1)
         selected = log_probs.gather(1, desired_class_indices.unsqueeze(1)).sum()
         grad = torch.autograd.grad(selected, x, retain_graph=True)[0]
+        return grad
+
+    def _regression_guidance_gradient(
+        self,
+        x: torch.Tensor,
+        base_condition: torch.Tensor,
+        desired_target_values: torch.Tensor,
+    ) -> torch.Tensor:
+        self._require_trained_guidance_predictor()
+        if self.guidance_predictor_mode_ != "regression":
+            raise RuntimeError(
+                "Regression guidance was requested, but the trained guidance predictor is not a regressor."
+            )
+        prediction = self.guidance_predictor_(x, base_condition).squeeze(-1)
+        objective = -torch.square(prediction - desired_target_values).sum()
+        grad = torch.autograd.grad(objective, x, retain_graph=True)[0]
         return grad
 
     def predict(
@@ -2552,8 +2677,44 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
     ) -> GeneratedNodeBatch:
         if classifier_scale < 0:
             raise ValueError(f"classifier_scale must be >= 0 (got {classifier_scale}).")
+        return self._predict_with_guidance_predictor(
+            graph_conditioning=graph_conditioning,
+            desired_target=desired_class,
+            predictor_scale=classifier_scale,
+            expected_mode="classification",
+        )
+
+    def predict_regression_guided(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_target: Union[float, Sequence[Any]],
+        predictor_scale: float = 1.0,
+    ) -> GeneratedNodeBatch:
+        if predictor_scale < 0:
+            raise ValueError(f"predictor_scale must be >= 0 (got {predictor_scale}).")
+        return self._predict_with_guidance_predictor(
+            graph_conditioning=graph_conditioning,
+            desired_target=desired_target,
+            predictor_scale=predictor_scale,
+            expected_mode="regression",
+        )
+
+    def _predict_with_guidance_predictor(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_target: Union[Any, Sequence[Any]],
+        predictor_scale: float,
+        expected_mode: str,
+    ) -> GeneratedNodeBatch:
+        if predictor_scale < 0:
+            raise ValueError(f"predictor_scale must be >= 0 (got {predictor_scale}).")
         self._require_fitted_for_prediction()
-        self._require_trained_guidance_classifier()
+        self._require_trained_guidance_predictor()
+        if self.guidance_predictor_mode_ != expected_mode:
+            raise RuntimeError(
+                f"Requested {expected_mode} guidance, but the trained guidance predictor mode is "
+                f"{self.guidance_predictor_mode_!r}."
+            )
 
         self.device = next(self.model.parameters()).device
         base_condition_array = self._compose_condition_array(graph_conditioning)
@@ -2566,21 +2727,34 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         cond_tensor = torch.tensor(cond_scaled, dtype=torch.float32, device=self.device)
         base_condition_scaled = self.base_condition_scaler_.transform(base_condition_array)
         base_condition_tensor = torch.tensor(base_condition_scaled, dtype=torch.float32, device=self.device)
-        desired_classes = self._normalize_desired_class(desired_class, len(base_condition_array))
-        desired_class_indices = torch.tensor(
-            self._encode_guidance_classifier_targets(desired_classes),
-            dtype=torch.long,
-            device=self.device,
-        )
-        generated = self.model.generate(
-            cond_tensor,
-            total_steps=self.sampling_steps,
-            classifier_guidance_fn=lambda x: self._classifier_guidance_gradient(
+        normalized_targets = self._normalize_guidance_target(desired_target, len(base_condition_array))
+        if expected_mode == "classification":
+            desired_class_indices = torch.tensor(
+                self._encode_guidance_class_targets(normalized_targets),
+                dtype=torch.long,
+                device=self.device,
+            )
+            guidance_fn = lambda x: self._classification_guidance_gradient(
                 x,
                 base_condition_tensor,
                 desired_class_indices,
-            ),
-            classifier_scale=classifier_scale,
+            )
+        else:
+            desired_target_values = torch.tensor(
+                self._scale_guidance_regression_targets(normalized_targets),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            guidance_fn = lambda x: self._regression_guidance_gradient(
+                x,
+                base_condition_tensor,
+                desired_target_values,
+            )
+        generated = self.model.generate(
+            cond_tensor,
+            total_steps=self.sampling_steps,
+            classifier_guidance_fn=guidance_fn,
+            classifier_scale=predictor_scale,
             use_heads_projection=True,
         )
 

@@ -724,10 +724,10 @@ This can improve diversity at the cost of noisier trajectories.
 
 The maintained implementation supports classifier-free guidance over explicit target-conditioning channels.
 
-This is not classifier guidance through a separately trained classifier. In the diffusion and score-based
-literature, that alternative is usually called `classifier guidance`: first train the generative model in the
-ordinary way, then train a separate classifier, and during sampling add a target-seeking gradient derived
-from the classifier probabilities. In symbols, that guidance takes the form
+This is not limited to classifier-free guidance. In the diffusion and score-based
+literature, the alternative post-hoc route is usually called `classifier guidance`: first train the generative
+model in the ordinary way, then train a separate predictor, and during sampling add a target-seeking
+gradient derived from that auxiliary model. For classification targets, that guidance takes the form
 
 ```math
 g_{\mathrm{guided}}(x, c, y)
@@ -743,17 +743,32 @@ where:
 - $p_\psi(y \mid x, c)$ is the separately trained classifier,
 - $\lambda$ controls how strongly sampling is pushed toward the requested target.
 
-The important distinction is that classifier guidance leaves the generator training unchanged and injects
-target pressure only at sampling time through the auxiliary classifier. By contrast, classifier-free guidance
+For regression targets, the same idea becomes a post-hoc regressor objective, for example
+
+```math
+g_{\mathrm{guided}}(x, c, y^\star)
+\approx
+g_\theta(x, c)
+- \lambda \nabla_x \ell(r_\psi(x, c), y^\star)
+```
+
+where:
+
+- $r_\psi(x, c)$ is a separately trained regressor,
+- $y^\star$ is the desired scalar target,
+- $\ell$ can be a squared-error penalty that is minimized by guidance.
+
+The important distinction is that post-hoc guidance leaves the generator training unchanged and injects
+target pressure only at sampling time through the auxiliary predictor. By contrast, classifier-free guidance
 trains the generative model itself to operate with and without the target condition, then combines those
 two branches during sampling. The maintained implementation in this repository supports both routes, but
 keeps them on separate APIs so the workflows do not blur together.
 
-One practical advantage of classifier guidance is modularity: a generator can be pretrained once as a
-general conditional or unconditional model, and separate task-specific classifiers can be attached later for
+One practical advantage of post-hoc guidance is modularity: a generator can be pretrained once as a
+general conditional or unconditional model, and separate task-specific classifiers or regressors can be attached later for
 many different objectives without retraining the generator itself. That can be attractive when the same
 base generator is meant to support multiple downstream optimization or property-targeting tasks. The
-tradeoff is that sampling then depends on an additional classifier whose gradients must remain informative
+tradeoff is that sampling then depends on an additional predictor whose gradients must remain informative
 along the full noisy or iterative generation trajectory.
 
 Instead, the model can be trained with optional target-conditioning channels appended to the graph-level
@@ -865,18 +880,22 @@ Classifier-free guidance uses the existing target-conditioning API:
 - node generator: `predict(..., desired_target=..., guidance_scale=...)`
 - graph generator: `decode(...)`, `sample(...)`, `conditional_sample(...)`
 
-Classifier guidance uses a separate post-hoc classifier API:
+Post-hoc guidance uses a separate predictor API:
 
-- training: `set_guidance_classifier(...)`, `train_guidance_classifier(...)`
-- node generator: `predict_classifier_guided(..., desired_class=..., classifier_scale=...)`
-- graph generator: `decode_classifier_guided(...)`, `sample_classifier_guided(...)`,
+- generic training: `set_guidance_predictor(...)`, `train_guidance_predictor(...)`
+- classification training aliases: `set_guidance_classifier(...)`, `train_guidance_classifier(...)`
+- node generator classification: `predict_classifier_guided(..., desired_class=..., classifier_scale=...)`
+- node generator regression: `predict_regression_guided(..., desired_target=..., predictor_scale=...)`
+- graph generator classification: `decode_classifier_guided(...)`, `sample_classifier_guided(...)`,
   `conditional_sample_classifier_guided(...)`
+- graph generator regression: `decode_regression_guided(...)`, `sample_regression_guided(...)`,
+  `conditional_sample_regression_guided(...)`
 
 If `desired_target` is omitted, CFG generation falls back to the ordinary unguided conditional path even
 when the model was trained with CFG support.
 
-If classifier guidance is requested, the generator uses the null-target branch for the generative condition
-and injects target pressure only through the separate classifier gradient.
+If post-hoc guidance is requested, the generator uses the null-target branch for the generative condition
+and injects target pressure only through the separate predictor gradient.
 
 ## Final Projection at Inference
 
@@ -1188,7 +1207,7 @@ Without the existence and degree heads, the Conditional Node Field alone may pro
 The maintained implementation supports both:
 
 - classifier-free guidance over explicit target-conditioning channels,
-- separate classifier guidance through a post-hoc guidance classifier.
+- separate post-hoc guidance through an auxiliary classifier or regressor.
 
 Those routes use different public methods so the conditioning semantics stay explicit.
 

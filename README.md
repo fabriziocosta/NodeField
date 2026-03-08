@@ -67,6 +67,10 @@ Typical high-level workflow:
 
 By default, `.sample(...)` reuses cached graph-level conditioning rows from the training set. It can also be configured to stochastically interpolate between pairs of cached training embeddings in graph-conditioning space, with the same interpolation coefficient applied to graph embeddings, node counts, and edge counts.
 
+When guidance targets are available, sampling can also use classifier-free conditioning through
+`desired_target` and `guidance_scale`. The detailed mechanics are documented in
+[`docs/CONDITIONAL_NODE_FIELD_README.md`](docs/CONDITIONAL_NODE_FIELD_README.md).
+
 Notebook examples:
 - `notebooks/demo.ipynb`
 - `notebooks/demo_chem.ipynb`
