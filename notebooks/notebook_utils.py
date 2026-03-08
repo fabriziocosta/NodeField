@@ -17,6 +17,8 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
+from conditional_node_field_graph_generator.molecular_graph_utils import draw_molecules
+
 try:
     from IPython.display import display
 except Exception:  # pragma: no cover
@@ -148,8 +150,6 @@ def plot_sample(
     n_graphs_per_line=12,
     compute_is_valid_fn=None,
 ):
-    from coco_grape.visualizer.display import draw_graphs
-
     pos_graphs, neg_graphs = select_pos_neg(
         sampled_graphs,
         sampled_targets,
@@ -160,10 +160,11 @@ def plot_sample(
     if haystack is not None:
         if compute_is_valid_fn is None:
             raise ValueError("compute_is_valid_fn is required when haystack is provided.")
-        ts = list(compute_is_valid_fn(pos_graphs, haystack)) + list(compute_is_valid_fn(neg_graphs, haystack))
-        draw_graphs(gs, ts, n_graphs_per_line=n_graphs_per_line)
+        validity = list(compute_is_valid_fn(pos_graphs, haystack)) + list(compute_is_valid_fn(neg_graphs, haystack))
+        titles = [f"valid={bool(value)}" for value in validity]
+        plot_networkx_graphs(gs, n_cols=n_graphs_per_line, titles=titles)
     else:
-        draw_graphs(gs, n_graphs_per_line=n_graphs_per_line)
+        plot_networkx_graphs(gs, n_cols=n_graphs_per_line)
 
 
 def infer_display_mode(graphs):
@@ -202,9 +203,7 @@ def plot_networkx_graphs(
     titles=None,
 ):
     if mode == "molecule":
-        from coco_grape.visualizer.mol_display import draw_molecules
-
-        draw_molecules(graphs)
+        draw_molecules(graphs, n_graphs_per_line=max(1, n_cols or len(graphs)))
         return
 
     if isinstance(cmap, str):

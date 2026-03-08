@@ -34,6 +34,11 @@ from conditional_node_field_graph_generator.conditional_node_field_graph_generat
     ConditionalNodeFieldGraphDecoder,
     ConditionalNodeFieldGraphGenerator,
 )
+from conditional_node_field_graph_generator.molecular_graph_utils import (
+    PubChemLoader,
+    SupervisedDataSetLoader,
+    draw_molecules,
+)
 
 
 def _resolve_pubchem_dir() -> Path:
@@ -75,10 +80,6 @@ def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
         return graphs, targets
 
     if dataset_type == "MOLECULAR":
-        from coco_grape.data_loader.loader import SupervisedDataSetLoader
-        from coco_grape.data_loader.mol.mol_loader import PubChemLoader
-        from coco_grape.visualizer.mol_display import draw_molecules
-
         pubchem_dir = _resolve_pubchem_dir()
 
         def pubchem_loader():

@@ -101,7 +101,7 @@ pip install "numpy<2" torch pytorch-lightning scipy pandas scikit-learn networkx
 
 3. Install optional extras as needed:
 - `jupyterlab` or `notebook` to run notebooks.
-- `coco-grape`, `NSPPK`, `AbstractGraph` if you run notebook flows that import them.
+- `NSPPK` and `AbstractGraph`.
 
 ## Quick Start
 

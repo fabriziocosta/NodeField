@@ -97,14 +97,14 @@ from collections import defaultdict
 
 def _make_duplicate_detection_estimator():
     try:
-        from coco_grape.module.graph_duplicate_detection_estimator import GraphDuplicateDetectionEstimator
+        from AbstractGraph.hash_graph import GraphHashDeduper
     except ImportError as exc:
         raise ImportError(
-            "Graph duplicate filtering requires optional dependency 'coco-grape'. "
+            "Graph duplicate filtering requires optional dependency 'AbstractGraph'. "
             "Install it to use make_graphs_classification_dataset(), "
             "make_two_types_graphs_classification_dataset(), or ArtificialGraphDatasetConstructor.sample()."
         ) from exc
-    return GraphDuplicateDetectionEstimator()
+    return GraphHashDeduper()
 
 def _safe_random_tree(n: int) -> nx.Graph:
     """Return a random tree on n nodes.
