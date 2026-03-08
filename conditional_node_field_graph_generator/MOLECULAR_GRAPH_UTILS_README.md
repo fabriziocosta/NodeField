@@ -10,6 +10,9 @@ It is intended to replace the previous dependency on `coco-grape` for:
 
 The implementation keeps the older PubChem loader and supervised-loader interfaces available locally so existing notebook flows can continue to work with minimal change.
 
+For new code, prefer the extension namespace:
+- [`extensions/molecular/__init__.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/molecular/__init__.py)
+
 ## Main Responsibilities
 
 ### 1. Molecule <-> graph conversion
@@ -107,7 +110,7 @@ Main method:
 
 Typical use:
 ```python
-from conditional_node_field_graph_generator.molecular_graph_utils import (
+from conditional_node_field_graph_generator.extensions.molecular import (
     PubChemLoader,
     SupervisedDataSetLoader,
 )

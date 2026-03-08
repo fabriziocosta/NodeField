@@ -1,6 +1,6 @@
 """Compatibility wrapper for molecule and ZINC dataset utilities."""
 
-from conditional_node_field_graph_generator.molecular_graph_utils import (
+from conditional_node_field_graph_generator.extensions.molecular import (
     DEFAULT_ZINC_TARGET_COLUMNS,
     ZINC_250K_URL,
     build_zinc_graph_corpus,

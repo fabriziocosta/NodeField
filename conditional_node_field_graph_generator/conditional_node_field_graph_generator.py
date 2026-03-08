@@ -9,7 +9,7 @@ import networkx as nx
 import random
 import pulp
 import dill as pickle
-from .support import timeit
+from .runtime_utils import timeit
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union
 from .conditional_node_field_generator import (
     ConditionalNodeGeneratorBase,

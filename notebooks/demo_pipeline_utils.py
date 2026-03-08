@@ -34,7 +34,7 @@ from conditional_node_field_graph_generator.conditional_node_field_graph_generat
     ConditionalNodeFieldGraphDecoder,
     ConditionalNodeFieldGraphGenerator,
 )
-from conditional_node_field_graph_generator.molecular_graph_utils import (
+from conditional_node_field_graph_generator.extensions.molecular import (
     PubChemLoader,
     SupervisedDataSetLoader,
     draw_molecules,
@@ -50,7 +50,7 @@ def _resolve_pubchem_dir() -> Path:
 
 def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
     if dataset_type == "ARTIFICIAL":
-        from conditional_node_field_graph_generator.support import ArtificialGraphDatasetConstructor
+        from conditional_node_field_graph_generator.extensions.synthetic import ArtificialGraphDatasetConstructor
         try:
             from notebooks.notebook_utils import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
         except ModuleNotFoundError:

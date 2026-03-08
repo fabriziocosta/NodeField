@@ -17,7 +17,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-from conditional_node_field_graph_generator.molecular_graph_utils import draw_molecules
+from conditional_node_field_graph_generator.extensions.molecular import draw_molecules
 
 try:
     from IPython.display import display

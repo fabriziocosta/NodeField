@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from .metrics_collection import MetricsLogger
 from .metrics_visualization import plot_metrics
-from .support import run_trainer_fit
+from .runtime_utils import run_trainer_fit
 from .training_policy import (
     build_training_callbacks,
     create_trainer,

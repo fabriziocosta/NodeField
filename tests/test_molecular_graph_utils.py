@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from conditional_node_field_graph_generator.molecular_graph_utils import (
+from conditional_node_field_graph_generator.extensions.molecular import (
     PubChemLoader,
     SupervisedDataSetLoader,
     build_zinc_graph_corpus,
