@@ -701,6 +701,20 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         return edge_probs
 
     @staticmethod
+    def _scale_normalized_huber_loss(
+        prediction: torch.Tensor,
+        target: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute Huber loss after normalizing both prediction and target by a semantic scale."""
+        normalized_scale = scale.to(dtype=prediction.dtype).clamp_min(1.0)
+        return F.huber_loss(
+            prediction / normalized_scale,
+            target.to(dtype=prediction.dtype) / normalized_scale,
+            reduction="mean",
+        )
+
+    @staticmethod
     def _compute_edge_count_loss(
         edge_probs: torch.Tensor,
         node_presence_mask: torch.Tensor,
@@ -725,10 +739,10 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             diagonal=1,
         )
         expected_edge_counts = sym_edge_probs.masked_select(upper_mask).reshape(edge_probs.shape[0], -1).sum(dim=1)
-        return F.huber_loss(
+        return ConditionalNodeFieldModule._scale_normalized_huber_loss(
             expected_edge_counts,
             target_edge_counts.to(dtype=edge_probs.dtype),
-            reduction="mean",
+            target_edge_counts.to(dtype=edge_probs.dtype),
         )
 
     def _recover_edge_count_targets(self, global_condition: torch.Tensor) -> torch.Tensor:
@@ -763,10 +777,10 @@ class ConditionalNodeFieldModule(pl.LightningModule):
     ) -> torch.Tensor:
         """Match expected node count to the conditioned graph size target."""
         expected_node_counts = torch.sigmoid(logits_exist).sum(dim=1)
-        return F.huber_loss(
+        return ConditionalNodeFieldModule._scale_normalized_huber_loss(
             expected_node_counts,
             target_node_counts.to(dtype=expected_node_counts.dtype),
-            reduction="mean",
+            target_node_counts.to(dtype=expected_node_counts.dtype),
         )
 
     def _compute_degree_edge_consistency_loss(
@@ -795,10 +809,11 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         expected_total_degree = (
             expected_degrees * node_presence_mask.to(dtype=expected_degrees.dtype)
         ).sum(dim=1)
-        return F.huber_loss(
+        degree_target = 2.0 * target_edge_counts.to(dtype=expected_total_degree.dtype)
+        return self._scale_normalized_huber_loss(
             expected_total_degree,
-            2.0 * target_edge_counts.to(dtype=expected_total_degree.dtype),
-            reduction="mean",
+            degree_target,
+            degree_target,
         )
 
     def _compute_edge_label_logits(self, latent_tokens: torch.Tensor) -> torch.Tensor:
@@ -945,7 +960,10 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         )
         target_score = -eps / noise_scale
         node_field_error = (score - target_score).pow(2) * score_mask
-        loss_node_field = node_field_error.sum() / score_mask.sum().clamp_min(1.0)
+        feature_dim = float(input_examples.shape[-1])
+        loss_node_field = node_field_error.sum() / (
+            score_mask.sum().clamp_min(1.0) * max(1.0, feature_dim)
+        )
 
         denoised = noisy_input + noise_scale.pow(2) * score
         latent_clean = self._encode_with_condition(denoised, global_condition, node_mask=node_presence_mask)

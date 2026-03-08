@@ -266,7 +266,7 @@ def test_update_ema_metric_tracks_smoothed_validation_signal():
     assert trainer.logged_metrics["val_node_field_ema"].item() == pytest.approx(90.0)
 
 
-def test_component_summary_uses_display_normalized_node_field_scale():
+def test_component_summary_uses_raw_weighted_loss_scale():
     pl_module = type(
         "_Module",
         (),
@@ -291,22 +291,27 @@ def test_component_summary_uses_display_normalized_node_field_scale():
         "train_edge_ce": torch.tensor(8872.4),
     }
 
-    display_total, components, dominant_label, dominant_share = MetricsLogger._component_summary(
+    total, components, dominant_label, dominant_share = MetricsLogger._component_summary(
         pl_module,
         metrics,
         "train",
     )
-    component_map = {label: (display_raw, display_weighted, share) for label, _, _, display_raw, display_weighted, share in components}
+    component_map = {label: (raw, weighted, share) for label, raw, weighted, share in components}
 
-    assert component_map["node_field"][0] == pytest.approx(102374.0 / 2048.0)
-    assert component_map["deg"][0] == pytest.approx(4873.4)
-    assert component_map["node_label"][0] == pytest.approx(5725.7)
-    assert component_map["edge"][0] == pytest.approx(8872.4)
-    assert display_total == pytest.approx(
-        (102374.0 / 2048.0) + 4873.4 + 5725.7 + 8872.4
-    )
-    assert dominant_label == "edge"
-    assert 0.0 < dominant_share < 1.0
+    assert component_map["node_field"][0] == pytest.approx(102374.0)
+    assert component_map["node_field"][1] == pytest.approx(102374.0)
+    assert component_map["deg"][1] == pytest.approx(4873.4)
+    assert component_map["node_label"][1] == pytest.approx(5725.7)
+    assert component_map["edge"][1] == pytest.approx(8872.4)
+    assert total == pytest.approx(121845.5)
+    assert dominant_label == "node_field"
+    assert dominant_share == pytest.approx(102374.0 / 121845.5)
+
+
+def test_format_metric_value_uses_more_precision_for_small_losses():
+    assert MetricsLogger._format_metric_value(25.0).strip() == "25.000"
+    assert MetricsLogger._format_metric_value(0.125).strip() == "0.12500"
+    assert MetricsLogger._format_metric_value(3716.6).strip() == "3716.6"
 
 
 def test_restored_checkpoint_summary_uses_node_field_label():
@@ -336,6 +341,21 @@ def test_compute_edge_count_loss_matches_target_on_consistent_probabilities():
     )
 
     assert loss.item() == pytest.approx(0.02, abs=1e-6)
+
+
+def test_scale_normalized_huber_loss_is_invariant_to_shared_target_scale():
+    small = ConditionalNodeFieldModule._scale_normalized_huber_loss(
+        prediction=torch.tensor([12.0]),
+        target=torch.tensor([10.0]),
+        scale=torch.tensor([10.0]),
+    )
+    large = ConditionalNodeFieldModule._scale_normalized_huber_loss(
+        prediction=torch.tensor([120.0]),
+        target=torch.tensor([100.0]),
+        scale=torch.tensor([100.0]),
+    )
+
+    assert small.item() == pytest.approx(large.item(), rel=1e-6)
 
 
 def test_compute_degree_edge_consistency_loss_is_zero_when_handshake_identity_matches():
@@ -376,6 +396,41 @@ def test_compute_node_count_loss_is_zero_when_expected_count_matches():
     )
 
     assert loss.item() == pytest.approx(0.0, abs=1e-4)
+
+
+def test_compute_edge_count_loss_tracks_relative_not_absolute_error():
+    edge_probs_small = torch.zeros((1, 6, 6), dtype=torch.float32)
+    edge_probs_large = torch.zeros((1, 12, 12), dtype=torch.float32)
+    for matrix in (edge_probs_small, edge_probs_large):
+        matrix[0, 0, 1] = 1.0
+        matrix[0, 1, 0] = 1.0
+    edge_probs_small[0, 2, 3] = 1.0
+    edge_probs_small[0, 3, 2] = 1.0
+    edge_probs_small[0, 4, 5] = 0.2
+    edge_probs_small[0, 5, 4] = 0.2
+    edge_probs_large[0, 2, 3] = 1.0
+    edge_probs_large[0, 3, 2] = 1.0
+    edge_probs_large[0, 4, 5] = 1.0
+    edge_probs_large[0, 5, 4] = 1.0
+    edge_probs_large[0, 6, 7] = 1.0
+    edge_probs_large[0, 7, 6] = 1.0
+    edge_probs_large[0, 8, 9] = 1.0
+    edge_probs_large[0, 9, 8] = 1.0
+    edge_probs_large[0, 10, 11] = 0.2
+    edge_probs_large[0, 11, 10] = 0.2
+
+    loss_small = ConditionalNodeFieldModule._compute_edge_count_loss(
+        edge_probs=edge_probs_small,
+        node_presence_mask=torch.ones((1, 6), dtype=torch.bool),
+        target_edge_counts=torch.tensor([2.5], dtype=torch.float32),
+    )
+    loss_large = ConditionalNodeFieldModule._compute_edge_count_loss(
+        edge_probs=edge_probs_large,
+        node_presence_mask=torch.ones((1, 12), dtype=torch.bool),
+        target_edge_counts=torch.tensor([5.0], dtype=torch.float32),
+    )
+
+    assert loss_small.item() == pytest.approx(loss_large.item(), rel=1e-6)
 
 
 def test_plot_metrics_accepts_node_field_key():

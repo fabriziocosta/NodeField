@@ -22,6 +22,21 @@ class MetricsLogger(pl.callbacks.Callback):
         return f"{hours:d}h {minutes:02d}m {secs:02d}s"
 
     @staticmethod
+    def _format_metric_value(value: float) -> str:
+        magnitude = abs(float(value))
+        if magnitude >= 1000.0:
+            return f"{value:>9.1f}"
+        if magnitude >= 100.0:
+            return f"{value:>9.2f}"
+        if magnitude >= 10.0:
+            return f"{value:>9.3f}"
+        if magnitude >= 1.0:
+            return f"{value:>9.4f}"
+        if magnitude == 0.0:
+            return f"{value:>9.4f}"
+        return f"{value:>9.5f}"
+
+    @staticmethod
     def _component_summary(pl_module, metrics: Dict[str, torch.Tensor], prefix: str):
         component_specs = [
             ("node_field", "node_field", 1.0),
@@ -49,39 +64,26 @@ class MetricsLogger(pl.callbacks.Callback):
         ]
 
         components = []
-        display_total = 0.0
+        total = 0.0
         for label, metric_name, scale in component_specs:
             key = f"{prefix}_{metric_name}"
             if key not in metrics:
                 continue
             raw_value = float(metrics[key].item())
-            display_raw_value = MetricsLogger._display_normalized_metric_value(
-                pl_module,
-                metric_name=metric_name,
-                raw_value=raw_value,
-            )
             weighted_value = raw_value * scale
-            display_weighted_value = display_raw_value * scale
-            display_total += display_weighted_value
-            components.append((label, raw_value, weighted_value, display_raw_value, display_weighted_value))
+            total += weighted_value
+            components.append((label, raw_value, weighted_value))
 
         if not components:
             return 0.0, [], None, 0.0
 
-        denominator = display_total if display_total > 0 else 1.0
-        dominant_label, *_rest, dominant_display_weighted = max(components, key=lambda item: item[4])
+        denominator = total if total > 0 else 1.0
+        dominant_label, *_rest, dominant_weighted = max(components, key=lambda item: item[2])
         normalized_components = [
-            (label, raw, weighted, display_raw, display_weighted, display_weighted / denominator)
-            for label, raw, weighted, display_raw, display_weighted in components
+            (label, raw, weighted, weighted / denominator)
+            for label, raw, weighted in components
         ]
-        return display_total, normalized_components, dominant_label, dominant_display_weighted / denominator
-
-    @staticmethod
-    def _display_normalized_metric_value(pl_module, metric_name: str, raw_value: float) -> float:
-        if metric_name == "node_field":
-            feature_dim = float(getattr(pl_module, "input_feature_dimension", 1) or 1)
-            return raw_value / max(1.0, feature_dim)
-        return raw_value
+        return total, normalized_components, dominant_label, dominant_weighted / denominator
 
     @staticmethod
     def _update_ema_metric(trainer, pl_module, metric_name: str, metric_value: float) -> float:
@@ -188,8 +190,8 @@ class MetricsLogger(pl.callbacks.Callback):
 
                 def _components_to_map(components):
                     return {
-                        label: (raw, weighted, display_raw, display_weighted, share)
-                        for label, raw, weighted, display_raw, display_weighted, share in components
+                        label: (raw, weighted, share)
+                        for label, raw, weighted, share in components
                     }
 
                 train_map = _components_to_map(train_components)
@@ -214,7 +216,7 @@ class MetricsLogger(pl.callbacks.Callback):
                             for index in range(0, len(remaining_labels), continuation_row_width)
                         )
                     rows = []
-                    total_prefix = f"{prefix_label:<5} total={total_value:>9.1f}"
+                    total_prefix = f"{prefix_label:<5} total={MetricsLogger._format_metric_value(total_value)}"
                     continuation_prefix = " " * len(total_prefix)
                     for chunk_index, labels_chunk in enumerate(chunks):
                         row = f"{prefix_label:<5}"
@@ -224,8 +226,12 @@ class MetricsLogger(pl.callbacks.Callback):
                             row += continuation_prefix[len(f"{prefix_label:<5}"):]
                         for label in labels_chunk:
                             if label in component_map:
-                                _, _, _, display_weighted, share = component_map[label]
-                                row += f" | {label:>10} {display_weighted:>9.1f} [{_format_share(share)}]"
+                                _, weighted, share = component_map[label]
+                                row += (
+                                    f" | {label:>10} "
+                                    f"{MetricsLogger._format_metric_value(weighted)} "
+                                    f"[{_format_share(share)}]"
+                                )
                             else:
                                 row += f" | {label:>10} {'-':>9} [{' - '}]"
                         rows.append(row)

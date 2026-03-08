@@ -334,6 +334,7 @@ ConditionalNodeFieldGenerator(
 
 - `lambda_degree_importance`
   Weight of node-degree supervision.
+  The loss is normalized per active node, so `1.0` is now a reasonable default starting point.
   Increase: stronger pressure to match degrees, often improving decoded structure.
   Decrease: weaker degree supervision, more freedom in latent generation.
 
@@ -344,16 +345,19 @@ ConditionalNodeFieldGenerator(
 
 - `lambda_node_exist_importance`
   Weight of node-existence supervision.
+  The loss is normalized per slot, so `1.0` is now a reasonable default starting point.
   Increase: stronger pressure on node-slot occupancy accuracy.
   Decrease: more freedom in which slots stay active.
 
 - `lambda_node_count_importance`
   Weight of explicit node-count consistency.
+  This is now a relative graph-level consistency loss, so `0.1` to `0.5` is a reasonable starting range.
   Increase: stronger pressure to match requested node counts.
   Decrease: more reliance on slot-level existence predictions.
 
 - `lambda_node_label_importance`
   Weight of node-label supervision.
+  The loss is normalized per labeled node, so `1.0` is now a reasonable default starting point.
   Increase: better node-label fidelity if labels matter, but can compete with structural learning.
   Decrease: structure dominates over label quality.
 
@@ -364,26 +368,31 @@ ConditionalNodeFieldGenerator(
 
 - `lambda_direct_edge_importance`
   Weight of direct edge supervision.
+  The loss is normalized per supervised pair, so `1.0` is now a reasonable default starting point.
   Increase: stronger learning of adjacency probabilities.
   Decrease: weaker direct structural supervision.
 
 - `lambda_edge_count_importance`
   Weight of explicit edge-count consistency.
+  This is now a relative graph-level consistency loss, so `0.1` to `0.5` is a reasonable starting range.
   Increase: stronger pressure to match requested graph density.
   Decrease: decoder relies more on degree and edge-probability tradeoffs.
 
 - `lambda_degree_edge_consistency_importance`
   Weight of consistency between predicted degrees and predicted edges.
+  This is now a relative graph-level consistency loss, so `0.1` to `0.5` is a reasonable starting range.
   Increase: tighter structural coherence.
   Decrease: more independence between node-degree and edge heads.
 
 - `lambda_auxiliary_edge_importance`
   Weight of auxiliary locality supervision.
+  This usually works best as a regularizer rather than a dominant term, so `0.25` to `0.5` is a reasonable starting range.
   Increase: stronger longer-range structural regularization.
   Decrease: less influence from auxiliary locality targets.
 
 - `lambda_edge_label_importance`
   Weight of edge-label supervision.
+  The loss is normalized per labeled pair, so `1.0` is now a reasonable default starting point.
   Increase: better edge-label fidelity, but can distract from structure if labels are noisy.
   Decrease: structure gets priority over label semantics.
 

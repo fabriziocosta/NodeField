@@ -409,17 +409,18 @@ This is also the implementation target score.
 
 ### Conditional Node Field Loss Used Here
 
-The implementation minimizes masked mean squared error between learned score and target score:
+The implementation minimizes masked mean squared error between learned score and target score.
+The important implementation detail is that it averages per active node-feature, not just per active node:
 
 $$\mathcal{L}_{\mathrm{node\_field}} = \mathbb{E}_{x,\varepsilon}\left[\left\|g_\theta(\tilde{x}, c) + \frac{\varepsilon}{\sigma}\right\|^2\right]$$
 
 with masking applied to padded node positions.
 
-Expanded with mask $m$:
+Expanded with mask $m$ and feature dimension $D$:
 
-$$\mathcal{L}_{\mathrm{node\_field}} = \frac{\sum_{b,i,d} m_{b,i}\left(g_\theta(\tilde{x}, c)_{b,i,d} + \frac{\varepsilon_{b,i,d}}{\sigma}\right)^2}{\sum_{b,i,d} m_{b,i}}$$
+$$\mathcal{L}_{\mathrm{node\_field}} = \frac{\sum_{b,i,d} m_{b,i}\left(g_\theta(\tilde{x}, c)_{b,i,d} + \frac{\varepsilon_{b,i,d}}{\sigma}\right)^2}{D \sum_{b,i} m_{b,i}}$$
 
-This is the primary generative loss in the current code.
+So this is a per-active-node, per-feature score-matching loss. That keeps its scale much more stable when the node embedding dimensionality changes.
 
 ## Denoised Estimate
 
@@ -545,14 +546,15 @@ $$
 \hat{n}_b = \sum_i \sigma(\ell^{\mathrm{exist}}_{b,i})
 $$
 
-The implementation penalizes disagreement with a Huber loss:
+The implementation penalizes disagreement with a scale-normalized Huber loss:
 
 $$
 \mathcal{L}_{\mathrm{node\_count}} =
-\mathrm{Huber}(\hat{n}_b, n^{\mathrm{target}}_b)
+\mathrm{Huber}\!\left(\frac{\hat{n}_b}{\max(n^{\mathrm{target}}_b,1)}, \frac{n^{\mathrm{target}}_b}{\max(n^{\mathrm{target}}_b,1)}\right)
 $$
 
-This term is useful because the per-slot BCE loss does not by itself guarantee that the total occupancy mass matches the desired graph size.
+This makes the term behave like a relative node-count mismatch per graph instead of an absolute count error that grows with graph size.
+It is useful because the per-slot BCE loss does not by itself guarantee that the total occupancy mass matches the desired graph size.
 
 This term is logged as:
 
@@ -682,10 +684,11 @@ and the loss is:
 
 $$
 \mathcal{L}_{\mathrm{edge\_count}} =
-\mathrm{Huber}(\hat{m}_b, m^{\mathrm{target}}_b)
+\mathrm{Huber}\!\left(\frac{\hat{m}_b}{\max(m^{\mathrm{target}}_b,1)}, \frac{m^{\mathrm{target}}_b}{\max(m^{\mathrm{target}}_b,1)}\right)
 $$
 
-This term encourages the soft edge field to match the requested graph density before the decoder’s discrete optimization stage.
+This makes the term behave like a relative edge-count mismatch per graph instead of an absolute edge-count error.
+It encourages the soft edge field to match the requested graph density before the decoder’s discrete optimization stage.
 
 This term is logged as:
 
@@ -717,11 +720,11 @@ $$
 
 over materialized nodes.
 
-It then compares that to twice the desired edge count:
+It then compares that to twice the desired edge count with the same target-relative normalization:
 
 $$
 \mathcal{L}_{\mathrm{deg\_edge}} =
-\mathrm{Huber}(\hat{D}_b, 2 m^{\mathrm{target}}_b)
+\mathrm{Huber}\!\left(\frac{\hat{D}_b}{\max(2 m^{\mathrm{target}}_b,1)}, \frac{2 m^{\mathrm{target}}_b}{\max(2 m^{\mathrm{target}}_b,1)}\right)
 $$
 
 This term is not a replacement for degree supervision or edge supervision. It is a soft graph-level compatibility penalty tying the degree head and the edge-count target together.
@@ -1069,39 +1072,39 @@ In short:
 
 ### `lambda_degree_importance`
 
-Weight on degree supervision.
+Weight on degree supervision. With the current normalization, `1.0` is a reasonable default starting point.
 
 ### `lambda_node_exist_importance`
 
-Weight on node existence supervision.
+Weight on node existence supervision. With the current normalization, `1.0` is a reasonable default starting point.
 
 ### `lambda_node_count_importance`
 
-Weight on the soft node-count consistency loss.
+Weight on the soft node-count consistency loss. Because this is now a relative graph-level correction term, `0.1` to `0.5` is a reasonable starting range.
 
 ### `lambda_direct_edge_importance`
 
-Weight on locality supervision.
+Weight on locality supervision. With the current normalization, `1.0` is a reasonable default starting point.
 
 ### `lambda_edge_count_importance`
 
-Weight on the soft edge-count consistency loss.
+Weight on the soft edge-count consistency loss. Because this is now a relative graph-level correction term, `0.1` to `0.5` is a reasonable starting range.
 
 ### `lambda_degree_edge_consistency_importance`
 
-Weight on the soft handshake-consistency loss tying total degree mass to twice the desired edge count.
+Weight on the soft handshake-consistency loss tying total degree mass to twice the desired edge count. `0.1` to `0.5` is a reasonable starting range.
 
 ### `lambda_node_label_importance`
 
-Weight on node-label supervision.
+Weight on node-label supervision. With the current normalization, `1.0` is a reasonable default starting point.
 
 ### `lambda_edge_label_importance`
 
-Weight on edge-label supervision.
+Weight on edge-label supervision. With the current normalization, `1.0` is a reasonable default starting point.
 
 ### `lambda_auxiliary_edge_importance`
 
-Weight on auxiliary higher-horizon locality supervision.
+Weight on auxiliary higher-horizon locality supervision. As a regularizer, it often starts well around `0.25` to `0.5`.
 
 ## Training Metrics
 
@@ -1128,182 +1131,99 @@ Additional loss terms may be logged even if they are not plotted by default:
 
 With `verbose=True`, the model plots these at the end of training through `on_train_end()`.
 
-### Raw Optimization Losses Versus Display-Normalized Epoch Summaries
+### Semantically Normalized Optimization Losses and Epoch-Summary Percentages
 
 There is an important distinction between:
 
 - the raw losses that are actually optimized and logged internally, and
-- the display-normalized losses used in the verbose epoch summary printed during training.
+- the fact that the implementation now normalizes the main loss families to more stable semantic units, but some terms can still differ in scale because they supervise different concepts.
 
 The optimization itself is unchanged. `total_loss` is still built from the raw terms:
 
-$$
-\mathcal{L}_{\mathrm{total}} =
+```math
+\mathcal{L}_{\mathrm{total}}
+=
 \mathcal{L}_{\mathrm{node\_field}}
- \lambda_{\mathrm{deg}} \mathcal{L}_{\mathrm{deg}}
- \lambda_{\mathrm{exist}} \mathcal{L}_{\mathrm{exist}}
- \cdots
-$$
++ \lambda_{\mathrm{deg}} \mathcal{L}_{\mathrm{deg}}
++ \lambda_{\mathrm{exist}} \mathcal{L}_{\mathrm{exist}}
++ \cdots
+```
 
-Those are the values that drive backpropagation, checkpoint selection, and early stopping.
+Those are the values that drive backpropagation, checkpoint selection, early stopping, and the
+verbose epoch-summary percentages.
 
-The printed epoch summary is different. It is meant to give a human-readable breakdown of which
-loss families are large relative to one another. To make that display less misleading, the summary
-uses a display-normalized version of the node-field term before computing percentages and the
-`dominant=...` label.
+#### Why the lambdas are now more interpretable
 
-#### Why this normalization is needed
+The node-field loss is computed as:
 
-The raw node-field loss is computed as:
-
-$$
+```math
 \mathcal{L}_{\mathrm{node\_field}}
 =
 \frac{
 \sum_{b,n,d}
 \mathbf{1}_{\mathrm{active}}(b,n)
-\left(g_\theta(\tilde{x}_{bnd}, c_b) - \left(-\varepsilon_{bnd}/s_{bnd}\right)\right)^2
+\left(g_\theta(\tilde{x}_{bnd}, c_b) + \varepsilon_{bnd}/s_{bnd}\right)^2
 }{
-\sum_{b,n}
+D \sum_{b,n}
 \mathbf{1}_{\mathrm{active}}(b,n)
 }
-$$
-
-So the numerator sums over:
-
-- batch items,
-- active node slots,
-- feature dimensions.
-
-But the denominator averages only over active node slots, not over feature dimensions.
-
-That means the raw node-field loss naturally grows with `input_feature_dimension`.
-By contrast:
-
-- `deg_ce` is more like a per-node classification loss,
-- `exist` is more like a per-slot BCE loss,
-- `node_label_ce` is more like a per-node label loss,
-- `edge_ce` is more like a per-edge supervision loss.
-
-So a raw printed line such as:
-
-```text
-train total= 121845.5 | node_field 102374.0 [84.0%] | deg 4873.4 [4.0%] | ...
 ```
 
-would be numerically correct as a decomposition of the raw weighted objective, but it would be a
-poor cross-loss comparison because the node-field term is inflated by feature dimension.
+So `node_field` is now a per-active-node, per-feature loss.
+Likewise:
 
-#### What the verbose epoch summary does now
+- `deg_ce` is a per-active-node classification loss,
+- `exist` is a per-slot BCE loss,
+- `node_label_ce` is a per-labeled-node loss,
+- `edge_ce` and `edge_label_ce` are per-supervised-pair losses,
+- `node_count_loss`, `edge_count_loss`, and `degree_edge_consistency_loss` are normalized graph-level relative consistency losses.
 
-For display only, the epoch summary uses:
+That means the lambdas now behave much more like conceptual priorities and much less like hidden compensations for graph size or feature dimension.
 
-$$
-\mathcal{L}^{\mathrm{display}}_{\mathrm{node\_field}}
-=
-\frac{\mathcal{L}_{\mathrm{node\_field}}}{D}
-$$
+So a printed line such as:
 
-where:
+```text
+train total= 9535.4 | node_field 25.0 [0.3%] | deg 1132.5 [11.9%] | edge 3716.6 [39.0%] | ...
+```
 
-- $D$ is `input_feature_dimension`.
-
-All the other displayed components keep their usual raw supervised scale:
-
-- `deg_ce`
-- `exist`
-- `node_count_loss`
-- `node_label_ce`
-- `edge_ce`
-- `edge_count_loss`
-- `degree_edge_consistency_loss`
-- `edge_label_ce`
-- `aux_locality_ce`
-
-The verbose epoch summary then computes:
-
-1. a display-weighted component value for each active term,
-2. a display total as the sum of those display-weighted values,
-3. percentages from that display total,
-4. the `dominant=...` label from the largest display-weighted component.
-
-So the printed percentages are now percentages of the display-normalized breakdown, not percentages
-of the raw optimized `total_loss`.
+is numerically correct as a decomposition of the raw weighted objective. The percentages and the
+`dominant=...` label in the verbose epoch summary are computed from these same raw weighted terms.
 
 #### Explicit worked example
 
 Suppose the training code has these raw weighted values at one epoch:
 
-- `node_field = 102374.0`
-- `deg_ce = 4873.4`
-- `node_label_ce = 5725.7`
-- `edge_ce = 8872.4`
-
-and suppose the input node feature dimension is:
-
-- `input_feature_dimension = 2048`
-
-Then the raw optimization breakdown would be:
-
-- node field: `102374.0`
-- deg: `4873.4`
-- node label: `5725.7`
-- edge: `8872.4`
+- `node_field = 25.0`
+- `deg_ce = 1132.5`
+- `exist = 422.4`
+- `node_count_loss = 505.6`
+- `node_label_ce = 867.7`
+- `edge_label_ce = 1308.7`
+- `edge_ce = 3716.6`
+- `edge_count_loss = 1202.2`
+- `degree_edge_consistency_loss = 354.7`
 
 Raw total:
 
-$$
-102374.0 + 4873.4 + 5725.7 + 8872.4 = 121845.5
-$$
+```math
+25.0 + 1132.5 + 422.4 + 505.6 + 867.7 + 1308.7 + 3716.6 + 1202.2 + 354.7 \approx 9535.4
+```
 
 If you formed raw percentages from that total, you would get:
 
-- node field: `102374.0 / 121845.5 = 84.0%`
-- deg: `4873.4 / 121845.5 = 4.0%`
-- node label: `5725.7 / 121845.5 = 4.7%`
-- edge: `8872.4 / 121845.5 = 7.3%`
+- node field: `25.0 / 9535.4 \approx 0.3%`
+- deg: `1132.5 / 9535.4 \approx 11.9%`
+- exist: `422.4 / 9535.4 \approx 4.4%`
+- node count: `505.6 / 9535.4 \approx 5.3%`
+- node label: `867.7 / 9535.4 \approx 9.1%`
+- edge label: `1308.7 / 9535.4 \approx 13.7%`
+- edge: `3716.6 / 9535.4 \approx 39.0%`
+- edge count: `1202.2 / 9535.4 \approx 12.6%`
+- degree/edge consistency: `354.7 / 9535.4 \approx 3.7%`
 
-Those raw percentages are mathematically correct, but they are not a fair visual comparison because
-the node-field term carries the extra factor of feature dimension.
-
-The display-normalized epoch summary instead uses:
-
-$$
-\mathcal{L}^{\mathrm{display}}_{\mathrm{node\_field}}
-=
-102374.0 / 2048
-\approx 49.99
-$$
-
-So the display breakdown becomes:
-
-- node field: `50.0`
-- deg: `4873.4`
-- node label: `5725.7`
-- edge: `8872.4`
-
-Display total:
-
-$$
-50.0 + 4873.4 + 5725.7 + 8872.4 = 19521.5
-$$
-
-Display percentages:
-
-- node field: `50.0 / 19521.5 ≈ 0.26%`
-- deg: `4873.4 / 19521.5 ≈ 25.0%`
-- node label: `5725.7 / 19521.5 ≈ 29.3%`
-- edge: `8872.4 / 19521.5 ≈ 45.5%`
-
-So in this example:
-
-- the raw optimization objective is still dominated numerically by the node-field term,
-- but the display-normalized summary says the edge term is the largest human-readable component.
-
-That is exactly the intended behavior:
-
-- optimize the real raw loss,
-- display a more interpretable cross-loss comparison.
+Those raw percentages are mathematically correct and they do indicate the actual contribution of
+each weighted term to the optimized `total_loss`. Because the losses are now normalized closer to
+their semantic units, those percentages are much more interpretable than before.
 
 #### How to interpret the metrics now
 
@@ -1311,18 +1231,19 @@ That is exactly the intended behavior:
   Still refer to the raw optimized objective.
 
 - `train_node_field` and `val_node_field`
-  Still refer to the raw score-matching loss, before display normalization.
+  Refer to the raw score-matching loss.
 
 - the verbose epoch line
-  Uses display-normalized values for readability, especially for `node_field`.
+  Uses raw weighted values.
 
 - the percentages in that line
-  Are display shares, not raw optimization shares.
+  Are raw optimization shares.
 
 So the safest interpretation is:
 
 - use `train_total` / `val_total` for optimization and checkpointing meaning,
-- use the printed component percentages only as a qualitative dashboard of relative displayed scale.
+- use the printed component percentages as the actual weighted contribution of each displayed term to the raw optimized objective,
+- use the lambdas as conceptual weights, with `1.0` as the natural first thing to try for per-node and per-pair terms.
 
 ## Typical Training Flow
 
