@@ -720,6 +720,164 @@ where:
 
 This can improve diversity at the cost of noisier trajectories.
 
+## Classifier-Free Conditioning
+
+The maintained implementation supports classifier-free guidance over explicit target-conditioning channels.
+
+This is not classifier guidance through a separately trained classifier. In the diffusion and score-based
+literature, that alternative is usually called `classifier guidance`: first train the generative model in the
+ordinary way, then train a separate classifier, and during sampling add a target-seeking gradient derived
+from the classifier probabilities. In symbols, that guidance takes the form
+
+```math
+g_{\mathrm{guided}}(x, c, y)
+\approx
+g_\theta(x, c)
++
+\lambda \nabla_x \log p_\psi(y \mid x, c)
+```
+
+where:
+
+- $g_\theta(x, c)$ is the score from the generative model,
+- $p_\psi(y \mid x, c)$ is the separately trained classifier,
+- $\lambda$ controls how strongly sampling is pushed toward the requested target.
+
+The important distinction is that classifier guidance leaves the generator training unchanged and injects
+target pressure only at sampling time through the auxiliary classifier. By contrast, classifier-free guidance
+trains the generative model itself to operate with and without the target condition, then combines those
+two branches during sampling. The maintained implementation in this repository supports both routes, but
+keeps them on separate APIs so the workflows do not blur together.
+
+One practical advantage of classifier guidance is modularity: a generator can be pretrained once as a
+general conditional or unconditional model, and separate task-specific classifiers can be attached later for
+many different objectives without retraining the generator itself. That can be attractive when the same
+base generator is meant to support multiple downstream optimization or property-targeting tasks. The
+tradeoff is that sampling then depends on an additional classifier whose gradients must remain informative
+along the full noisy or iterative generation trajectory.
+
+Instead, the model can be trained with optional target-conditioning channels appended to the graph-level
+condition vector and can later interpolate between:
+
+- a conditional score using the requested target,
+- an unconditional score using a null version of those target channels.
+
+Conceptually, if the ordinary graph condition is:
+
+$$
+c
+$$
+
+and the optional target-conditioning channels are:
+
+$$
+t
+$$
+
+then the model is trained on an augmented condition:
+
+$$
+[\; c, t \;]
+$$
+
+When an unconditional branch is needed, the implementation keeps the base graph condition and nulls only
+the target-guidance slice:
+
+$$
+[\; c, 0 \;]
+$$
+
+This design is deliberate. The graph embedding, node count, and edge count still describe the requested
+graph context. Only the optional target request is removed.
+
+### Training Behavior
+
+Classifier-free conditioning is activated only when guidance is enabled in the wrapper and target values
+are provided during `fit()`.
+
+At that point the wrapper:
+
+- determines the target-conditioning width from the target encoding
+  (1 feature for regression, one-hot width for classification),
+- appends those features to the scaled graph condition array,
+- randomly drops them on a subset of training examples,
+- records that dropped examples should use the null target condition.
+
+Operationally, this teaches the same model to score both:
+
+$$
+g_\theta(x, [c, t])
+$$
+
+and
+
+$$
+g_\theta(x, [c, 0])
+$$
+
+using one shared backbone.
+
+The exact target semantics depend on the task-level targets passed through the sklearn-style wrapper, but
+the mechanism is always the same: preserve the graph context, optionally erase the target request, and let
+the model learn both regimes.
+
+### Sampling Behavior
+
+At inference time, classifier-free guidance is used only when:
+
+- guidance was enabled and trained,
+- `desired_target` is passed to `predict()` or the graph-generator decode/sample path,
+- `guidance_scale` is nonnegative.
+
+The implementation evaluates both branches and combines them as:
+
+```math
+g_{\mathrm{cfg}}(x, c, t)
+=
+g_\theta(x, [c, 0])
++
+s \left(
+g_\theta(x, [c, t]) - g_\theta(x, [c, 0])
+\right)
+```
+
+where:
+
+- $s$ is `guidance_scale`,
+- $g_\theta(x, [c, t])$ is the conditional score,
+- $g_\theta(x, [c, 0])$ is the unconditional score.
+
+So:
+
+- `guidance_scale = 0` reduces to the unconditional score,
+- `guidance_scale = 1` uses the ordinary conditional score,
+- `guidance_scale > 1` amplifies the target-driven component.
+
+In the code, this is implemented inside the Conditional Node Field sampling loop by supplying both
+`global_condition` and `global_condition_unconditional`.
+
+### API Surface
+
+The maintained implementation now keeps the two guidance strategies separate.
+
+Classifier-free guidance uses the existing target-conditioning API:
+
+- node generator: `predict(..., desired_target=..., guidance_scale=...)`
+- graph generator: `decode(...)`, `sample(...)`, `conditional_sample(...)`
+
+Classifier guidance uses a separate post-hoc classifier API:
+
+- training: `set_guidance_classifier(...)`, `train_guidance_classifier(...)`
+- node generator: `predict_classifier_guided(..., desired_class=..., classifier_scale=...)`
+- graph generator: `decode_classifier_guided(...)`, `sample_classifier_guided(...)`,
+  `conditional_sample_classifier_guided(...)`
+
+If `desired_target` is omitted, CFG generation falls back to the ordinary unguided conditional path even
+when the model was trained with CFG support.
+
+If classifier guidance is requested, the generator uses the null-target branch for the generative condition
+and injects target pressure only through the separate classifier gradient.
+
 ## Final Projection at Inference
 
 After the iterative Conditional Node Field updates, the model runs one final pass on the final sample and applies auxiliary heads:
@@ -1025,9 +1183,14 @@ If generations are poor, `sampling_step_size`, `sampling_steps`, and `node_field
 
 Without the existence and degree heads, the Conditional Node Field alone may produce softer outputs that are harder for the downstream decoder to interpret structurally.
 
-### 4. Guidance is not implemented in phase 1
+### 4. Guidance uses two separate APIs
 
-Classifier guidance is not part of the maintained Conditional Node Field API.
+The maintained implementation supports both:
+
+- classifier-free guidance over explicit target-conditioning channels,
+- separate classifier guidance through a post-hoc guidance classifier.
+
+Those routes use different public methods so the conditioning semantics stay explicit.
 
 ## Source Notes
 

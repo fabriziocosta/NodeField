@@ -1491,6 +1491,39 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.is_fitted_ = True
         return self
 
+    def set_guidance_classifier(self, num_classes: int, hidden_dimension: Optional[int] = None) -> None:
+        self._require_fitted_for_generation()
+        if self.conditional_node_generator_model is None:
+            raise RuntimeError("conditional_node_generator_model is None.")
+        self.conditional_node_generator_model.set_guidance_classifier(
+            num_classes=num_classes,
+            hidden_dimension=hidden_dimension,
+        )
+
+    def train_guidance_classifier(
+        self,
+        graphs: List[nx.Graph],
+        targets: Sequence[Any],
+        learning_rate: float = 1e-3,
+        maximum_epochs: int = 30,
+        batch_size: Optional[int] = None,
+        noise_scale: Optional[float] = None,
+    ) -> None:
+        self._require_fitted_for_generation()
+        if self.conditional_node_generator_model is None:
+            raise RuntimeError("conditional_node_generator_model is None.")
+        node_embeddings_list, graph_conditioning = self.encode(graphs)
+        node_batch = self._build_node_batch(graphs, node_embeddings_list)
+        self.conditional_node_generator_model.train_guidance_classifier(
+            node_batch=node_batch,
+            graph_conditioning=graph_conditioning,
+            targets=targets,
+            learning_rate=learning_rate,
+            maximum_epochs=maximum_epochs,
+            batch_size=batch_size,
+            noise_scale=noise_scale,
+        )
+
     @timeit
     def node_encode(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
         """Transform graphs into per-node embedding matrices.
@@ -1795,7 +1828,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: GraphConditioningBatch,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
-        desired_class: Optional[Union[int, Sequence[int]]] = None,
     ) -> List[nx.Graph]:
         """Run a single generator pass and decode graphs without feasibility retries.
 
@@ -1803,8 +1835,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             graph_conditioning (GraphConditioningBatch): Input value.
             desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
             guidance_scale (float): Optional input value.
-            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
-
         Returns:
             List[nx.Graph]: Computed result.
         """
@@ -1814,7 +1844,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             graph_conditioning,
             desired_target=desired_target,
             guidance_scale=guidance_scale,
-            desired_class=desired_class,
         )
         self._log_generated_batch_info(graph_conditioning, generated_nodes)
         predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
@@ -1840,7 +1869,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: GraphConditioningBatch,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
-        desired_class: Optional[Union[int, Sequence[int]]] = None,
         apply_feasibility_filtering: Optional[bool] = None,
     ) -> List[Optional[nx.Graph]]:
         """Decode graphs and optionally reject infeasible outputs until the batch is filled.
@@ -1849,7 +1877,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             graph_conditioning (GraphConditioningBatch): Input value.
             desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
             guidance_scale (float): Optional input value.
-            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
             apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
@@ -1866,7 +1893,6 @@ class ConditionalNodeFieldGraphGenerator(object):
                     graph_conditioning,
                     desired_target=desired_target,
                     guidance_scale=guidance_scale,
-                    desired_class=desired_class,
                 )
             )
 
@@ -1890,7 +1916,6 @@ class ConditionalNodeFieldGraphGenerator(object):
                 candidate_conditioning,
                 desired_target=desired_target,
                 guidance_scale=guidance_scale,
-                desired_class=desired_class,
             )
             total_generated += len(decoded_graphs)
             feasibility_mask = np.asarray(
@@ -1950,7 +1975,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: GraphConditioningBatch,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
-        desired_class: Optional[Union[int, Sequence[int]]] = None,
         apply_feasibility_filtering: Optional[bool] = None,
     ) -> List[nx.Graph]:
         """Decode graphs and optionally reject infeasible outputs until the batch is filled.
@@ -1959,7 +1983,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             graph_conditioning (GraphConditioningBatch): Input value.
             desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
             guidance_scale (float): Optional input value.
-            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
             apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
@@ -1969,7 +1992,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             graph_conditioning,
             desired_target=desired_target,
             guidance_scale=guidance_scale,
-            desired_class=desired_class,
             apply_feasibility_filtering=apply_feasibility_filtering,
         )
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
@@ -1992,7 +2014,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: GraphConditioningBatch,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
-        desired_class: Optional[Union[int, Sequence[int]]] = None,
         apply_feasibility_filtering: Optional[bool] = None,
     ) -> List[nx.Graph]:
         """Decode conditioning vectors into reconstructed graphs.
@@ -2001,7 +2022,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             graph_conditioning (GraphConditioningBatch): Input value.
             desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
             guidance_scale (float): Optional input value.
-            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
             apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
@@ -2012,16 +2032,171 @@ class ConditionalNodeFieldGraphGenerator(object):
             print(f"Decoding {len(graph_conditioning)} conditioning vectors")
             if desired_target is not None:
                 print(f"Using CFG target guidance: {desired_target} (scale={guidance_scale})")
-            if desired_class is not None:
-                print(f"Using classifier guidance toward class(es): {desired_class}")
-        
         return self._decode_with_feasibility(
             graph_conditioning,
             desired_target=desired_target,
             guidance_scale=guidance_scale,
-            desired_class=desired_class,
             apply_feasibility_filtering=apply_feasibility_filtering,
         )
+
+    def _decode_conditioning_batch_classifier_guided(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_class: Union[int, Sequence[Any]],
+        classifier_scale: float = 1.0,
+    ) -> List[nx.Graph]:
+        if int(self.verbose) >= 3:
+            print(f"Predicting classifier-guided node matrices for {len(graph_conditioning)} graphs...")
+        generated_nodes = self.conditional_node_generator_model.predict_classifier_guided(
+            graph_conditioning,
+            desired_class=desired_class,
+            classifier_scale=classifier_scale,
+        )
+        self._log_generated_batch_info(graph_conditioning, generated_nodes)
+        predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
+        if predicted_edge_probability_matrices is None:
+            raise RuntimeError(
+                "Graph decoding requires explicit edge-probability matrices from the conditional node generator."
+            )
+        predicted_node_labels_list = self._resolve_predicted_node_labels(generated_nodes)
+        predicted_edge_labels_list, predicted_edge_label_matrices = self._resolve_predicted_edge_labels(
+            generated_nodes,
+            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+        )
+        return self.graph_decoder.decode(
+            generated_nodes,
+            predicted_node_labels_list=predicted_node_labels_list,
+            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+            predicted_edge_labels_list=predicted_edge_labels_list,
+            predicted_edge_label_matrices=predicted_edge_label_matrices,
+        )
+
+    def _decode_with_feasibility_slots_classifier_guided(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_class: Union[int, Sequence[Any]],
+        classifier_scale: float = 1.0,
+        apply_feasibility_filtering: Optional[bool] = None,
+    ) -> List[Optional[nx.Graph]]:
+        use_filtering = (
+            self.use_feasibility_filtering
+            if apply_feasibility_filtering is None
+            else bool(apply_feasibility_filtering)
+        )
+        if self.feasibility_estimator is None or not use_filtering:
+            return list(
+                self._decode_conditioning_batch_classifier_guided(
+                    graph_conditioning,
+                    desired_class=desired_class,
+                    classifier_scale=classifier_scale,
+                )
+            )
+
+        accepted_graphs_by_slot: List[Optional[nx.Graph]] = [None] * len(graph_conditioning)
+        pending_conditioning = graph_conditioning
+        pending_slot_indices = list(range(len(graph_conditioning)))
+        attempt = 0
+        total_generated = 0
+        while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
+            attempt += 1
+            candidate_conditioning = self._repeat_graph_conditioning(
+                pending_conditioning,
+                repeats=self.feasibility_candidates_per_attempt,
+            )
+            candidate_slot_indices = [
+                slot_idx
+                for slot_idx in pending_slot_indices
+                for _ in range(self.feasibility_candidates_per_attempt)
+            ]
+            decoded_graphs = self._decode_conditioning_batch_classifier_guided(
+                candidate_conditioning,
+                desired_class=desired_class,
+                classifier_scale=classifier_scale,
+            )
+            total_generated += len(decoded_graphs)
+            feasibility_mask = np.asarray(
+                self.feasibility_estimator.predict(decoded_graphs),
+                dtype=bool,
+            )
+            if feasibility_mask.shape[0] != len(decoded_graphs):
+                raise RuntimeError(
+                    "Feasibility estimator returned a mask of unexpected length "
+                    f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
+                )
+            accepted_this_round = set()
+            for local_idx, (graph, is_feasible) in enumerate(zip(decoded_graphs, feasibility_mask.tolist())):
+                slot_idx = candidate_slot_indices[local_idx]
+                if is_feasible and accepted_graphs_by_slot[slot_idx] is None:
+                    accepted_graphs_by_slot[slot_idx] = graph
+                    accepted_this_round.add(slot_idx)
+            rejected_slot_indices = [
+                slot_idx for slot_idx in pending_slot_indices if accepted_graphs_by_slot[slot_idx] is None
+            ]
+            if int(self.verbose) >= 1:
+                accepted_now = len(accepted_this_round)
+                rejected_now = len(rejected_slot_indices)
+                accepted_total = sum(graph is not None for graph in accepted_graphs_by_slot)
+                missing_total = len(graph_conditioning) - accepted_total
+                attempted_total = len(decoded_graphs)
+                acceptance_rate = (accepted_now / attempted_total) if attempted_total > 0 else 0.0
+                print(
+                    f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
+                    f"generated={attempted_total:>4} | "
+                    f"accepted={accepted_now:>2} | "
+                    f"rejected={rejected_now:>2} | "
+                    f"rate={acceptance_rate:>6.1%} | "
+                    f"accepted_total={accepted_total:>2} | "
+                    f"missing_total={missing_total:>2}"
+                )
+            if not rejected_slot_indices:
+                break
+            pending_slot_indices = rejected_slot_indices
+            pending_conditioning = self._slice_graph_conditioning(
+                graph_conditioning,
+                pending_slot_indices,
+            )
+
+        accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
+        if int(self.verbose) >= 1:
+            overall_rate = (accepted_count / total_generated) if total_generated > 0 else 0.0
+            print(
+                "Feasibility filtering summary: "
+                f"generated={total_generated}, accepted={accepted_count}, "
+                f"acceptance_rate={overall_rate:.1%}."
+            )
+        return accepted_graphs_by_slot
+
+    def decode_classifier_guided(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_class: Union[int, Sequence[Any]],
+        classifier_scale: float = 1.0,
+        apply_feasibility_filtering: Optional[bool] = None,
+    ) -> List[nx.Graph]:
+        self._require_fitted_for_generation()
+        if self.verbose:
+            print(f"Decoding {len(graph_conditioning)} conditioning vectors")
+            print(f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})")
+        accepted_graphs_by_slot = self._decode_with_feasibility_slots_classifier_guided(
+            graph_conditioning,
+            desired_class=desired_class,
+            classifier_scale=classifier_scale,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+        )
+        accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
+        if accepted_count != len(graph_conditioning):
+            if self.feasibility_failure_mode == "raise":
+                raise RuntimeError(
+                    "Feasibility filtering did not recover enough graphs: "
+                    f"accepted {accepted_count} of {len(graph_conditioning)} after "
+                    f"{self.max_feasibility_attempts} attempts."
+                )
+            if int(self.verbose) >= 1:
+                print(
+                    "Feasibility filtering exhausted retries; returning only feasible graphs: "
+                    f"accepted {accepted_count} of {len(graph_conditioning)}."
+                )
+        return [graph for graph in accepted_graphs_by_slot if graph is not None]
 
     @timeit
     def sample(
@@ -2030,7 +2205,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         interpolate_between_n_samples: Optional[int] = None,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
-        desired_class: Optional[Union[int, Sequence[int]]] = None,
         apply_feasibility_filtering: Optional[bool] = None,
     ) -> List[nx.Graph]:
         """Generate random graphs by sampling conditioning vectors from the prior.
@@ -2040,7 +2214,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             interpolate_between_n_samples (Optional[int]): Optional input value.
             desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
             guidance_scale (float): Optional input value.
-            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
             apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
@@ -2056,9 +2229,6 @@ class ConditionalNodeFieldGraphGenerator(object):
                 )
             if desired_target is not None:
                 print(f"Using CFG target guidance: {desired_target} (scale={guidance_scale})")
-            if desired_class is not None:
-                print(f"Using classifier guidance toward class(es): {desired_class}")
-        
         sampled_conditioning = self._sample_conditions(
             n_samples,
             interpolate_between_n_samples=interpolate_between_n_samples,
@@ -2067,7 +2237,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             sampled_conditioning,
             desired_target=desired_target,
             guidance_scale=guidance_scale,
-            desired_class=desired_class,
             apply_feasibility_filtering=apply_feasibility_filtering,
         )
 
@@ -2078,7 +2247,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         n_samples: int = 1,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
-        desired_class: Optional[Union[int, Sequence[int]]] = None,
         apply_feasibility_filtering: Optional[bool] = None,
     ) -> List[List[nx.Graph]]:
         """Sample multiple graphs per input by conditioning on each graph's encoding.
@@ -2088,7 +2256,6 @@ class ConditionalNodeFieldGraphGenerator(object):
             n_samples (int): Optional input value.
             desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
             guidance_scale (float): Optional input value.
-            desired_class (Optional[Union[int, Sequence[int]]]): Optional input value.
             apply_feasibility_filtering (Optional[bool]): Optional input value.
 
         Returns:
@@ -2104,7 +2271,65 @@ class ConditionalNodeFieldGraphGenerator(object):
             repeated_conditioning,
             desired_target=desired_target,
             guidance_scale=guidance_scale,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+        )
+        return [
+            [
+                graph
+                for graph in decoded_slots[i * n_samples:(i + 1) * n_samples]
+                if graph is not None
+            ]
+            for i in range(len(graphs))
+        ]
+
+    @timeit
+    def sample_classifier_guided(
+        self,
+        desired_class: Union[int, Sequence[Any]],
+        n_samples: int = 1,
+        interpolate_between_n_samples: Optional[int] = None,
+        classifier_scale: float = 1.0,
+        apply_feasibility_filtering: Optional[bool] = None,
+    ) -> List[nx.Graph]:
+        self._require_fitted_for_generation()
+        if self.verbose:
+            print(f"Sampling {n_samples} graphs")
+            if interpolate_between_n_samples is not None:
+                print(
+                    "Sampling conditioning via stochastic interpolation over "
+                    f"{interpolate_between_n_samples} cached training embeddings per output."
+                )
+            print(f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})")
+        sampled_conditioning = self._sample_conditions(
+            n_samples,
+            interpolate_between_n_samples=interpolate_between_n_samples,
+        )
+        return self.decode_classifier_guided(
+            sampled_conditioning,
             desired_class=desired_class,
+            classifier_scale=classifier_scale,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+        )
+
+    @timeit
+    def conditional_sample_classifier_guided(
+        self,
+        graphs: List[nx.Graph],
+        desired_class: Union[int, Sequence[Any]],
+        n_samples: int = 1,
+        classifier_scale: float = 1.0,
+        apply_feasibility_filtering: Optional[bool] = None,
+    ) -> List[List[nx.Graph]]:
+        self._require_fitted_for_generation()
+        _, graph_conditioning = self.encode(graphs)
+        repeated_conditioning = self._repeat_graph_conditioning(
+            graph_conditioning,
+            repeats=n_samples,
+        )
+        decoded_slots = self._decode_with_feasibility_slots_classifier_guided(
+            repeated_conditioning,
+            desired_class=desired_class,
+            classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
         )
         return [
@@ -2131,6 +2356,26 @@ class ConditionalNodeFieldGraphGenerator(object):
             n_samples=1,
             desired_target=desired_target,
             guidance_scale=guidance_scale,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+        )
+        sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]
+        return sampled_graphs
+
+    def sample_conditioned_on_random_classifier_guided(
+        self,
+        graphs,
+        desired_class: Union[int, Sequence[Any]],
+        n_samples=1,
+        classifier_scale: float = 1.0,
+        apply_feasibility_filtering: Optional[bool] = None,
+    ):
+        self._require_fitted_for_generation()
+        sampled_seed_graphs = random.choices(graphs, k=n_samples)
+        reconstructed_graphs_list = self.conditional_sample_classifier_guided(
+            sampled_seed_graphs,
+            desired_class=desired_class,
+            n_samples=1,
+            classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
         )
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]

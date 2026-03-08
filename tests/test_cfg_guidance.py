@@ -57,6 +57,7 @@ class _ConditionalStub:
         self.setup_targets = None
         self.fit_targets = None
         self.last_predict_kwargs = None
+        self.last_classifier_predict_kwargs = None
 
     def setup(self, node_batch, graph_conditioning, targets=None):
         self.setup_targets = targets
@@ -64,11 +65,10 @@ class _ConditionalStub:
     def fit(self, node_batch, graph_conditioning, targets=None):
         self.fit_targets = targets
 
-    def predict(self, graph_conditioning, desired_target=None, guidance_scale=1.0, desired_class=None):
+    def predict(self, graph_conditioning, desired_target=None, guidance_scale=1.0):
         self.last_predict_kwargs = {
             "desired_target": desired_target,
             "guidance_scale": guidance_scale,
-            "desired_class": desired_class,
         }
         n = len(graph_conditioning)
         return GeneratedNodeBatch(
@@ -78,6 +78,13 @@ class _ConditionalStub:
             edge_probability_matrices=[np.asarray([[0.0, 0.9], [0.9, 0.0]], dtype=float) for _ in range(n)],
             edge_label_matrices=[np.asarray([[None, "-"], ["-", None]], dtype=object) for _ in range(n)],
         )
+
+    def predict_classifier_guided(self, graph_conditioning, desired_class, classifier_scale=1.0):
+        self.last_classifier_predict_kwargs = {
+            "desired_class": desired_class,
+            "classifier_scale": classifier_scale,
+        }
+        return self.predict(graph_conditioning)
 
 
 def _graph():
@@ -120,6 +127,22 @@ def test_graph_generator_decode_passes_cfg_args_to_predict():
     generator.decode(conditioning, desired_target=1, guidance_scale=2.5)
     assert cond.last_predict_kwargs["desired_target"] == 1
     assert cond.last_predict_kwargs["guidance_scale"] == 2.5
+
+
+def test_graph_generator_decode_classifier_guided_uses_separate_api():
+    cond = _ConditionalStub()
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=cond,
+        graph_decoder=_DecoderStub(),
+        verbose=False,
+    )
+    generator.is_fitted_ = True
+    conditioning = generator.graph_encode([_graph()])
+    generator.decode_classifier_guided(conditioning, desired_class=1, classifier_scale=3.0)
+    assert cond.last_classifier_predict_kwargs["desired_class"] == 1
+    assert cond.last_classifier_predict_kwargs["classifier_scale"] == 3.0
 
 
 def test_graph_generator_decode_requires_fit():
@@ -245,6 +268,21 @@ def test_predict_rejects_negative_guidance_scale():
                 edge_counts=np.zeros((1,), dtype=np.int64),
             ),
             guidance_scale=-1.0,
+        )
+
+
+def test_predict_classifier_guided_rejects_negative_classifier_scale():
+    generator = ConditionalNodeFieldGenerator()
+    generator.model = types.SimpleNamespace(parameters=lambda: iter([torch.tensor(0.0)]))
+    with pytest.raises(ValueError, match="classifier_scale must be >= 0"):
+        generator.predict_classifier_guided(
+            graph_conditioning=GraphConditioningBatch(
+                graph_embeddings=np.zeros((1, 2), dtype=float),
+                node_counts=np.ones((1,), dtype=np.int64),
+                edge_counts=np.zeros((1,), dtype=np.int64),
+            ),
+            desired_class=0,
+            classifier_scale=-1.0,
         )
 
 
