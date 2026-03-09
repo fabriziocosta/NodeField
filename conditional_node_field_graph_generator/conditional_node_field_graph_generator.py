@@ -2009,11 +2009,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                 print(
                     f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
                     f"generated={attempted_total:>4} | "
-                    f"accepted={feasible_now:>2} | "
-                    f"filled={filled_now:>2} | "
+                    f"feasible_candidates={feasible_now:>2} | "
+                    f"fulfilled_slots={filled_now:>2} | "
                     f"pending_slots={pending_now:>2} | "
-                    f"rate={acceptance_rate:>6.1%} | "
-                    f"filled_total={filled_total:>2} | "
+                    f"feasible_rate={acceptance_rate:>6.1%} | "
+                    f"fulfilled_total={filled_total:>2} | "
                     f"missing_total={missing_total:>2}"
                 )
             if not rejected_slot_indices:
@@ -2029,8 +2029,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
             print(
                 "Feasibility filtering summary: "
-                f"generated={total_generated}, accepted={total_feasible}, "
-                f"acceptance_rate={overall_rate:.1%}, "
+                f"generated={total_generated}, feasible_candidates={total_feasible}, "
+                f"feasible_rate={overall_rate:.1%}, "
                 f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
             )
         return accepted_graphs_by_slot
@@ -2208,11 +2208,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                 print(
                     f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
                     f"generated={attempted_total:>4} | "
-                    f"accepted={feasible_now:>2} | "
-                    f"filled={filled_now:>2} | "
+                    f"feasible_candidates={feasible_now:>2} | "
+                    f"fulfilled_slots={filled_now:>2} | "
                     f"pending_slots={pending_now:>2} | "
-                    f"rate={acceptance_rate:>6.1%} | "
-                    f"filled_total={filled_total:>2} | "
+                    f"feasible_rate={acceptance_rate:>6.1%} | "
+                    f"fulfilled_total={filled_total:>2} | "
                     f"missing_total={missing_total:>2}"
                 )
             if not rejected_slot_indices:
@@ -2228,8 +2228,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
             print(
                 "Feasibility filtering summary: "
-                f"generated={total_generated}, accepted={total_feasible}, "
-                f"acceptance_rate={overall_rate:.1%}, "
+                f"generated={total_generated}, feasible_candidates={total_feasible}, "
+                f"feasible_rate={overall_rate:.1%}, "
                 f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
             )
         return accepted_graphs_by_slot
@@ -2370,11 +2370,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                 print(
                     f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
                     f"generated={attempted_total:>4} | "
-                    f"accepted={feasible_now:>2} | "
-                    f"filled={filled_now:>2} | "
+                    f"feasible_candidates={feasible_now:>2} | "
+                    f"fulfilled_slots={filled_now:>2} | "
                     f"pending_slots={pending_now:>2} | "
-                    f"rate={acceptance_rate:>6.1%} | "
-                    f"filled_total={filled_total:>2} | "
+                    f"feasible_rate={acceptance_rate:>6.1%} | "
+                    f"fulfilled_total={filled_total:>2} | "
                     f"missing_total={missing_total:>2}"
                 )
             if not rejected_slot_indices:
@@ -2390,8 +2390,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
             print(
                 "Feasibility filtering summary: "
-                f"generated={total_generated}, accepted={total_feasible}, "
-                f"acceptance_rate={overall_rate:.1%}, "
+                f"generated={total_generated}, feasible_candidates={total_feasible}, "
+                f"feasible_rate={overall_rate:.1%}, "
                 f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
             )
         return accepted_graphs_by_slot

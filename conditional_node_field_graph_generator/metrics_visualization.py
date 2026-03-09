@@ -79,7 +79,7 @@ def plot_metrics(
     smoothed_train_alpha = 0.7
     smoothed_val_alpha = 1.0
     raw_train_linewidth = 1.0
-    raw_val_linewidth = 1.1
+    raw_val_linewidth = 1.0
     smoothed_train_linewidth = 1.8
     smoothed_val_linewidth = 3.0
 
@@ -151,7 +151,6 @@ def plot_metrics(
                 color=color,
                 alpha=raw_val_alpha,
                 linewidth=raw_val_linewidth,
-                linestyle="--",
             )
             sm_train = _loess_smooth(train, window)
             sm_val = _loess_smooth(val, window)
