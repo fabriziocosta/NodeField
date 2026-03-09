@@ -342,6 +342,36 @@ Important distinction:
 - the ILP enforces structural consistency,
 - the feasibility estimator enforces domain-specific validity beyond the ILP.
 
+## Feasible-Rate Score
+
+The generator now exposes a scoring method built on top of this decoder-plus-filtering stage:
+
+- `ConditionalNodeFieldGraphGenerator.score_feasible_rate(...)`
+
+The main returned score is:
+
+- `score = feasible_rate`
+
+where:
+
+- `feasible_rate = feasible_candidates / generated_candidates`
+
+Interpretation:
+
+- the decoder produces candidate graphs,
+- the feasibility estimator accepts or rejects them,
+- the score measures how often that full stage produces feasible candidates under a fixed retry budget.
+
+This makes the score useful as a hyperparameter-search objective when:
+
+- `max_feasibility_attempts`,
+- `feasibility_candidates_per_attempt`,
+- `n_samples`
+
+are held fixed for the experiment.
+
+In that setting, higher score means the current generator configuration makes the decoder produce feasible outputs more reliably.
+
 Examples of “feasibility” could include:
 
 - chemistry validity,
@@ -457,6 +487,18 @@ Higher values:
 
 - increase acceptance probability per retry round,
 - but increase compute cost per round.
+
+### Score Interpretation
+
+When comparing runs with `score_feasible_rate(...)`, keep the retry-budget parameters fixed.
+
+If you change:
+
+- `max_feasibility_attempts`,
+- `feasibility_candidates_per_attempt`,
+- `n_samples`
+
+then the score is no longer a like-for-like comparison of generator quality, because the decoder is being allowed a different amount of search effort.
 
 ## Suggested Mental Model
 

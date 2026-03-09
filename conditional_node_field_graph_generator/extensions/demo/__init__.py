@@ -1,7 +1,15 @@
 """Demo-oriented helpers for notebook workflows."""
 
 from ...persistence import list_saved_graph_generators, load_graph_generator, save_graph_generator
-from .pipeline import build_dataset, build_graph_generator, fit_graph_generator, prepare_experiment
+from .pipeline import (
+    build_dataset,
+    build_graph_generator,
+    build_zinc_dataset,
+    fit_graph_generator,
+    prepare_experiment,
+    sample_hyperparameter_configuration,
+    score_graph_generator_feasible_rate,
+)
 from .storage import describe_resume_checkpoint, find_latest_checkpoint, list_training_checkpoints
 from .visualization import (
     compare_real_vs_generated,
@@ -21,6 +29,7 @@ from .visualization import (
 __all__ = [
     "build_dataset",
     "build_graph_generator",
+    "build_zinc_dataset",
     "compare_real_vs_generated",
     "describe_resume_checkpoint",
     "find_latest_checkpoint",
@@ -36,7 +45,9 @@ __all__ = [
     "plot_similarity_distribution_with_iqr",
     "prepare_experiment",
     "run_label_histogram_analysis",
+    "sample_hyperparameter_configuration",
     "sample_positive_endpoint_pair",
+    "score_graph_generator_feasible_rate",
     "save_graph_generator",
     "select_pos_neg",
     "show_samples",

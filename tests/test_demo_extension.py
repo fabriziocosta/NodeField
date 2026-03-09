@@ -1,11 +1,16 @@
+from pathlib import Path
+
 import networkx as nx
 import numpy as np
 import pandas as pd
 import pytest
 
 from conditional_node_field_graph_generator.extensions.demo.pipeline import (
+    build_zinc_dataset,
     fit_graph_generator,
     prepare_experiment,
+    sample_hyperparameter_configuration,
+    score_graph_generator_feasible_rate,
 )
 from conditional_node_field_graph_generator.extensions.demo.visualization import (
     _temporary_decoder_n_jobs,
@@ -93,6 +98,67 @@ def test_prepare_experiment_splits_dataset_and_preserves_outputs(capsys):
     assert "train_graphs:7   test_graphs:3" in capsys.readouterr().out
 
 
+def test_build_zinc_dataset_uses_compact_size_interface(monkeypatch, tmp_path):
+    calls = {}
+
+    def fake_download(dataset_dir):
+        calls["download"] = Path(dataset_dir)
+        return Path(dataset_dir) / "zinc.csv"
+
+    def fake_build(dataset_dir, csv_path):
+        calls["build"] = {"dataset_dir": Path(dataset_dir), "csv_path": Path(csv_path)}
+        return {"node_counts": [10, 11], "total_graphs": 200_000}
+
+    def fake_load(dataset_dir, max_molecules, min_node_count, max_node_count):
+        calls["load"] = {
+            "dataset_dir": Path(dataset_dir),
+            "max_molecules": max_molecules,
+            "min_node_count": min_node_count,
+            "max_node_count": max_node_count,
+        }
+        graphs = [f"g{idx}" for idx in range(40)]
+        metadata = pd.DataFrame({"zinc_id": [f"z{idx}" for idx in range(40)]})
+        return graphs, metadata
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.download_zinc_dataset",
+        fake_download,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.build_zinc_graph_corpus",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.load_zinc_graph_dataset",
+        fake_load,
+    )
+
+    graphs, metadata, manifest = build_zinc_dataset(
+        dataset_dir=tmp_path,
+        num_examples=25,
+        min_size=10,
+        max_size=12,
+        random_state=7,
+    )
+
+    assert len(graphs) == 25
+    assert len(metadata) == 25
+    assert manifest == {"node_counts": [10, 11], "total_graphs": 200_000}
+    assert calls["load"] == {
+        "dataset_dir": tmp_path.resolve(),
+        "max_molecules": 200000,
+        "min_node_count": 10,
+        "max_node_count": 12,
+    }
+    assert graphs == build_zinc_dataset(
+        dataset_dir=tmp_path,
+        num_examples=25,
+        min_size=10,
+        max_size=12,
+        random_state=7,
+    )[0]
+
+
 def test_fit_graph_generator_rejects_conflicting_resume_arguments():
     recorder = type("_Recorder", (), {"fit": lambda *args, **kwargs: None})()
 
@@ -146,6 +212,49 @@ def test_fit_graph_generator_falls_back_when_latest_checkpoint_is_incompatible(t
     ]
     output = capsys.readouterr().out
     assert "Latest checkpoint is incompatible" in output
+
+
+def test_sample_hyperparameter_configuration_respects_typed_ranges():
+    config = sample_hyperparameter_configuration(
+        {
+            "max_feasibility_attempts": {"type": "int", "low": 2, "high": 5},
+            "sampling_step_size": {"type": "real", "low": 0.01, "high": 0.1},
+        },
+        random_state=7,
+    )
+
+    assert isinstance(config["max_feasibility_attempts"], int)
+    assert 2 <= config["max_feasibility_attempts"] <= 5
+    assert isinstance(config["sampling_step_size"], float)
+    assert 0.01 <= config["sampling_step_size"] <= 0.1
+
+
+def test_score_graph_generator_feasible_rate_forwards_to_member_function():
+    calls = {}
+
+    class _FakeScoringGenerator:
+        def score_feasible_rate(self, **kwargs):
+            calls["kwargs"] = kwargs
+            return {"score": 0.25}
+
+    result = score_graph_generator_feasible_rate(
+        _FakeScoringGenerator(),
+        n_samples=2,
+        max_feasibility_attempts=4,
+        feasibility_candidates_per_attempt=3,
+        verbose=True,
+    )
+
+    assert result == {"score": 0.25}
+    assert calls["kwargs"] == {
+        "n_samples": 2,
+        "max_feasibility_attempts": 4,
+        "feasibility_candidates_per_attempt": 3,
+        "interpolate_between_n_samples": None,
+        "desired_target": None,
+        "guidance_scale": 1.0,
+        "verbose": True,
+    }
 
 
 class _FakeCompareGenerator:

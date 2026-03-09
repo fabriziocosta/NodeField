@@ -424,6 +424,23 @@ By default, this samples stored graph-conditioning rows directly. When `interpol
 
 Encode each input graph, repeat each condition `n_samples` times, then decode multiple generated variants per input graph.
 
+### `score_feasible_rate(n_samples, max_feasibility_attempts, feasibility_candidates_per_attempt, ...)`
+
+Sample graph-level conditions, decode under feasibility filtering, and return a score dictionary whose main objective is:
+
+- `score`
+  Equal to candidate-level `feasible_rate`.
+
+This is intended for hyperparameter search when you want to measure how often the generator-decoder pipeline produces feasible outputs under a fixed retry budget.
+
+The returned dictionary also includes:
+
+- `feasible_rate`
+- `fulfilled_rate`
+- `accepted_slots`
+- `generated_candidates`
+- `feasible_candidates`
+
 ### `interpolate(G1, G2, k, interpolation_mode)`
 
 Encode two graphs, interpolate in graph-conditioning space, interpolate node/edge counts separately, then decode each intermediate point.

@@ -509,6 +509,58 @@ def _zinc_graph_bucket_path(dataset_dir: Path, node_count: int) -> Path:
     return dataset_dir / "graph_corpus" / f"graphs_nodes_{int(node_count):03d}.pkl"
 
 
+def _normalize_zinc_corpus_manifest(dataset_dir: Path, manifest: dict) -> tuple[dict, bool]:
+    """Backfill derived fields for older cached manifests."""
+    normalized = dict(manifest)
+    changed = False
+
+    node_counts = [int(node_count) for node_count in normalized.get("node_counts", [])]
+    if normalized.get("node_counts") != node_counts:
+        normalized["node_counts"] = node_counts
+        changed = True
+
+    bucket_files = normalized.get("bucket_files")
+    if bucket_files is None:
+        normalized["bucket_files"] = {
+            node_count: str(_zinc_graph_bucket_path(dataset_dir, node_count))
+            for node_count in node_counts
+        }
+        changed = True
+    else:
+        normalized_bucket_files = {
+            int(node_count): str(Path(bucket_path).expanduser().resolve())
+            for node_count, bucket_path in bucket_files.items()
+        }
+        if normalized_bucket_files != bucket_files:
+            normalized["bucket_files"] = normalized_bucket_files
+            changed = True
+
+    return normalized, changed
+
+
+def _normalize_zinc_bucket_items(items: object) -> tuple[list[tuple[nx.Graph, dict]], bool]:
+    """Backfill older bucket payloads into the current pair representation."""
+    if isinstance(items, list):
+        if all(isinstance(item, tuple) and len(item) == 2 for item in items):
+            return items, False
+        raise ValueError("Unsupported ZINC bucket list format.")
+
+    if isinstance(items, dict) and "graphs" in items and "metadata" in items:
+        graphs = list(items["graphs"])
+        metadata = items["metadata"]
+        if isinstance(metadata, pd.DataFrame):
+            rows = metadata.to_dict(orient="records")
+        elif isinstance(metadata, list):
+            rows = [dict(row) for row in metadata]
+        else:
+            raise ValueError("Unsupported legacy ZINC bucket metadata format.")
+        if len(graphs) != len(rows):
+            raise ValueError("Legacy ZINC bucket graphs and metadata lengths differ.")
+        return list(zip(graphs, rows)), True
+
+    raise ValueError("Unsupported ZINC bucket format.")
+
+
 def build_zinc_graph_corpus(
     dataset_dir: Path | str,
     csv_path: Path | str,
@@ -521,7 +573,12 @@ def build_zinc_graph_corpus(
     manifest_path = corpus_dir / "manifest.pkl"
     if manifest_path.exists() and not force:
         with open(manifest_path, "rb") as handle:
-            return pickle.load(handle)
+            manifest = pickle.load(handle)
+        manifest, changed = _normalize_zinc_corpus_manifest(dataset_dir, manifest)
+        if changed:
+            with open(manifest_path, "wb") as handle:
+                pickle.dump(manifest, handle)
+        return manifest
 
     frame = pd.read_csv(csv_path)
     buckets: dict[int, list[tuple[nx.Graph, dict]]] = {}
@@ -569,6 +626,10 @@ def load_zinc_graph_dataset(
     manifest_path = dataset_dir / "graph_corpus" / "manifest.pkl"
     with open(manifest_path, "rb") as handle:
         manifest = pickle.load(handle)
+    manifest, changed = _normalize_zinc_corpus_manifest(dataset_dir, manifest)
+    if changed:
+        with open(manifest_path, "wb") as handle:
+            pickle.dump(manifest, handle)
 
     selected_node_counts = [
         node_count
@@ -583,7 +644,11 @@ def load_zinc_graph_dataset(
         bucket_path = Path(manifest["bucket_files"][node_count])
         with open(bucket_path, "rb") as handle:
             items = pickle.load(handle)
-        for graph, row in items:
+        normalized_items, changed = _normalize_zinc_bucket_items(items)
+        if changed:
+            with open(bucket_path, "wb") as handle:
+                pickle.dump(normalized_items, handle)
+        for graph, row in normalized_items:
             graphs.append(graph)
             metadata_rows.append(row)
             if len(graphs) >= max_molecules:

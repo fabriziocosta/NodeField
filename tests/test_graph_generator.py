@@ -230,6 +230,74 @@ def test_accept_feasible_candidates_counts_all_feasible_and_fills_one_per_slot(m
     assert accepted_graphs_by_slot == ["s0_b", "s1_b"]
 
 
+class _FakeFeasibilityEstimator:
+    def predict(self, decoded_graphs):
+        return [bool(graph.get("feasible", False)) for graph in decoded_graphs]
+
+
+class _FakeScoreGenerator:
+    def __init__(self):
+        self.max_feasibility_attempts = 3
+        self.feasibility_candidates_per_attempt = 2
+        self.verbose = 5
+        self.use_feasibility_filtering = True
+        self.feasibility_estimator = _FakeFeasibilityEstimator()
+        self._attempt = 0
+
+    def _require_fitted_for_generation(self):
+        return None
+
+    def _sample_conditions(self, n_samples, interpolate_between_n_samples=None):
+        del interpolate_between_n_samples
+        return [f"slot-{idx}" for idx in range(n_samples)]
+
+    def _repeat_graph_conditioning(self, conditioning, repeats):
+        return [item for item in conditioning for _ in range(repeats)]
+
+    def _slice_graph_conditioning(self, conditioning, slot_indices):
+        return [conditioning[idx] for idx in slot_indices]
+
+    def _decode_conditioning_batch(self, conditioning, desired_target=None, guidance_scale=1.0):
+        del conditioning, desired_target, guidance_scale
+        self._attempt += 1
+        if self._attempt == 1:
+            return [
+                {"slot": "slot-0", "feasible": True},
+                {"slot": "slot-0", "feasible": False},
+                {"slot": "slot-1", "feasible": False},
+                {"slot": "slot-1", "feasible": False},
+            ]
+        return [
+            {"slot": "slot-1", "feasible": True},
+            {"slot": "slot-1", "feasible": False},
+        ]
+
+    _accept_feasible_candidates_by_slot = staticmethod(
+        ConditionalNodeFieldGraphGenerator._accept_feasible_candidates_by_slot
+    )
+
+
+def test_score_feasible_rate_counts_candidate_feasibility():
+    generator = _FakeScoreGenerator()
+
+    result = ConditionalNodeFieldGraphGenerator.score_feasible_rate(
+        generator,
+        n_samples=2,
+        max_feasibility_attempts=2,
+        feasibility_candidates_per_attempt=2,
+    )
+
+    assert result["score"] == pytest.approx(2 / 6)
+    assert result["feasible_rate"] == pytest.approx(2 / 6)
+    assert result["fulfilled_rate"] == pytest.approx(1.0)
+    assert result["accepted_slots"] == 2
+    assert result["generated_candidates"] == 6
+    assert result["feasible_candidates"] == 2
+    assert generator.max_feasibility_attempts == 3
+    assert generator.feasibility_candidates_per_attempt == 2
+    assert generator.verbose == 5
+
+
 def test_build_supervision_plan_modes_depend_on_labels_and_horizon():
     generator = ConditionalNodeFieldGraphGenerator(locality_horizon=2, verbose=False)
     node_label_targets = [np.asarray(["C", "C"], dtype=object), np.asarray(["C"], dtype=object)]

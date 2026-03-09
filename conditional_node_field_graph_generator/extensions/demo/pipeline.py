@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Optional
 
 import networkx as nx
 import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from AbstractGraph.abstract_graph_operators import compose, cycle, neighborhood, unlabel
@@ -24,7 +25,14 @@ except ModuleNotFoundError:
 
 from ...conditional_node_field_generator import ConditionalNodeFieldGenerator
 from ...conditional_node_field_graph_generator import ConditionalNodeFieldGraphDecoder, ConditionalNodeFieldGraphGenerator
-from ..molecular import PubChemLoader, SupervisedDataSetLoader, draw_molecules
+from ..molecular import (
+    PubChemLoader,
+    SupervisedDataSetLoader,
+    build_zinc_graph_corpus,
+    download_zinc_dataset,
+    draw_molecules,
+    load_zinc_graph_dataset,
+)
 from ..synthetic import ArtificialGraphDatasetConstructor
 from .storage import describe_resume_checkpoint, find_latest_checkpoint
 from .visualization import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
@@ -85,6 +93,42 @@ def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
     raise ValueError(f"Unsupported dataset_type={dataset_type!r}")
 
 
+def build_zinc_dataset(
+    dataset_dir=None,
+    num_examples=10_000,
+    min_size=10,
+    max_size=15,
+    random_state=0,
+):
+    """Load a random ZINC subset after filtering the full cached corpus by node-count range."""
+    if int(num_examples) < 1:
+        raise ValueError("num_examples must be >= 1")
+    if int(min_size) < 1:
+        raise ValueError("min_size must be >= 1")
+    if int(max_size) < int(min_size):
+        raise ValueError("max_size must be >= min_size")
+
+    if dataset_dir is None:
+        dataset_dir = Path(__file__).resolve().parents[3] / "notebooks" / "datasets" / "zinc"
+    dataset_dir = Path(dataset_dir).expanduser().resolve()
+
+    csv_path = download_zinc_dataset(dataset_dir)
+    manifest = build_zinc_graph_corpus(dataset_dir, csv_path=csv_path)
+    max_molecules = int(manifest.get("total_graphs", int(num_examples)))
+    graphs, metadata = load_zinc_graph_dataset(
+        dataset_dir,
+        max_molecules=max_molecules,
+        min_node_count=int(min_size),
+        max_node_count=int(max_size),
+    )
+    if len(graphs) > int(num_examples):
+        rng = np.random.default_rng(random_state)
+        selected_indices = np.sort(rng.choice(len(graphs), size=int(num_examples), replace=False))
+        graphs = [graphs[idx] for idx in selected_indices.tolist()]
+        metadata = metadata.iloc[selected_indices].reset_index(drop=True)
+    return graphs, metadata, manifest
+
+
 def prepare_experiment(build_dataset_fn: Callable, dataset_size=200, test_size=10, random_state=42, **build_kwargs):
     graphs, targets = build_dataset_fn(dataset_size=dataset_size, **build_kwargs)
     train_graphs, test_graphs, train_targets, test_targets = train_test_split(
@@ -95,6 +139,48 @@ def prepare_experiment(build_dataset_fn: Callable, dataset_size=200, test_size=1
     )
     print(f"train_graphs:{len(train_graphs)}   test_graphs:{len(test_graphs)}")
     return graphs, targets, train_graphs, test_graphs, train_targets, test_targets
+
+
+def score_graph_generator_feasible_rate(
+    graph_generator,
+    n_samples=32,
+    max_feasibility_attempts=None,
+    feasibility_candidates_per_attempt=None,
+    interpolate_between_n_samples=None,
+    desired_target=None,
+    guidance_scale=1.0,
+    verbose=False,
+):
+    """Estimate generation quality from the fraction of feasible decoded candidates."""
+    return graph_generator.score_feasible_rate(
+        n_samples=n_samples,
+        max_feasibility_attempts=max_feasibility_attempts,
+        feasibility_candidates_per_attempt=feasibility_candidates_per_attempt,
+        interpolate_between_n_samples=interpolate_between_n_samples,
+        desired_target=desired_target,
+        guidance_scale=guidance_scale,
+        verbose=verbose,
+    )
+
+
+def sample_hyperparameter_configuration(
+    search_space: dict[str, dict[str, Any]],
+    random_state: Optional[int] = None,
+):
+    """Sample one hyperparameter configuration from typed ranges."""
+    rng = np.random.default_rng(random_state)
+    sampled = {}
+    for name, spec in search_space.items():
+        param_type = spec["type"]
+        low = spec["low"]
+        high = spec["high"]
+        if param_type == "int":
+            sampled[name] = int(rng.integers(int(low), int(high) + 1))
+        elif param_type == "real":
+            sampled[name] = float(rng.uniform(float(low), float(high)))
+        else:
+            raise ValueError(f"Unsupported hyperparameter type for {name!r}: {param_type!r}")
+    return sampled
 
 
 def build_graph_generator(
@@ -221,7 +307,7 @@ def build_graph_generator(
         backend=feasibility_backend,
     )
     feasibility_cycle = FeasibilityEstimatorFeatureCannotExist(
-        decomposition_function=cycle(),
+        decomposition_function=compose(cycle(), unlabel()),
         nbits=feasibility_cycle_nbits,
         parallel=feasibility_parallel,
         backend=feasibility_backend,

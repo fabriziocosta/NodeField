@@ -1077,6 +1077,63 @@ Parameters:
 - `apply_feasibility_filtering`
   Same filtering tradeoff as above.
 
+#### `score_feasible_rate(...)`
+
+```python
+score_feasible_rate(
+    n_samples: int = 32,
+    max_feasibility_attempts: Optional[int] = None,
+    feasibility_candidates_per_attempt: Optional[int] = None,
+    interpolate_between_n_samples: Optional[int] = None,
+    desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+    guidance_scale: float = 1.0,
+    verbose: bool = False,
+) -> Dict[str, Any]
+```
+
+Parameters:
+
+- `n_samples`
+  Number of requested output slots used for scoring.
+  Increase: lower variance estimate, more runtime.
+
+- `max_feasibility_attempts`
+  Override for the scoring call only.
+  Increase: more retry rounds before giving up on missing slots.
+
+- `feasibility_candidates_per_attempt`
+  Override for the scoring call only.
+  Increase: more decoded candidates per retry round, more compute.
+
+- `interpolate_between_n_samples`
+  Optional conditioning interpolation during score evaluation.
+
+- `desired_target`
+  Optional CFG target used while scoring.
+
+- `guidance_scale`
+  CFG strength during score evaluation.
+
+- `verbose`
+  If `True`, preserve the object verbosity during scoring.
+  If `False`, suppress scoring-time feasibility logs.
+
+Return value:
+
+- `score`
+  Main scalar objective, equal to candidate-level `feasible_rate`.
+
+- `feasible_rate`
+  `feasible_candidates / generated_candidates`.
+  This measures how often the decode-plus-feasibility pipeline accepts a candidate.
+
+- `fulfilled_rate`
+  `accepted_slots / n_samples`.
+  This measures how often the retry loop actually fills requested slots.
+
+- `accepted_slots`, `generated_candidates`, `feasible_candidates`
+  Raw counts for diagnostics.
+
 #### `sample_classifier_guided(...)`
 
 ```python
