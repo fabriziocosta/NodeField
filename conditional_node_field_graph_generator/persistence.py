@@ -36,23 +36,14 @@ def _sanitize_model_token(value: str) -> str:
     return token or "gg"
 
 
-def _infer_training_set_size(graph_generator) -> Optional[int]:
-    conditioning = getattr(graph_generator, "training_graph_conditioning_", None)
-    if conditioning is None:
-        return None
-    try:
-        size = len(conditioning)
-    except Exception:
-        return None
-    return int(size) if size >= 0 else None
-
-
 def save_graph_generator(graph_generator, model_name=None, model_dir=None):
-    model_root = resolve_saved_generator_dir(model_dir=model_dir)
-    stem = _sanitize_model_token(model_name or "gg")
-    training_set_size = _infer_training_set_size(graph_generator)
-    if training_set_size is not None:
-        stem = f"{stem}-n{training_set_size}"
+    resolved_model_name = model_name if model_name is not None else getattr(graph_generator, "model_name", None)
+    if resolved_model_name is None:
+        print("Skipping graph generator save because model_name is None.")
+        return None
+    resolved_model_dir = model_dir if model_dir is not None else getattr(graph_generator, "model_dir", None)
+    model_root = resolve_saved_generator_dir(model_dir=resolved_model_dir)
+    stem = _sanitize_model_token(resolved_model_name)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
     short_id = uuid.uuid4().hex[:6]
     filename = f"{stem}-{timestamp}-{short_id}.pkl"

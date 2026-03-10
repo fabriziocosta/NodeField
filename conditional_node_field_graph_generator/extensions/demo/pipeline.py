@@ -260,6 +260,8 @@ def build_graph_generator(
     decoder_n_jobs=1,
     artifact_root=None,
     checkpoint_root=None,
+    model_name=None,
+    model_dir=None,
 ):
     if nbits is not None:
         if node_vectorizer_nbits is None:
@@ -380,6 +382,8 @@ def build_graph_generator(
         max_feasibility_attempts=max_feasibility_attempts,
         feasibility_candidates_per_attempt=feasibility_candidates_per_attempt,
         feasibility_failure_mode=feasibility_failure_mode,
+        model_name=model_name,
+        model_dir=str(model_dir) if model_dir is not None else None,
         verbose=verbose,
     )
 

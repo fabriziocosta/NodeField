@@ -180,39 +180,31 @@ def test_fit_graph_generator_resumes_from_latest_checkpoint(tmp_path):
 
 
 class _SaveableGenerator:
-    def __init__(self, training_size=None):
-        self.training_graph_conditioning_ = (
-            type("_Conditioning", (), {"__len__": lambda self: training_size})()
-            if training_size is not None
-            else None
-        )
+    def __init__(self, model_name=None, model_dir=None):
+        self.model_name = model_name
+        self.model_dir = model_dir
 
 
-def test_save_graph_generator_includes_training_set_size_in_filename(tmp_path):
-    generator = _SaveableGenerator(training_size=42)
+def test_save_graph_generator_uses_explicit_generator_metadata(tmp_path):
+    generator = _SaveableGenerator(model_name="demo-chem", model_dir=tmp_path)
 
     filename = save_graph_generator(
         generator,
-        model_name="demo-chem",
-        model_dir=tmp_path,
-    )
-
-    assert filename.startswith("demo-chem-n42-")
-    assert filename.endswith(".pkl")
-
-
-def test_save_graph_generator_omits_training_set_size_when_unavailable(tmp_path):
-    generator = _SaveableGenerator(training_size=None)
-
-    filename = save_graph_generator(
-        generator,
-        model_name="demo-chem",
-        model_dir=tmp_path,
     )
 
     assert filename.startswith("demo-chem-")
-    assert "demo-chem-n" not in filename
     assert filename.endswith(".pkl")
+
+
+def test_save_graph_generator_skips_when_model_name_is_none(tmp_path):
+    generator = _SaveableGenerator(model_name=None, model_dir=tmp_path)
+
+    filename = save_graph_generator(
+        generator,
+    )
+
+    assert filename is None
+    assert not list(tmp_path.glob("*.pkl"))
 
 
 def test_build_train_val_subsets_reuses_single_example_for_train_and_val():

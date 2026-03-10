@@ -942,6 +942,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts: int = 10,
             feasibility_candidates_per_attempt: int = 4,
             feasibility_failure_mode: str = "return_partial",
+            model_name: Optional[str] = None,
+            model_dir: Optional[str] = None,
             ) -> None:
         """Store the collaborating components and configuration used for the pipeline.
 
@@ -961,6 +963,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts (int): Optional input value.
             feasibility_candidates_per_attempt (int): Optional input value.
             feasibility_failure_mode (str): Optional input value.
+            model_name (Optional[str]): Optional input value.
+            model_dir (Optional[str]): Optional input value.
         """
         self.graph_vectorizer = graph_vectorizer
         self.node_graph_vectorizer = node_graph_vectorizer
@@ -984,6 +988,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.max_feasibility_attempts = int(max_feasibility_attempts)
         self.feasibility_candidates_per_attempt = int(feasibility_candidates_per_attempt)
         self.feasibility_failure_mode = str(feasibility_failure_mode)
+        self.model_name = model_name
+        self.model_dir = model_dir
         valid_sampling_strategies = {"uniform", "stratified_preserve", "stratified_target"}
         if self.locality_sampling_strategy not in valid_sampling_strategies:
             raise ValueError(

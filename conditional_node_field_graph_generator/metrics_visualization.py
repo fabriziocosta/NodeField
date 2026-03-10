@@ -4,6 +4,7 @@ from typing import Dict, Sequence
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.colors import to_rgb
 import numpy as np
 
 
@@ -66,6 +67,13 @@ def _style_log_axis(axis: plt.Axes) -> None:
     axis.yaxis.get_offset_text().set_visible(False)
 
 
+def _blend_with_white(color: str, amount: float = 0.45) -> tuple[float, float, float]:
+    base = np.asarray(to_rgb(color), dtype=float)
+    white = np.ones(3, dtype=float)
+    mixed = (1.0 - amount) * base + amount * white
+    return tuple(np.clip(mixed, 0.0, 1.0))
+
+
 def plot_metrics(
     train_metrics: Dict[str, Sequence[float]],
     val_metrics: Dict[str, Sequence[float]],
@@ -122,7 +130,9 @@ def plot_metrics(
         metric_name: default_colors[idx % len(default_colors)]
         for idx, metric_name in enumerate(metrics)
     }
-    lines, labels = [], []
+    color_by_metric["total"] = "black"
+    train_lines, train_labels = [], []
+    val_lines, val_labels = [], []
 
     for ax, (panel_title, panel_metrics) in zip(flat_axes, active_panels):
         for metric_idx, name in enumerate(panel_metrics):
@@ -132,6 +142,8 @@ def plot_metrics(
                 metric_ax.spines["right"].set_visible(True)
 
             color = color_by_metric[name]
+            train_color = _blend_with_white(color)
+            val_color = color
             train_vals = train_metrics[name]
             val_vals = val_metrics[name]
             count = min(len(train_vals), len(val_vals))
@@ -141,14 +153,14 @@ def plot_metrics(
             metric_ax.plot(
                 epochs,
                 train,
-                color=color,
+                color=train_color,
                 alpha=raw_train_alpha,
                 linewidth=raw_train_linewidth,
             )
             metric_ax.plot(
                 epochs,
                 val,
-                color=color,
+                color=val_color,
                 alpha=raw_val_alpha,
                 linewidth=raw_val_linewidth,
             )
@@ -157,7 +169,7 @@ def plot_metrics(
             line_train, = metric_ax.plot(
                 epochs,
                 sm_train,
-                color=color,
+                color=train_color,
                 alpha=smoothed_train_alpha,
                 linewidth=smoothed_train_linewidth,
                 label=f"{name}: train",
@@ -165,7 +177,7 @@ def plot_metrics(
             line_val, = metric_ax.plot(
                 epochs,
                 sm_val,
-                color=color,
+                color=val_color,
                 alpha=smoothed_val_alpha,
                 linewidth=smoothed_val_linewidth,
                 label=f"{name}: val",
@@ -180,13 +192,18 @@ def plot_metrics(
             else:
                 metric_ax.yaxis.set_label_position("right")
                 metric_ax.yaxis.tick_right()
-            lines += [line_train, line_val]
-            labels += [f"{name}: train", f"{name}: val"]
+            train_lines.append(line_train)
+            train_labels.append(f"{name}: train")
+            val_lines.append(line_val)
+            val_labels.append(f"{name}: val")
 
         ax.set_title(panel_title)
         ax.grid(True, which="both", linestyle="--", linewidth=0.5)
 
     flat_axes[-1].set_xlabel("Epoch")
-    fig.legend(lines, labels, loc="upper center", ncol=max(min(len(lines), 6), 1), fontsize="small")
+    legend_lines = train_lines + val_lines
+    legend_labels = train_labels + val_labels
+    legend_ncols = max(1, len(train_lines))
+    fig.legend(legend_lines, legend_labels, loc="upper center", ncol=legend_ncols, fontsize="small")
     fig.subplots_adjust(left=0.08, right=0.68, top=0.90, hspace=0.30)
     plt.show()
