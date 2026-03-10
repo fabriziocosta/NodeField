@@ -125,6 +125,35 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_failure_mode="drop")
 
 
+def test_graph_generator_logs_model_name_when_verbose(caplog):
+    with caplog.at_level("INFO", logger="conditional_node_field_graph_generator"):
+        ConditionalNodeFieldGraphGenerator(
+            verbose=1,
+            model_name="demo-artificial-n100-size8",
+            model_dir="/tmp/models",
+        )
+
+    assert "Configured graph generator model_name=demo-artificial-n100-size8 model_dir=/tmp/models" in caplog.text
+
+
+def test_fit_logs_model_name_when_configured(caplog):
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=_Component(verbose=False),
+        graph_decoder=_Component(verbose=False),
+        verbose=1,
+        model_name="demo-artificial-n100-size8",
+        model_dir="/tmp/models",
+    )
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="conditional_node_field_graph_generator"):
+        generator.fit([_labeled_graph()], train_node_generator=False)
+
+    assert "Fit target model_name=demo-artificial-n100-size8 model_dir=/tmp/models" in caplog.text
+
+
 def test_fit_requires_graph_vectorizer():
     generator = ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=None,

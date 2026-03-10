@@ -232,7 +232,6 @@ ConditionalNodeFieldGenerator(
     cfg_target_mode: Optional[str] = None,
     cfg_condition_dropout_prob: float = 0.1,
     cfg_null_target_strategy: str = "zero",
-    target_classification_max_distinct: int = 20,
 )
 ```
 
@@ -447,11 +446,10 @@ ConditionalNodeFieldGenerator(
   Null representation used for dropped targets.
   Currently only `"zero"` is supported.
 
-- `target_classification_max_distinct`
-  Threshold used only by the separate post-hoc guidance-predictor path when `train_guidance_predictor(..., mode=None)`
-  is allowed to infer classification vs regression automatically.
-  Increase: more predictor-training target sets are handled as classification.
-  Decrease: more predictor-training target sets are handled as regression.
+- `cfg_target_mode`
+  CFG target-conditioning mode is explicit.
+  Use `"classification"` or `"regression"` when fitting CFG targets.
+  No heuristic target-mode inference is used.
 
 ### Main Public Methods
 

@@ -1,9 +1,12 @@
 """Runtime helpers for verbose logging and trainer execution."""
 
+import logging
 import sys
 import time
 import warnings
 from functools import wraps
+
+_PACKAGE_LOGGER_NAME = "conditional_node_field_graph_generator"
 
 
 def _verbosity_level(instance) -> int:
@@ -17,6 +20,26 @@ def _verbosity_level(instance) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 1 if value else 0
+
+
+def get_runtime_logger(name: str | None = None) -> logging.Logger:
+    """Return a package logger configured for notebook-visible INFO output."""
+    package_logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
+    if not getattr(package_logger, "_codex_configured", False):
+        root_logger = logging.getLogger()
+        if not root_logger.handlers:
+            logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+        package_logger.setLevel(logging.INFO)
+        package_logger.propagate = True
+        package_logger._codex_configured = True  # type: ignore[attr-defined]
+    return logging.getLogger(name or _PACKAGE_LOGGER_NAME)
+
+
+def verbose_log(instance, message: str, level: int = 1, logger_name: str | None = None) -> None:
+    """Emit a verbose message through the package logger when the instance level allows it."""
+    if _verbosity_level(instance) < level:
+        return
+    get_runtime_logger(logger_name).info(message)
 
 
 def timeit(func):
@@ -35,9 +58,11 @@ def timeit(func):
         instance = args[0] if args else None
         if _verbosity_level(instance) >= 3:
             class_name = instance.__class__.__name__ if instance else "UnknownClass"
-            print(
+            verbose_log(
+                instance,
                 f"Class '{class_name}', Function '{func.__name__}' executed in "
-                f"{elapsed_time:.2f} seconds ({elapsed_minutes:.2f} minutes, {elapsed_hours:.2f} hours)."
+                f"{elapsed_time:.2f} seconds ({elapsed_minutes:.2f} minutes, {elapsed_hours:.2f} hours).",
+                level=3,
             )
 
         return result

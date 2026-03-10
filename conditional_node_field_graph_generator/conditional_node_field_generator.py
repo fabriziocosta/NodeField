@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from .metrics_collection import MetricsLogger
 from .metrics_visualization import plot_metrics
-from .runtime_utils import run_trainer_fit
+from .runtime_utils import run_trainer_fit, verbose_log
 from .training_policy import (
     build_training_callbacks,
     create_trainer,
@@ -1499,7 +1499,8 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         cfg_target_mode: Optional[str] = None,
         cfg_condition_dropout_prob: float = 0.1,
         cfg_null_target_strategy: str = "zero",
-        target_classification_max_distinct: int = 20,
+        model_name: Optional[str] = None,
+        model_dir: Optional[str] = None,
     ):
         self.latent_embedding_dimension = latent_embedding_dimension
         self.number_of_transformer_layers = number_of_transformer_layers
@@ -1544,10 +1545,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps if sampling_steps is not None else total_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
+        self.model_name = model_name
+        self.model_dir = model_dir
         self.cfg_target_mode = self._normalize_cfg_target_mode(cfg_target_mode)
         self.cfg_condition_dropout_prob = float(cfg_condition_dropout_prob)
         self.cfg_null_target_strategy = str(cfg_null_target_strategy)
-        self.target_classification_max_distinct = int(target_classification_max_distinct)
         if not 0.0 <= self.cfg_condition_dropout_prob <= 1.0:
             raise ValueError(
                 f"cfg_condition_dropout_prob must be in [0, 1] (got {self.cfg_condition_dropout_prob})."
@@ -1555,11 +1557,6 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         if self.cfg_null_target_strategy not in {"zero"}:
             raise ValueError(
                 f"cfg_null_target_strategy must be one of ['zero'] (got {self.cfg_null_target_strategy!r})."
-            )
-        if self.target_classification_max_distinct < 1:
-            raise ValueError(
-                "target_classification_max_distinct must be >= 1 "
-                f"(got {self.target_classification_max_distinct})."
             )
         if not 0.0 < self.early_stopping_ema_alpha <= 1.0:
             raise ValueError(
@@ -1932,11 +1929,10 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                     f"guidance predictor mode must be 'classification' or 'regression' (got {mode!r})."
                 )
             return normalized_mode
-        targets_array = np.asarray(targets, dtype=object)
-        unique_targets = np.unique(targets_array)
-        if unique_targets.size <= self.target_classification_max_distinct:
-            return "classification"
-        return "regression"
+        raise ValueError(
+            "guidance predictor mode must be provided explicitly. "
+            "Choose mode='classification' or mode='regression'."
+        )
 
     def _encode_guidance_class_targets(self, targets: Sequence[Any]) -> np.ndarray:
         if self.guidance_predictor_label_to_index_ is None:
@@ -2078,11 +2074,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.use_existence_head = not disable_existence
         if disable_existence:
             self.constant_existence_value = float(valid_exist_targets.flat[0])
-            if self.verbose:
-                print(
-                    "Existence supervision disabled: all training graphs have the same node count "
-                    "and the valid existence target is constant."
-                )
+            verbose_log(
+                self,
+                "Existence supervision disabled: all training graphs have the same node count "
+                "and the valid existence target is constant.",
+            )
         else:
             self.constant_existence_value = 1.0
 
@@ -2098,69 +2094,77 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 f"deg_edge_consistency={self.lambda_degree_edge_consistency_importance:.3f}",
                 f"aux_edge={self.lambda_auxiliary_edge_importance:.3f}",
             ]
-            print("Lambda settings: " + ", ".join(lambda_summary))
+            verbose_log(self, "Lambda settings: " + ", ".join(lambda_summary))
             if effective_locality:
-                print("Direct edge supervision enabled: horizon-1 edge presence will be learned and used by the decoder.")
+                verbose_log(self, "Direct edge supervision enabled: horizon-1 edge presence will be learned and used by the decoder.")
                 if self.lambda_edge_count_importance > 0.0:
-                    print(
+                    verbose_log(
+                        self,
                         "Soft edge-count supervision enabled: "
-                        f"lambda_edge_count_importance={self.lambda_edge_count_importance:.3f}."
+                        f"lambda_edge_count_importance={self.lambda_edge_count_importance:.3f}.",
                     )
                 if self.lambda_node_count_importance > 0.0:
-                    print(
+                    verbose_log(
+                        self,
                         "Soft node-count supervision enabled: "
-                        f"lambda_node_count_importance={self.lambda_node_count_importance:.3f}."
+                        f"lambda_node_count_importance={self.lambda_node_count_importance:.3f}.",
                     )
                 if self.lambda_degree_edge_consistency_importance > 0.0:
-                    print(
+                    verbose_log(
+                        self,
                         "Degree/edge-count consistency supervision enabled: "
                         f"lambda_degree_edge_consistency_importance="
-                        f"{self.lambda_degree_edge_consistency_importance:.3f}."
+                        f"{self.lambda_degree_edge_consistency_importance:.3f}.",
                     )
             elif planned_direct_edges:
-                print("Direct edge supervision disabled at setup time: the plan requested it but usable training pairs were not supplied.")
+                verbose_log(self, "Direct edge supervision disabled at setup time: the plan requested it but usable training pairs were not supplied.")
             else:
-                print("Direct edge supervision disabled: the supervision plan does not request horizon-1 edge prediction.")
+                verbose_log(self, "Direct edge supervision disabled: the supervision plan does not request horizon-1 edge prediction.")
             if self.lambda_node_count_importance > 0.0 and not self.use_existence_head:
-                print(
+                verbose_log(
+                    self,
                     "Soft node-count supervision requested, but the existence head is disabled; "
-                    "the node-count loss will be skipped."
+                    "the node-count loss will be skipped.",
                 )
             if self.lambda_edge_count_importance > 0.0 and not effective_locality:
-                print(
+                verbose_log(
+                    self,
                     "Soft edge-count supervision requested, but no direct edge head is active; "
-                    "the edge-count loss will be skipped."
+                    "the edge-count loss will be skipped.",
                 )
 
             if effective_auxiliary_locality:
-                print("Auxiliary locality supervision enabled: higher-horizon locality pairs will be used only as an encoding regularizer.")
+                verbose_log(self, "Auxiliary locality supervision enabled: higher-horizon locality pairs will be used only as an encoding regularizer.")
             elif effective_locality:
-                print("Auxiliary locality supervision disabled: only direct edge supervision will be used; no extra locality head is trained.")
+                verbose_log(self, "Auxiliary locality supervision disabled: only direct edge supervision will be used; no extra locality head is trained.")
             elif planned_aux_locality:
-                print("Auxiliary locality supervision disabled at setup time: the plan requested it but usable higher-horizon pairs were not supplied.")
+                verbose_log(self, "Auxiliary locality supervision disabled at setup time: the plan requested it but usable higher-horizon pairs were not supplied.")
             else:
-                print("Auxiliary locality supervision disabled: the supervision plan does not request higher-horizon locality regularization.")
+                verbose_log(self, "Auxiliary locality supervision disabled: the supervision plan does not request higher-horizon locality regularization.")
 
             if self.use_edge_label_head and effective_edge_labels:
-                print(
+                verbose_log(
+                    self,
                     "Edge-label supervision enabled: discrete edge labels will be predicted by the generator."
                 )
             elif planned_learned_edge_labels:
-                print("Edge-label supervision disabled at setup time: the plan requested it but usable labelled edges were not supplied.")
+                verbose_log(self, "Edge-label supervision disabled at setup time: the plan requested it but usable labelled edges were not supplied.")
             elif edge_label_plan is not None and edge_label_plan.mode == "constant":
-                print(
+                verbose_log(
+                    self,
                     f"Edge-label supervision collapsed to a constant label: {edge_label_plan.constant_value}."
                 )
             elif edge_label_targets is not None:
-                print(
+                verbose_log(
+                    self,
                     "Edge-label supervision collapsed to a constant label: no edge-label head will be trained."
                 )
             else:
-                print("Edge-label supervision disabled: the supervision plan does not request learned edge-label prediction.")
+                verbose_log(self, "Edge-label supervision disabled: the supervision plan does not request learned edge-label prediction.")
             if effective_locality:
-                print(f"Direct-edge BCE positive weight: {edge_pos_weight:.3f}.")
+                verbose_log(self, f"Direct-edge BCE positive weight: {edge_pos_weight:.3f}.")
             if effective_auxiliary_locality:
-                print(f"Auxiliary-locality BCE positive weight: {auxiliary_edge_pos_weight:.3f}.")
+                verbose_log(self, f"Auxiliary-locality BCE positive weight: {auxiliary_edge_pos_weight:.3f}.")
 
         self.model = ConditionalNodeFieldModule(
             number_of_rows_per_example=self.number_of_rows_per_example,
@@ -2336,8 +2340,9 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             early_stopping_min_delta=self.early_stopping_min_delta,
             metrics_logger=MetricsLogger(),
         )
-        if int(self.verbose) >= 1:
-            print(f"Writing checkpoints to {checkpoint_dir}")
+        if self.model_name is not None:
+            verbose_log(self, f"Save target model_name={self.model_name} model_dir={self.model_dir}")
+        verbose_log(self, f"Writing checkpoints to {checkpoint_dir}")
         trainer = create_trainer(
             maximum_epochs=self.maximum_epochs,
             callbacks=callbacks,

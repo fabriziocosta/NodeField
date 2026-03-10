@@ -243,7 +243,6 @@ def build_graph_generator(
     langevin_noise_scale=0.0,
     cfg_condition_dropout_prob=0.1,
     cfg_null_target_strategy="zero",
-    target_classification_max_distinct=20,
     locality_horizon=1,
     locality_sample_fraction=0.5,
     negative_sample_factor=1,
@@ -352,12 +351,13 @@ def build_graph_generator(
         important_feature_index=important_feature_index,
         cfg_condition_dropout_prob=cfg_condition_dropout_prob,
         cfg_null_target_strategy=cfg_null_target_strategy,
-        target_classification_max_distinct=target_classification_max_distinct,
         default_exist_pos_weight=default_exist_pos_weight,
         artifact_root_dir=str(artifact_root) if artifact_root is not None else None,
         checkpoint_root_dir=str(checkpoint_root) if checkpoint_root is not None else None,
         pool_condition_tokens=pool_condition_tokens,
         sampling_steps=sampling_steps,
+        model_name=model_name,
+        model_dir=str(model_dir) if model_dir is not None else None,
     )
     graph_decoder = ConditionalNodeFieldGraphDecoder(
         verbose=verbose,

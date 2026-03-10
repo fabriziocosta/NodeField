@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from conditional_node_field_graph_generator.extensions.demo.pipeline import (
+    build_graph_generator,
     build_zinc_dataset,
     fit_graph_generator,
     prepare_experiment,
@@ -212,6 +213,18 @@ def test_fit_graph_generator_falls_back_when_latest_checkpoint_is_incompatible(t
     ]
     output = capsys.readouterr().out
     assert "Latest checkpoint is incompatible" in output
+
+
+def test_build_graph_generator_propagates_model_name_to_inner_generator():
+    generator = build_graph_generator(
+        model_name="demo-artificial-n100-size8",
+        model_dir="/tmp/models",
+    )
+
+    assert generator.model_name == "demo-artificial-n100-size8"
+    assert generator.model_dir == "/tmp/models"
+    assert generator.conditional_node_generator_model.model_name == "demo-artificial-n100-size8"
+    assert generator.conditional_node_generator_model.model_dir == "/tmp/models"
 
 
 def test_sample_hyperparameter_configuration_respects_typed_ranges():

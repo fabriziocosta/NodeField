@@ -206,10 +206,10 @@ def test_node_generator_cfg_target_mode_controls_classification_vs_regression():
     assert generator.target_condition_dim_ == 1
 
 
-def test_guidance_predictor_mode_inference_classification_vs_regression():
-    generator = ConditionalNodeFieldGenerator(target_classification_max_distinct=3)
-    assert generator._infer_guidance_predictor_mode([0, 1, 1, 0]) == "classification"
-    assert generator._infer_guidance_predictor_mode(np.arange(10)) == "regression"
+def test_guidance_predictor_mode_requires_explicit_choice():
+    generator = ConditionalNodeFieldGenerator()
+    with pytest.raises(ValueError, match="must be provided explicitly"):
+        generator._infer_guidance_predictor_mode([0, 1, 1, 0])
 
 
 def test_cfg_dropout_zeros_target_slice_when_probability_is_one():

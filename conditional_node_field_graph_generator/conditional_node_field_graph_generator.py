@@ -2,6 +2,7 @@
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
+import logging
 import os
 import numpy as np
 import pandas as pd
@@ -9,7 +10,7 @@ import networkx as nx
 import random
 import pulp
 import dill as pickle
-from .runtime_utils import timeit
+from .runtime_utils import get_runtime_logger, timeit, verbose_log
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union
 from .conditional_node_field_generator import (
     ConditionalNodeGeneratorBase,
@@ -19,6 +20,7 @@ from .conditional_node_field_generator import (
 )
 
 DEFAULT_DUMMY_NODE_LABEL = "__dummy_node_label__"
+logger = get_runtime_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -990,6 +992,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.feasibility_failure_mode = str(feasibility_failure_mode)
         self.model_name = model_name
         self.model_dir = model_dir
+        if int(self.verbose) >= 1 and self.model_name is not None:
+            verbose_log(
+                self,
+                f"Configured graph generator model_name={self.model_name} model_dir={self.model_dir}",
+            )
         valid_sampling_strategies = {"uniform", "stratified_preserve", "stratified_target"}
         if self.locality_sampling_strategy not in valid_sampling_strategies:
             raise ValueError(
@@ -1121,11 +1128,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         """
         if not self.verbose:
             return
-        print("Supervision plan:")
+        verbose_log(self, "Supervision plan:")
         for channel in supervision_plan.as_dict().values():
             enabled_text = "enabled" if channel.enabled else "disabled"
             horizon_text = f", horizon={channel.horizon}" if channel.horizon is not None else ""
-            print(f"  {channel.name}: mode={channel.mode}, {enabled_text}{horizon_text}. {channel.reason}")
+            verbose_log(self, f"  {channel.name}: mode={channel.mode}, {enabled_text}{horizon_text}. {channel.reason}")
 
     def _plan_channel(self, channel_name: str) -> Optional[SupervisionChannelPlan]:
         """Return the named supervision channel when a plan is available.
@@ -1396,8 +1403,12 @@ class ConditionalNodeFieldGraphGenerator(object):
         targets: Optional[Sequence[Any]] = None,
         ckpt_path: Optional[str] = None,
     ) -> 'ConditionalNodeFieldGraphGenerator':
-        if self.verbose:
-            print(f"Fitting model on {len(graphs)} graphs")
+        if self.model_name is not None:
+            verbose_log(
+                self,
+                f"Fit target model_name={self.model_name} model_dir={self.model_dir}",
+            )
+        verbose_log(self, f"Fitting model on {len(graphs)} graphs")
         self._require_fit_components(train_node_generator=train_node_generator)
         if targets is not None and len(targets) != len(graphs):
             raise ValueError(
@@ -1409,8 +1420,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.graph_vectorizer.fit(graphs)
         self.node_graph_vectorizer.fit(graphs)
         if self.feasibility_estimator is not None:
-            if self.verbose:
-                print(f"Fitting feasibility estimator on {len(graphs)} graphs")
+            verbose_log(self, f"Fitting feasibility estimator on {len(graphs)} graphs")
             self.feasibility_estimator.fit(graphs)
         node_label_targets = self.graphs_to_node_label_targets(graphs)
         edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
@@ -1477,13 +1487,13 @@ class ConditionalNodeFieldGraphGenerator(object):
                 auxiliary_edge_pairs=auxiliary_edge_pairs_for_cond_gen,
                 auxiliary_edge_targets=auxiliary_edge_targets_for_cond_gen,
             )
-            if self.verbose:
-                print(
-                    f"Training conditional model on {len(node_batch)} graphs "
-                    f"with up to {node_batch.node_presence_mask.shape[1]} nodes each."
-                )
-            if node_batch.edge_pairs is not None and node_batch.edge_targets is not None and self.verbose:
-                print(f"Using direct-edge supervision with {len(node_batch.edge_pairs)} labelled pairs.")
+            verbose_log(
+                self,
+                f"Training conditional model on {len(node_batch)} graphs "
+                f"with up to {node_batch.node_presence_mask.shape[1]} nodes each.",
+            )
+            if node_batch.edge_pairs is not None and node_batch.edge_targets is not None:
+                verbose_log(self, f"Using direct-edge supervision with {len(node_batch.edge_pairs)} labelled pairs.")
             self.conditional_node_generator_model.setup(
                 node_batch=node_batch,
                 graph_conditioning=graph_conditioning,
