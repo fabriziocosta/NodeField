@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from AbstractGraph.abstract_graph_operators import compose, cycle, neighborhood, unlabel
+from AbstractGraph.abstract_graph_operators import compose, cycle, neighborhood, unlabel, combination
 from AbstractGraph.feasibility import (
     FeasibilityEstimator,
     FeasibilityEstimatorFeatureCannotExist,
@@ -308,13 +308,19 @@ def build_graph_generator(
         backend=feasibility_backend,
     )
     feasibility_cycle = FeasibilityEstimatorFeatureCannotExist(
-        decomposition_function=compose(cycle(), unlabel()),
+        decomposition_function=cycle(),
+        nbits=feasibility_cycle_nbits,
+        parallel=feasibility_parallel,
+        backend=feasibility_backend,
+    )
+    feasibility_cycle_composition = FeasibilityEstimatorFeatureCannotExist(
+        decomposition_function=compose(combination(number_of_elements=(2,3), distance=0), cycle(), unlabel()),
         nbits=feasibility_cycle_nbits,
         parallel=feasibility_parallel,
         backend=feasibility_backend,
     )
     feasibility_estimator = FeasibilityEstimator(
-        [feasibility_size, feasibility_valence, feasibility_cycle, feasibility_unlabeled_structure]
+        [feasibility_size, feasibility_valence, feasibility_cycle, feasibility_unlabeled_structure, feasibility_cycle_composition]
     )
 
     conditional_node_generator_model = ConditionalNodeFieldGenerator(
