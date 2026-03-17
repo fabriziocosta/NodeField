@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 import logging
 import os
+import time
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -21,6 +22,47 @@ from .conditional_node_field_generator import (
 
 DEFAULT_DUMMY_NODE_LABEL = "__dummy_node_label__"
 logger = get_runtime_logger(__name__)
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60.0:
+        return f"{seconds:.1f}s"
+    minutes, seconds = divmod(seconds, 60.0)
+    if minutes < 60.0:
+        return f"{int(minutes)}m {seconds:04.1f}s"
+    hours, minutes = divmod(int(minutes), 60)
+    return f"{hours:d}h {minutes:02d}m {seconds:04.1f}s"
+
+
+def _format_feasibility_attempt_status(
+    *,
+    attempt: int,
+    max_attempts: int,
+    attempted_total: int,
+    feasible_now: int,
+    filled_now: int,
+    pending_now: int,
+    acceptance_rate: float,
+    filled_total: int,
+    missing_total: int,
+    attempt_elapsed_seconds: float,
+    total_elapsed_seconds: float,
+) -> str:
+    remaining_attempts = max(0, int(max_attempts) - int(attempt))
+    eta_seconds = 0.0 if pending_now <= 0 else (total_elapsed_seconds / max(1, attempt)) * remaining_attempts
+    return (
+        f"Feasibility attempt {attempt:>2}/{max_attempts:<2} | "
+        f"generated={attempted_total:>4} | "
+        f"feasible_candidates={feasible_now:>2} | "
+        f"fulfilled_slots={filled_now:>2} | "
+        f"pending_slots={pending_now:>2} | "
+        f"feasible_rate={acceptance_rate:>6.1%} | "
+        f"fulfilled_total={filled_total:>2} | "
+        f"missing_total={missing_total:>2} | "
+        f"attempt_time={_format_elapsed_seconds(attempt_elapsed_seconds):>8} | "
+        f"eta={_format_elapsed_seconds(eta_seconds):>8}"
+    )
 
 
 @dataclass(frozen=True)
@@ -1980,8 +2022,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         attempt = 0
         total_generated = 0
         total_feasible = 0
+        feasibility_started_at = time.perf_counter()
         while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
             attempt += 1
+            attempt_started_at = time.perf_counter()
             candidate_conditioning = self._repeat_graph_conditioning(
                 pending_conditioning,
                 repeats=self.feasibility_candidates_per_attempt,
@@ -2022,15 +2066,22 @@ class ConditionalNodeFieldGraphGenerator(object):
                 missing_total = len(graph_conditioning) - filled_total
                 attempted_total = len(decoded_graphs)
                 acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
+                attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
+                total_elapsed_seconds = time.perf_counter() - feasibility_started_at
                 print(
-                    f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
-                    f"generated={attempted_total:>4} | "
-                    f"feasible_candidates={feasible_now:>2} | "
-                    f"fulfilled_slots={filled_now:>2} | "
-                    f"pending_slots={pending_now:>2} | "
-                    f"feasible_rate={acceptance_rate:>6.1%} | "
-                    f"fulfilled_total={filled_total:>2} | "
-                    f"missing_total={missing_total:>2}"
+                    _format_feasibility_attempt_status(
+                        attempt=attempt,
+                        max_attempts=self.max_feasibility_attempts,
+                        attempted_total=attempted_total,
+                        feasible_now=feasible_now,
+                        filled_now=filled_now,
+                        pending_now=pending_now,
+                        acceptance_rate=acceptance_rate,
+                        filled_total=filled_total,
+                        missing_total=missing_total,
+                        attempt_elapsed_seconds=attempt_elapsed_seconds,
+                        total_elapsed_seconds=total_elapsed_seconds,
+                    )
                 )
             if not rejected_slot_indices:
                 break
@@ -2179,8 +2230,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         attempt = 0
         total_generated = 0
         total_feasible = 0
+        feasibility_started_at = time.perf_counter()
         while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
             attempt += 1
+            attempt_started_at = time.perf_counter()
             candidate_conditioning = self._repeat_graph_conditioning(
                 pending_conditioning,
                 repeats=self.feasibility_candidates_per_attempt,
@@ -2221,15 +2274,22 @@ class ConditionalNodeFieldGraphGenerator(object):
                 missing_total = len(graph_conditioning) - filled_total
                 attempted_total = len(decoded_graphs)
                 acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
+                attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
+                total_elapsed_seconds = time.perf_counter() - feasibility_started_at
                 print(
-                    f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
-                    f"generated={attempted_total:>4} | "
-                    f"feasible_candidates={feasible_now:>2} | "
-                    f"fulfilled_slots={filled_now:>2} | "
-                    f"pending_slots={pending_now:>2} | "
-                    f"feasible_rate={acceptance_rate:>6.1%} | "
-                    f"fulfilled_total={filled_total:>2} | "
-                    f"missing_total={missing_total:>2}"
+                    _format_feasibility_attempt_status(
+                        attempt=attempt,
+                        max_attempts=self.max_feasibility_attempts,
+                        attempted_total=attempted_total,
+                        feasible_now=feasible_now,
+                        filled_now=filled_now,
+                        pending_now=pending_now,
+                        acceptance_rate=acceptance_rate,
+                        filled_total=filled_total,
+                        missing_total=missing_total,
+                        attempt_elapsed_seconds=attempt_elapsed_seconds,
+                        total_elapsed_seconds=total_elapsed_seconds,
+                    )
                 )
             if not rejected_slot_indices:
                 break
@@ -2341,8 +2401,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         attempt = 0
         total_generated = 0
         total_feasible = 0
+        feasibility_started_at = time.perf_counter()
         while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
             attempt += 1
+            attempt_started_at = time.perf_counter()
             candidate_conditioning = self._repeat_graph_conditioning(
                 pending_conditioning,
                 repeats=self.feasibility_candidates_per_attempt,
@@ -2383,15 +2445,22 @@ class ConditionalNodeFieldGraphGenerator(object):
                 missing_total = len(graph_conditioning) - filled_total
                 attempted_total = len(decoded_graphs)
                 acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
+                attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
+                total_elapsed_seconds = time.perf_counter() - feasibility_started_at
                 print(
-                    f"Feasibility attempt {attempt:>2}/{self.max_feasibility_attempts:<2} | "
-                    f"generated={attempted_total:>4} | "
-                    f"feasible_candidates={feasible_now:>2} | "
-                    f"fulfilled_slots={filled_now:>2} | "
-                    f"pending_slots={pending_now:>2} | "
-                    f"feasible_rate={acceptance_rate:>6.1%} | "
-                    f"fulfilled_total={filled_total:>2} | "
-                    f"missing_total={missing_total:>2}"
+                    _format_feasibility_attempt_status(
+                        attempt=attempt,
+                        max_attempts=self.max_feasibility_attempts,
+                        attempted_total=attempted_total,
+                        feasible_now=feasible_now,
+                        filled_now=filled_now,
+                        pending_now=pending_now,
+                        acceptance_rate=acceptance_rate,
+                        filled_total=filled_total,
+                        missing_total=missing_total,
+                        attempt_elapsed_seconds=attempt_elapsed_seconds,
+                        total_elapsed_seconds=total_elapsed_seconds,
+                    )
                 )
             if not rejected_slot_indices:
                 break

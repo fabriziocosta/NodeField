@@ -201,8 +201,11 @@ def plot_metrics(
         ax.grid(True, which="both", linestyle="--", linewidth=0.5)
 
     flat_axes[-1].set_xlabel("Epoch")
-    legend_lines = train_lines + val_lines
-    legend_labels = train_labels + val_labels
+    legend_lines = []
+    legend_labels = []
+    for train_line, train_label, val_line, val_label in zip(train_lines, train_labels, val_lines, val_labels):
+        legend_lines.extend([train_line, val_line])
+        legend_labels.extend([train_label, val_label])
     legend_ncols = max(1, len(train_lines))
     fig.legend(legend_lines, legend_labels, loc="upper center", ncol=legend_ncols, fontsize="small")
     fig.subplots_adjust(left=0.08, right=0.68, top=0.90, hspace=0.30)
