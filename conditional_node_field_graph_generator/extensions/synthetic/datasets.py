@@ -9,13 +9,18 @@ from .primitives import make_graph_generator
 
 def _make_duplicate_detection_estimator():
     try:
-        from AbstractGraph.hash_graph import GraphHashDeduper
+        from abstractgraph.hashing import GraphHashDeduper
     except ImportError as exc:
-        raise ImportError(
-            "Graph duplicate filtering requires optional dependency 'AbstractGraph'. "
-            "Install it to use make_graphs_classification_dataset(), "
-            "make_two_types_graphs_classification_dataset(), or ArtificialGraphDatasetConstructor.sample()."
-        ) from exc
+        try:
+            from AbstractGraph.hash_graph import GraphHashDeduper
+        except ImportError as legacy_exc:
+            raise ImportError(
+                "Graph duplicate filtering requires optional dependency 'abstractgraph' "
+                "(preferred) or legacy 'AbstractGraph'. Install it to use "
+                "make_graphs_classification_dataset(), "
+                "make_two_types_graphs_classification_dataset(), or "
+                "ArtificialGraphDatasetConstructor.sample()."
+            ) from legacy_exc
     return GraphHashDeduper()
 
 

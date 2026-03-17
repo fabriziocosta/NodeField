@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nodefield"
+version = "0.0.1"
+description = "Conditional node field graph generation framework"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Fabrizio", email = "fabrizio@example.com" }]
+keywords = ["graph", "generation", "pytorch", "node-field", "conditional"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Operating System :: OS Independent"
+]
+
+dependencies = [
+  "numpy<3",
+  "torch",
+  "pytorch-lightning",
+  "scipy",
+  "pandas",
+  "scikit-learn",
+  "networkx",
+  "matplotlib",
+  "pulp",
+  "dill",
+  "requests",
+  "toolz"
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "jupyterlab", "notebook"]
+chem = ["rdkit-pypi"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["conditional_node_field_graph_generator*"]
+exclude = ["tests*", "docs*", "notebooks*", "*.egg-info"]

@@ -11,12 +11,28 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from AbstractGraph.abstract_graph_operators import compose, cycle, neighborhood, unlabel, combination
-from AbstractGraph.feasibility import (
-    FeasibilityEstimator,
-    FeasibilityEstimatorFeatureCannotExist,
-    WithinRangeFeasibilityEstimatorFromNumericalFunction,
-)
+try:
+    from abstractgraph.operators import compose, cycle, neighborhood, unlabel, combination
+except ModuleNotFoundError:
+    from AbstractGraph.abstract_graph_operators import compose, cycle, neighborhood, unlabel, combination
+
+try:
+    from abstractgraph_ml.feasibility import (
+        FeasibilityEstimator,
+        FeasibilityEstimatorFeatureCannotExist,
+        WithinRangeFeasibilityEstimatorFromNumericalFunction,
+    )
+except ModuleNotFoundError:
+    try:
+        from AbstractGraph.feasibility import (
+            FeasibilityEstimator,
+            FeasibilityEstimatorFeatureCannotExist,
+            WithinRangeFeasibilityEstimatorFromNumericalFunction,
+        )
+    except ModuleNotFoundError:
+        FeasibilityEstimator = None
+        FeasibilityEstimatorFeatureCannotExist = None
+        WithinRangeFeasibilityEstimatorFromNumericalFunction = None
 
 try:
     from NSPPK.nsppk import NSPPK, NodeNSPPK
@@ -36,6 +52,18 @@ from ..molecular import (
 from ..synthetic import ArtificialGraphDatasetConstructor
 from .storage import describe_resume_checkpoint, find_latest_checkpoint
 from .visualization import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
+
+
+def _require_demo_feasibility_support():
+    if (
+        FeasibilityEstimator is None
+        or FeasibilityEstimatorFeatureCannotExist is None
+        or WithinRangeFeasibilityEstimatorFromNumericalFunction is None
+    ):
+        raise ModuleNotFoundError(
+            "build_graph_generator() requires feasibility support from 'abstractgraph_ml' "
+            "(preferred) or the legacy 'AbstractGraph.feasibility' module."
+        )
 
 
 def _resolve_pubchem_dir() -> Path:
@@ -207,6 +235,7 @@ def build_graph_generator(
     feasibility_valence_nbits=19,
     feasibility_cycle_nbits=19,
     feasibility_parallel=True,
+    feasibility_n_jobs=None,
     feasibility_backend="dill",
     latent_embedding_dimension=128,
     number_of_transformer_layers=4,
@@ -272,6 +301,8 @@ def build_graph_generator(
     if graph_vectorizer_nbits is None:
         graph_vectorizer_nbits = 11
 
+    _require_demo_feasibility_support()
+
     node_graph_vectorizer = NodeNSPPK(
         radius=node_vectorizer_radius,
         distance=node_vectorizer_distance,
@@ -300,24 +331,28 @@ def build_graph_generator(
         nbits=feasibility_unlabeled_nbits,
         parallel=feasibility_parallel,
         backend=feasibility_backend,
+        n_jobs=feasibility_n_jobs,
     )
     feasibility_valence = FeasibilityEstimatorFeatureCannotExist(
         decomposition_function=neighborhood(radius=feasibility_valence_radius),
         nbits=feasibility_valence_nbits,
         parallel=feasibility_parallel,
         backend=feasibility_backend,
+        n_jobs=feasibility_n_jobs,
     )
     feasibility_cycle = FeasibilityEstimatorFeatureCannotExist(
         decomposition_function=cycle(),
         nbits=feasibility_cycle_nbits,
         parallel=feasibility_parallel,
         backend=feasibility_backend,
+        n_jobs=feasibility_n_jobs,
     )
     feasibility_cycle_composition = FeasibilityEstimatorFeatureCannotExist(
         decomposition_function=compose(combination(number_of_elements=(2,3), distance=0), cycle(), unlabel()),
         nbits=feasibility_cycle_nbits,
         parallel=feasibility_parallel,
         backend=feasibility_backend,
+        n_jobs=feasibility_n_jobs,
     )
     feasibility_estimator = FeasibilityEstimator(
         [feasibility_size, feasibility_valence, feasibility_cycle, feasibility_unlabeled_structure, feasibility_cycle_composition]

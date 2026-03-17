@@ -2372,7 +2372,15 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         best_score = checkpoint_callback.best_model_score
         self.best_checkpoint_score_ = float(best_score.item()) if best_score is not None else None
         if self.restore_best_checkpoint and self.best_checkpoint_path_:
-            checkpoint = torch.load(self.best_checkpoint_path_, map_location=self.device)
+            # This code restores a trusted checkpoint written by the current training run.
+            # PyTorch 2.6+ defaults torch.load(..., weights_only=True), which strips
+            # non-tensor metadata and can reject Lightning checkpoints containing
+            # numpy scalars or other safe metadata payloads.
+            checkpoint = torch.load(
+                self.best_checkpoint_path_,
+                map_location=self.device,
+                weights_only=False,
+            )
             best_epoch = checkpoint.get("epoch")
             self.best_checkpoint_epoch_ = int(best_epoch) if best_epoch is not None else None
             state_dict = checkpoint.get("state_dict", checkpoint)

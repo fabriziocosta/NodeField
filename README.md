@@ -126,15 +126,24 @@ Key paths:
 ## Installation
 
 1. Create a Python environment (Python 3.10+ recommended).
-2. Install core dependencies:
+2. Install the package:
 
 ```bash
-pip install "numpy<2" torch pytorch-lightning scipy pandas scikit-learn networkx matplotlib pulp dill
+pip install .
 ```
 
-3. Install optional extras as needed:
-- `jupyterlab` or `notebook` to run notebooks.
-- `NSPPK` and `AbstractGraph`.
+For editable local development:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Optional extras:
+- `pip install ".[chem]"` to enable the RDKit-based molecular helpers.
+
+Additional external packages used by some notebook/demo workflows are not bundled as install requirements here:
+- `NSPPK`
+- `AbstractGraph`
 
 ## Quick Start
 
