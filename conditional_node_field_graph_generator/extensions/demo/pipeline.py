@@ -41,6 +41,7 @@ except ModuleNotFoundError:
 
 from ...conditional_node_field_generator import ConditionalNodeFieldGenerator
 from ...conditional_node_field_graph_generator import ConditionalNodeFieldGraphDecoder, ConditionalNodeFieldGraphGenerator
+from ...persistence import save_graph_generator
 from ..molecular import (
     PubChemLoader,
     SupervisedDataSetLoader,
@@ -454,6 +455,8 @@ def fit_graph_generator(
         )
         print(Path(resolved_ckpt_path).expanduser().resolve())
         graph_generator.fit(train_graphs, targets=targets, ckpt_path=None)
+    if getattr(graph_generator, "model_name", None) is not None:
+        save_graph_generator(graph_generator)
     return graph_generator
 
 

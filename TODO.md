@@ -10,3 +10,5 @@ This file tracks the work that is still genuinely open after the cleanup passes.
   - tokenized conditioning emitted directly by graph encoders
   - graph-to-graph conditioning based on node embeddings from a previous graph
   - abstract-graph conditioning where high-level motif or scaffold tokens drive concrete graph generation
+
+- add the feasibility score as a singla for a regressor to guide the generation
