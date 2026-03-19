@@ -57,6 +57,7 @@ class NodeGenerationBatch:
 class GeneratedNodeBatch:
     """Generator outputs as explicit structural and semantic predictions."""
 
+    node_embeddings_list: Optional[List[np.ndarray]] = None
     node_presence_mask: Optional[np.ndarray] = None
     node_degree_predictions: Optional[np.ndarray] = None
     node_labels: Optional[List[np.ndarray]] = None
@@ -64,6 +65,8 @@ class GeneratedNodeBatch:
     edge_label_matrices: Optional[List[np.ndarray]] = None
 
     def __len__(self) -> int:
+        if self.node_embeddings_list is not None:
+            return int(len(self.node_embeddings_list))
         if self.node_presence_mask is not None:
             return int(self.node_presence_mask.shape[0])
         if self.node_degree_predictions is not None:
@@ -1694,6 +1697,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
 
     @staticmethod
     def _build_padded_node_array(node_encodings_list: List[np.ndarray], max_num_rows: int) -> np.ndarray:
+        if any(encoding.shape[0] > max_num_rows for encoding in node_encodings_list):
+            raise ValueError(
+                "node_encodings_list contains an example with more rows than the configured maximum "
+                f"({max_num_rows})."
+            )
         return np.stack(
             [
                 np.pad(
@@ -2469,13 +2477,35 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         batch_size: Optional[int] = None,
         noise_scale: Optional[float] = None,
     ) -> None:
+        self.train_guidance_predictor_from_embeddings(
+            node_embeddings_list=node_batch.node_embeddings_list,
+            graph_conditioning=graph_conditioning,
+            targets=targets,
+            mode=mode,
+            learning_rate=learning_rate,
+            maximum_epochs=maximum_epochs,
+            batch_size=batch_size,
+            noise_scale=noise_scale,
+        )
+
+    def train_guidance_predictor_from_embeddings(
+        self,
+        node_embeddings_list: List[np.ndarray],
+        graph_conditioning: GraphConditioningBatch,
+        targets: Sequence[Any],
+        mode: Optional[str] = None,
+        learning_rate: float = 1e-3,
+        maximum_epochs: int = 30,
+        batch_size: Optional[int] = None,
+        noise_scale: Optional[float] = None,
+    ) -> None:
         self._require_fitted_for_prediction()
         self.device = next(self.model.parameters()).device
         targets_array = np.asarray(targets, dtype=object)
-        if targets_array.shape[0] != len(node_batch.node_embeddings_list):
+        if targets_array.shape[0] != len(node_embeddings_list):
             raise ValueError(
-                "targets length must match node batch size "
-                f"(got {targets_array.shape[0]} targets for {len(node_batch.node_embeddings_list)} graphs)."
+                "targets length must match node embedding batch size "
+                f"(got {targets_array.shape[0]} targets for {len(node_embeddings_list)} graphs)."
             )
         predictor_mode = self._infer_guidance_predictor_mode(targets_array.tolist(), mode=mode)
         unique_targets = np.unique(targets_array)
@@ -2508,7 +2538,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             self.guidance_predictor_target_scaler_.fit(numeric_targets)
             transformed_targets = self._scale_guidance_regression_targets(targets_array.tolist())
         padded_nodes = self._build_padded_node_array(
-            node_batch.node_embeddings_list,
+            node_embeddings_list,
             self.number_of_rows_per_example,
         )
         node_states = self.x_scaler.transform(
@@ -2720,6 +2750,12 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             self.last_predicted_edge_label_matrices_ = predicted_edge_label_matrices
 
         return GeneratedNodeBatch(
+            node_embeddings_list=[
+                np.asarray(gen_orig[index][node_presence_mask[index]], dtype=float)
+                if np.any(node_presence_mask[index])
+                else np.asarray(gen_orig[index][:1], dtype=float)
+                for index in range(len(gen_orig))
+            ],
             node_presence_mask=node_presence_mask,
             node_degree_predictions=node_degree_predictions,
             node_labels=predicted_node_labels,
@@ -2863,6 +2899,12 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             self.last_predicted_edge_label_matrices_ = predicted_edge_label_matrices
 
         return GeneratedNodeBatch(
+            node_embeddings_list=[
+                np.asarray(gen_orig[index][node_presence_mask[index]], dtype=float)
+                if np.any(node_presence_mask[index])
+                else np.asarray(gen_orig[index][:1], dtype=float)
+                for index in range(len(gen_orig))
+            ],
             node_presence_mask=node_presence_mask,
             node_degree_predictions=node_degree_predictions,
             node_labels=predicted_node_labels,

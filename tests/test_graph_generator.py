@@ -1,3 +1,5 @@
+import types
+
 import numpy as np
 import networkx as nx
 import pytest
@@ -7,8 +9,13 @@ from conditional_node_field_graph_generator.conditional_node_field_graph_generat
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
     ConditionalNodeFieldGraphGenerator,
+    GeneratedGuidanceBatch,
 )
-from conditional_node_field_graph_generator.conditional_node_field_generator import ConditionalNodeFieldGenerator, GeneratedNodeBatch
+from conditional_node_field_graph_generator.conditional_node_field_generator import (
+    ConditionalNodeFieldGenerator,
+    GeneratedNodeBatch,
+    GraphConditioningBatch,
+)
 
 
 class _GraphVectorizer:
@@ -263,6 +270,9 @@ class _FakeFeasibilityEstimator:
     def predict(self, decoded_graphs):
         return [bool(graph.get("feasible", False)) for graph in decoded_graphs]
 
+    def number_of_violations(self, decoded_graphs):
+        return [int(graph.get("violations", 0)) for graph in decoded_graphs]
+
 
 class _FakeScoreGenerator:
     def __init__(self):
@@ -325,6 +335,200 @@ def test_score_feasible_rate_counts_candidate_feasibility():
     assert generator.max_feasibility_attempts == 3
     assert generator.feasibility_candidates_per_attempt == 2
     assert generator.verbose == 5
+
+
+def test_compute_guidance_targets_is_bounded_and_monotone():
+    scores = ConditionalNodeFieldGraphGenerator._compute_guidance_targets([0, 1, 3, 15])
+
+    assert scores[0] == pytest.approx(1.0)
+    assert np.all(scores > 0.0)
+    assert np.all(scores <= 1.0)
+    assert np.all(np.diff(scores) < 0.0)
+
+
+def test_build_guidance_violation_buckets_keeps_feasible_bucket_and_quantiles():
+    buckets = ConditionalNodeFieldGraphGenerator.build_guidance_violation_buckets(
+        [0, 0, 1, 1, 3, 7, 12, 20],
+        positive_bucket_count=3,
+    )
+
+    assert buckets[0]["label"] == "feasible"
+    assert np.array_equal(buckets[0]["indices"], np.asarray([0, 1], dtype=np.int64))
+    assert sum(int(len(bucket["indices"])) for bucket in buckets) == 8
+    assert len(buckets) >= 3
+
+
+def test_build_guidance_violation_buckets_collapses_duplicate_quantiles():
+    buckets = ConditionalNodeFieldGraphGenerator.build_guidance_violation_buckets(
+        [0, 2, 2, 2, 9, 9, 9],
+        positive_bucket_count=8,
+    )
+
+    assert buckets[0]["label"] == "feasible"
+    positive_counts = [int(len(bucket["indices"])) for bucket in buckets[1:]]
+    assert positive_counts == [3, 3]
+
+
+class _CollectConditionalStub:
+    def __init__(self):
+        self.regression_calls = []
+
+    def predict(self, graph_conditioning, desired_target=None, guidance_scale=1.0):
+        del desired_target, guidance_scale
+        n = len(graph_conditioning)
+        embeddings = [
+            np.asarray([[float(i + 1)], [float(i + 2)]], dtype=float)
+            for i in range(n)
+        ]
+        return GeneratedNodeBatch(
+            node_embeddings_list=embeddings,
+            node_presence_mask=np.ones((n, 2), dtype=bool),
+            edge_probability_matrices=[np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=float) for _ in range(n)],
+        )
+
+    def predict_regression_guided(self, graph_conditioning, desired_target, predictor_scale=1.0):
+        self.regression_calls.append(
+            {"desired_target": desired_target, "predictor_scale": predictor_scale}
+        )
+        return self.predict(graph_conditioning)
+
+
+class _CollectDecoderStub:
+    def decode(self, generated_nodes, **kwargs):
+        del kwargs
+        graphs = []
+        for idx, _ in enumerate(generated_nodes.node_embeddings_list):
+            graph = nx.Graph()
+            graph.graph["violations"] = idx
+            graph.graph["feasible"] = (idx == 0)
+            graph.add_node(0, label="C")
+            if idx > 0:
+                graph.add_node(1, label="O")
+                graph.add_edge(0, 1, label="-")
+            graphs.append(graph)
+        return graphs
+
+
+def test_collect_generated_guidance_examples_uses_generated_embeddings():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.is_fitted_ = True
+    generator.feasibility_estimator = _FakeFeasibilityEstimator()
+    generator.conditional_node_generator_model = _CollectConditionalStub()
+    generator.graph_decoder = _CollectDecoderStub()
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.asarray([[1.0], [2.0], [3.0]], dtype=float),
+        node_counts=np.asarray([2, 2, 2], dtype=np.int64),
+        edge_counts=np.asarray([1, 1, 1], dtype=np.int64),
+    )
+    generator.training_graph_conditioning_ = conditioning
+
+    batch = generator.collect_generated_guidance_examples(
+        n_samples=3,
+        interpolate_between_n_samples=None,
+    )
+
+    assert len(batch.node_embeddings_list) == 3
+    assert batch.violation_counts.tolist() == [0, 1, 2]
+    assert batch.feasible_mask.tolist() == [True, False, False]
+    assert batch.guidance_targets[0] == pytest.approx(1.0)
+    assert batch.guidance_targets[1] < 1.0
+
+
+class _BootstrapGenerator:
+    build_guidance_violation_buckets = staticmethod(
+        ConditionalNodeFieldGraphGenerator.build_guidance_violation_buckets
+    )
+    _compute_guidance_targets = staticmethod(
+        ConditionalNodeFieldGraphGenerator._compute_guidance_targets
+    )
+    _sample_bucket_indices = classmethod(ConditionalNodeFieldGraphGenerator._sample_bucket_indices.__func__)
+    _slice_generated_guidance_batch = staticmethod(
+        ConditionalNodeFieldGraphGenerator._slice_generated_guidance_batch
+    )
+    _summarize_violation_buckets = classmethod(
+        ConditionalNodeFieldGraphGenerator._summarize_violation_buckets.__func__
+    )
+    _concat_generated_guidance_batches = classmethod(
+        ConditionalNodeFieldGraphGenerator._concat_generated_guidance_batches.__func__
+    )
+    _empty_generated_guidance_batch = staticmethod(
+        ConditionalNodeFieldGraphGenerator._empty_generated_guidance_batch
+    )
+    train_guidance_predictor_from_embeddings = ConditionalNodeFieldGraphGenerator.train_guidance_predictor_from_embeddings
+    bootstrap_guidance_regressor_from_generated = ConditionalNodeFieldGraphGenerator.bootstrap_guidance_regressor_from_generated
+
+    def __init__(self):
+        self.is_fitted_ = True
+        self.conditional_node_generator_model = types.SimpleNamespace(
+            train_guidance_predictor_from_embeddings=self._train
+        )
+        self.train_calls = []
+        self.collect_calls = []
+
+    def _require_fitted_for_generation(self):
+        return None
+
+    def _train(self, **kwargs):
+        self.train_calls.append(kwargs)
+
+    def collect_generated_guidance_examples(
+        self,
+        n_samples,
+        interpolate_between_n_samples=None,
+        sampling_mode="unguided",
+        desired_target=1.0,
+        guidance_scale=1.0,
+        predictor_scale=1.0,
+    ):
+        del interpolate_between_n_samples, guidance_scale
+        self.collect_calls.append(
+            {
+                "n_samples": n_samples,
+                "sampling_mode": sampling_mode,
+                "desired_target": desired_target,
+                "predictor_scale": predictor_scale,
+            }
+        )
+        if sampling_mode == "unguided":
+            violations = np.asarray([0, 2, 4, 8][:n_samples], dtype=np.int64)
+        else:
+            violations = np.asarray([0, 1, 1, 3][:n_samples], dtype=np.int64)
+        node_embeddings_list = [np.asarray([[float(i)]], dtype=float) for i in range(len(violations))]
+        conditioning = GraphConditioningBatch(
+            graph_embeddings=np.arange(len(violations), dtype=float).reshape(-1, 1),
+            node_counts=np.ones((len(violations),), dtype=np.int64),
+            edge_counts=np.zeros((len(violations),), dtype=np.int64),
+        )
+        return GeneratedGuidanceBatch(
+            node_embeddings_list=node_embeddings_list,
+            graph_conditioning=conditioning,
+            decoded_graphs=[{"violations": int(v)} for v in violations],
+            violation_counts=violations,
+            guidance_targets=ConditionalNodeFieldGraphGenerator._compute_guidance_targets(violations),
+            feasible_mask=(violations == 0),
+            sampling_mode=sampling_mode,
+        )
+
+
+def test_bootstrap_guidance_regressor_uses_unguided_then_mixed_cycles():
+    generator = _BootstrapGenerator()
+
+    result = generator.bootstrap_guidance_regressor_from_generated(
+        num_cycles=3,
+        examples_per_cycle=4,
+        replay_train_size=4,
+        guidance_maximum_epochs=2,
+        random_state=7,
+    )
+
+    assert [row["cycle"] for row in result["history"]] == [1, 2, 3]
+    assert generator.collect_calls[0]["sampling_mode"] == "unguided"
+    assert generator.collect_calls[1]["sampling_mode"] == "unguided"
+    assert generator.collect_calls[2]["sampling_mode"] == "regression_guided"
+    assert result["history"][0]["guided_count"] == 0
+    assert result["history"][1]["guided_count"] == 2
+    assert result["history"][1]["unguided_count"] == 2
+    assert len(generator.train_calls) == 3
 
 
 def test_build_supervision_plan_modes_depend_on_labels_and_horizon():

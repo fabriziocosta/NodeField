@@ -94,6 +94,22 @@ class SupervisionPlan:
             "auxiliary_locality": self.auxiliary_locality,
         }
 
+
+@dataclass
+class GeneratedGuidanceBatch:
+    """Generated examples paired with feasibility-derived guidance targets."""
+
+    node_embeddings_list: List[np.ndarray]
+    graph_conditioning: GraphConditioningBatch
+    decoded_graphs: List[nx.Graph]
+    violation_counts: np.ndarray
+    guidance_targets: np.ndarray
+    feasible_mask: np.ndarray
+    sampling_mode: str
+
+    def __len__(self) -> int:
+        return int(len(self.decoded_graphs))
+
 def _interpolate_integer_series(start, end, ts, minimum):
     values = np.rint([(1.0 - t) * start + t * end for t in ts]).astype(np.int64)
     return np.maximum(values, np.int64(minimum))
@@ -1201,7 +1217,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         if generated_nodes.node_presence_mask is None:
             raise RuntimeError("Node-label resolution requires node_presence_mask predictions.")
         if node_label_plan is None:
-            raise RuntimeError("Node-label resolution requires an orchestration supervision plan.")
+            return [
+                np.asarray([None] * len(node_presence_mask), dtype=object)
+                for node_presence_mask in generated_nodes.node_presence_mask
+            ]
         if node_label_plan.mode == "constant":
             return [
                 np.asarray([node_label_plan.constant_value] * len(node_presence_mask), dtype=object)
@@ -1226,7 +1245,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         if predicted_edge_probability_matrices is None:
             raise RuntimeError("Edge-label resolution requires edge probabilities to determine decoded edge counts.")
         if edge_label_plan is None:
-            raise RuntimeError("Edge-label resolution requires an orchestration supervision plan.")
+            return [np.asarray([], dtype=object) for _ in predicted_edge_probability_matrices], None
         if edge_label_plan.mode == "constant":
             predicted_edge_label_matrices = []
             for prob_matrix in predicted_edge_probability_matrices:
@@ -1599,6 +1618,31 @@ class ConditionalNodeFieldGraphGenerator(object):
             noise_scale=noise_scale,
         )
 
+    def train_guidance_predictor_from_embeddings(
+        self,
+        node_embeddings_list: List[np.ndarray],
+        graph_conditioning: GraphConditioningBatch,
+        targets: Sequence[Any],
+        mode: Optional[str] = None,
+        learning_rate: float = 1e-3,
+        maximum_epochs: int = 30,
+        batch_size: Optional[int] = None,
+        noise_scale: Optional[float] = None,
+    ) -> None:
+        self._require_fitted_for_generation()
+        if self.conditional_node_generator_model is None:
+            raise RuntimeError("conditional_node_generator_model is None.")
+        self.conditional_node_generator_model.train_guidance_predictor_from_embeddings(
+            node_embeddings_list=node_embeddings_list,
+            graph_conditioning=graph_conditioning,
+            targets=targets,
+            mode=mode,
+            learning_rate=learning_rate,
+            maximum_epochs=maximum_epochs,
+            batch_size=batch_size,
+            noise_scale=noise_scale,
+        )
+
     def train_guidance_classifier(
         self,
         graphs: List[nx.Graph],
@@ -1943,29 +1987,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             filled_now += 1
         return feasible_candidate_count, filled_now
 
-    def _decode_conditioning_batch(
-        self,
-        graph_conditioning: GraphConditioningBatch,
-        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
-        guidance_scale: float = 1.0,
-    ) -> List[nx.Graph]:
-        """Run a single generator pass and decode graphs without feasibility retries.
-
-        Args:
-            graph_conditioning (GraphConditioningBatch): Input value.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
-            guidance_scale (float): Optional input value.
-        Returns:
-            List[nx.Graph]: Computed result.
-        """
-        if int(self.verbose) >= 3:
-            print(f"Predicting node matrices for {len(graph_conditioning)} graphs...")
-        generated_nodes = self.conditional_node_generator_model.predict(
-            graph_conditioning,
-            desired_target=desired_target,
-            guidance_scale=guidance_scale,
-        )
-        self._log_generated_batch_info(graph_conditioning, generated_nodes)
+    def _decode_generated_nodes(self, generated_nodes: GeneratedNodeBatch) -> List[nx.Graph]:
         predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
         if predicted_edge_probability_matrices is None:
             raise RuntimeError(
@@ -1983,6 +2005,451 @@ class ConditionalNodeFieldGraphGenerator(object):
             predicted_edge_labels_list=predicted_edge_labels_list,
             predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
+
+    def _predict_generated_nodes(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        sampling_mode: str = "unguided",
+        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+        guidance_scale: float = 1.0,
+        predictor_scale: float = 1.0,
+    ) -> GeneratedNodeBatch:
+        if sampling_mode == "unguided":
+            generated_nodes = self.conditional_node_generator_model.predict(
+                graph_conditioning,
+                desired_target=desired_target,
+                guidance_scale=guidance_scale,
+            )
+        elif sampling_mode == "regression_guided":
+            generated_nodes = self.conditional_node_generator_model.predict_regression_guided(
+                graph_conditioning,
+                desired_target=1.0 if desired_target is None else desired_target,
+                predictor_scale=predictor_scale,
+            )
+        else:
+            raise ValueError(
+                "sampling_mode must be 'unguided' or 'regression_guided' "
+                f"(got {sampling_mode!r})."
+            )
+        self._log_generated_batch_info(graph_conditioning, generated_nodes)
+        return generated_nodes
+
+    @staticmethod
+    def _compute_guidance_targets(violation_counts: Sequence[Any]) -> np.ndarray:
+        violations = np.asarray(violation_counts, dtype=float)
+        return 1.0 / (1.0 + np.log1p(violations))
+
+    @staticmethod
+    def _empty_generated_guidance_batch() -> GeneratedGuidanceBatch:
+        empty_conditioning = GraphConditioningBatch(
+            graph_embeddings=np.zeros((0, 0), dtype=float),
+            node_counts=np.zeros((0,), dtype=np.int64),
+            edge_counts=np.zeros((0,), dtype=np.int64),
+        )
+        return GeneratedGuidanceBatch(
+            node_embeddings_list=[],
+            graph_conditioning=empty_conditioning,
+            decoded_graphs=[],
+            violation_counts=np.zeros((0,), dtype=np.int64),
+            guidance_targets=np.zeros((0,), dtype=float),
+            feasible_mask=np.zeros((0,), dtype=bool),
+            sampling_mode="unguided",
+        )
+
+    @staticmethod
+    def _slice_generated_guidance_batch(
+        batch: GeneratedGuidanceBatch,
+        indices: Sequence[int],
+    ) -> GeneratedGuidanceBatch:
+        indices_array = np.asarray(indices, dtype=np.int64)
+        return GeneratedGuidanceBatch(
+            node_embeddings_list=[batch.node_embeddings_list[int(idx)] for idx in indices_array],
+            graph_conditioning=GraphConditioningBatch(
+                graph_embeddings=np.asarray(batch.graph_conditioning.graph_embeddings)[indices_array],
+                node_counts=np.asarray(batch.graph_conditioning.node_counts)[indices_array],
+                edge_counts=np.asarray(batch.graph_conditioning.edge_counts)[indices_array],
+            ),
+            decoded_graphs=[batch.decoded_graphs[int(idx)] for idx in indices_array],
+            violation_counts=np.asarray(batch.violation_counts)[indices_array],
+            guidance_targets=np.asarray(batch.guidance_targets)[indices_array],
+            feasible_mask=np.asarray(batch.feasible_mask)[indices_array],
+            sampling_mode=batch.sampling_mode,
+        )
+
+    @classmethod
+    def _concat_generated_guidance_batches(
+        cls,
+        batches: Sequence[GeneratedGuidanceBatch],
+    ) -> GeneratedGuidanceBatch:
+        non_empty_batches = [batch for batch in batches if len(batch) > 0]
+        if not non_empty_batches:
+            return cls._empty_generated_guidance_batch()
+        graph_embeddings = [np.asarray(batch.graph_conditioning.graph_embeddings) for batch in non_empty_batches]
+        node_counts = [np.asarray(batch.graph_conditioning.node_counts) for batch in non_empty_batches]
+        edge_counts = [np.asarray(batch.graph_conditioning.edge_counts) for batch in non_empty_batches]
+        return GeneratedGuidanceBatch(
+            node_embeddings_list=[
+                np.asarray(embedding, dtype=float)
+                for batch in non_empty_batches
+                for embedding in batch.node_embeddings_list
+            ],
+            graph_conditioning=GraphConditioningBatch(
+                graph_embeddings=np.concatenate(graph_embeddings, axis=0),
+                node_counts=np.concatenate(node_counts, axis=0),
+                edge_counts=np.concatenate(edge_counts, axis=0),
+            ),
+            decoded_graphs=[
+                graph
+                for batch in non_empty_batches
+                for graph in batch.decoded_graphs
+            ],
+            violation_counts=np.concatenate(
+                [np.asarray(batch.violation_counts, dtype=np.int64) for batch in non_empty_batches],
+                axis=0,
+            ),
+            guidance_targets=np.concatenate(
+                [np.asarray(batch.guidance_targets, dtype=float) for batch in non_empty_batches],
+                axis=0,
+            ),
+            feasible_mask=np.concatenate(
+                [np.asarray(batch.feasible_mask, dtype=bool) for batch in non_empty_batches],
+                axis=0,
+            ),
+            sampling_mode="mixed" if len(non_empty_batches) > 1 else non_empty_batches[0].sampling_mode,
+        )
+
+    @staticmethod
+    def build_guidance_violation_buckets(
+        violation_counts: Sequence[Any],
+        positive_bucket_count: int = 8,
+    ) -> List[Dict[str, Any]]:
+        violations = np.asarray(violation_counts, dtype=float).reshape(-1)
+        if violations.size == 0:
+            return []
+
+        bucket_specs: List[Dict[str, Any]] = []
+        zero_indices = np.flatnonzero(violations == 0)
+        if zero_indices.size > 0:
+            bucket_specs.append(
+                {
+                    "label": "feasible",
+                    "lower": 0.0,
+                    "upper": 0.0,
+                    "indices": zero_indices.astype(np.int64),
+                }
+            )
+
+        positive_indices = np.flatnonzero(violations > 0)
+        if positive_indices.size == 0:
+            return bucket_specs
+
+        positive_values = violations[positive_indices]
+        distinct_positive = np.unique(positive_values)
+        quantile_bucket_count = max(1, min(int(positive_bucket_count), int(distinct_positive.size)))
+        quantile_edges = np.quantile(
+            positive_values,
+            np.linspace(0.0, 1.0, quantile_bucket_count + 1),
+        )
+        quantile_edges = np.unique(np.asarray(quantile_edges, dtype=float))
+        if quantile_edges.size < 2:
+            quantile_edges = np.asarray([positive_values.min(), positive_values.max()], dtype=float)
+
+        for bucket_idx in range(quantile_edges.size - 1):
+            lower = float(quantile_edges[bucket_idx])
+            upper = float(quantile_edges[bucket_idx + 1])
+            if bucket_idx == quantile_edges.size - 2:
+                mask = (positive_values >= lower) & (positive_values <= upper)
+            else:
+                mask = (positive_values >= lower) & (positive_values < upper)
+            bucket_indices = positive_indices[np.flatnonzero(mask)]
+            if bucket_indices.size == 0:
+                continue
+            bucket_specs.append(
+                {
+                    "label": f"q{bucket_idx + 1}: [{lower:.0f}, {upper:.0f}]",
+                    "lower": lower,
+                    "upper": upper,
+                    "indices": bucket_indices.astype(np.int64),
+                }
+            )
+        if len(bucket_specs) == 0:
+            bucket_specs.append(
+                {
+                    "label": "all",
+                    "lower": float(np.min(violations)),
+                    "upper": float(np.max(violations)),
+                    "indices": np.arange(len(violations), dtype=np.int64),
+                }
+            )
+        return bucket_specs
+
+    @classmethod
+    def _summarize_violation_buckets(
+        cls,
+        batch: GeneratedGuidanceBatch,
+        positive_bucket_count: int = 8,
+    ) -> List[Dict[str, Any]]:
+        summaries = []
+        for bucket in cls.build_guidance_violation_buckets(
+            batch.violation_counts,
+            positive_bucket_count=positive_bucket_count,
+        ):
+            bucket_indices = np.asarray(bucket["indices"], dtype=np.int64)
+            bucket_violations = np.asarray(batch.violation_counts, dtype=float)[bucket_indices]
+            bucket_targets = np.asarray(batch.guidance_targets, dtype=float)[bucket_indices]
+            summaries.append(
+                {
+                    "label": bucket["label"],
+                    "lower": bucket["lower"],
+                    "upper": bucket["upper"],
+                    "indices": bucket_indices,
+                    "count": int(bucket_indices.size),
+                    "median_violation": float(np.median(bucket_violations)),
+                    "median_target": float(np.median(bucket_targets)),
+                }
+            )
+        return summaries
+
+    @classmethod
+    def _sample_bucket_indices(
+        cls,
+        batch: GeneratedGuidanceBatch,
+        sample_size: Optional[int] = None,
+        positive_bucket_count: int = 8,
+        random_state: Optional[int] = None,
+    ) -> np.ndarray:
+        total_examples = len(batch)
+        if total_examples == 0:
+            return np.zeros((0,), dtype=np.int64)
+        if sample_size is None or int(sample_size) >= total_examples:
+            return np.arange(total_examples, dtype=np.int64)
+        bucket_summaries = cls._summarize_violation_buckets(
+            batch,
+            positive_bucket_count=positive_bucket_count,
+        )
+        if len(bucket_summaries) <= 1:
+            return np.arange(total_examples, dtype=np.int64)
+
+        rng = np.random.default_rng(random_state)
+        non_empty_buckets = [bucket for bucket in bucket_summaries if int(bucket["count"]) > 0]
+        per_bucket = int(sample_size) // len(non_empty_buckets)
+        remainder = int(sample_size) % len(non_empty_buckets)
+        sampled_indices = []
+        for bucket_idx, bucket in enumerate(non_empty_buckets):
+            desired = per_bucket + (1 if bucket_idx < remainder else 0)
+            if desired <= 0:
+                continue
+            bucket_indices = np.asarray(bucket["indices"], dtype=np.int64)
+            replace = desired > bucket_indices.size
+            chosen = rng.choice(bucket_indices, size=desired, replace=replace)
+            sampled_indices.extend(np.asarray(chosen, dtype=np.int64).tolist())
+        return np.asarray(sampled_indices, dtype=np.int64)
+
+    def collect_generated_guidance_examples(
+        self,
+        n_samples: int,
+        interpolate_between_n_samples: Optional[int] = None,
+        sampling_mode: str = "unguided",
+        desired_target: float = 1.0,
+        guidance_scale: float = 1.0,
+        predictor_scale: float = 1.0,
+    ) -> GeneratedGuidanceBatch:
+        self._require_fitted_for_generation()
+        if self.feasibility_estimator is None:
+            raise RuntimeError(
+                "collect_generated_guidance_examples() requires feasibility_estimator to be configured."
+            )
+        if not hasattr(self.feasibility_estimator, "number_of_violations"):
+            raise RuntimeError(
+                "collect_generated_guidance_examples() requires feasibility_estimator.number_of_violations()."
+            )
+        graph_conditioning = self._sample_conditions(
+            int(n_samples),
+            interpolate_between_n_samples=interpolate_between_n_samples,
+        )
+        generated_nodes = self._predict_generated_nodes(
+            graph_conditioning,
+            sampling_mode=sampling_mode,
+            desired_target=desired_target,
+            guidance_scale=guidance_scale,
+            predictor_scale=predictor_scale,
+        )
+        if generated_nodes.node_embeddings_list is None:
+            raise RuntimeError("Generated node embeddings are unavailable for guidance collection.")
+        decoded_graphs = self._decode_generated_nodes(generated_nodes)
+        violation_counts = np.asarray(
+            self.feasibility_estimator.number_of_violations(decoded_graphs),
+            dtype=np.int64,
+        ).reshape(-1)
+        if violation_counts.shape[0] != len(decoded_graphs):
+            raise RuntimeError(
+                "Feasibility estimator returned an unexpected number of violation counts "
+                f"({violation_counts.shape[0]} for {len(decoded_graphs)} graphs)."
+            )
+        guidance_targets = self._compute_guidance_targets(violation_counts)
+        feasible_mask = np.asarray(violation_counts == 0, dtype=bool)
+        return GeneratedGuidanceBatch(
+            node_embeddings_list=[
+                np.asarray(embedding, dtype=float)
+                for embedding in generated_nodes.node_embeddings_list
+            ],
+            graph_conditioning=graph_conditioning,
+            decoded_graphs=decoded_graphs,
+            violation_counts=violation_counts,
+            guidance_targets=guidance_targets,
+            feasible_mask=feasible_mask,
+            sampling_mode=str(sampling_mode),
+        )
+
+    def bootstrap_guidance_regressor_from_generated(
+        self,
+        num_cycles: int,
+        examples_per_cycle: int,
+        interpolate_between_n_samples: Optional[int] = None,
+        replay_train_size: Optional[int] = None,
+        positive_bucket_count: int = 8,
+        guided_fraction_after_first_cycle: float = 0.5,
+        guided_target: float = 1.0,
+        guidance_learning_rate: float = 1e-3,
+        guidance_maximum_epochs: int = 30,
+        guidance_batch_size: Optional[int] = None,
+        guidance_noise_scale: Optional[float] = None,
+        predictor_scale: float = 1.0,
+        random_state: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if int(num_cycles) < 1:
+            raise ValueError("num_cycles must be >= 1.")
+        if int(examples_per_cycle) < 1:
+            raise ValueError("examples_per_cycle must be >= 1.")
+
+        cycle_batches: List[GeneratedGuidanceBatch] = []
+        replay_batches: List[GeneratedGuidanceBatch] = []
+        history: List[Dict[str, Any]] = []
+        guidance_ready = bool(
+            getattr(self.conditional_node_generator_model, "guidance_predictor_", None) is not None
+            and getattr(self.conditional_node_generator_model, "guidance_predictor_mode_", None) == "regression"
+        )
+
+        for cycle_idx in range(int(num_cycles)):
+            if cycle_idx == 0:
+                unguided_count = int(examples_per_cycle)
+                guided_count = 0
+            else:
+                guided_count = int(round(float(examples_per_cycle) * float(guided_fraction_after_first_cycle)))
+                guided_count = max(0, min(int(examples_per_cycle), guided_count))
+                if not guidance_ready:
+                    guided_count = 0
+                unguided_count = int(examples_per_cycle) - guided_count
+
+            new_batches = []
+            if unguided_count > 0:
+                new_batches.append(
+                    self.collect_generated_guidance_examples(
+                        n_samples=unguided_count,
+                        interpolate_between_n_samples=interpolate_between_n_samples,
+                        sampling_mode="unguided",
+                    )
+                )
+            if guided_count > 0:
+                new_batches.append(
+                    self.collect_generated_guidance_examples(
+                        n_samples=guided_count,
+                        interpolate_between_n_samples=interpolate_between_n_samples,
+                        sampling_mode="regression_guided",
+                        desired_target=guided_target,
+                        predictor_scale=predictor_scale,
+                    )
+                )
+
+            cycle_batch = self._concat_generated_guidance_batches(new_batches)
+            cycle_batches.append(cycle_batch)
+            replay_batches.append(cycle_batch)
+            replay_buffer = self._concat_generated_guidance_batches(replay_batches)
+            replay_bucket_summaries = self._summarize_violation_buckets(
+                replay_buffer,
+                positive_bucket_count=positive_bucket_count,
+            )
+            cycle_bucket_summaries = self._summarize_violation_buckets(
+                cycle_batch,
+                positive_bucket_count=positive_bucket_count,
+            )
+            train_indices = self._sample_bucket_indices(
+                replay_buffer,
+                sample_size=replay_train_size,
+                positive_bucket_count=positive_bucket_count,
+                random_state=None if random_state is None else int(random_state) + cycle_idx,
+            )
+            train_batch = self._slice_generated_guidance_batch(replay_buffer, train_indices)
+            train_ran = False
+            train_skipped_reason = None
+            if len(train_batch) == 0:
+                train_skipped_reason = "empty_replay_buffer"
+            elif np.allclose(train_batch.guidance_targets, train_batch.guidance_targets[0]):
+                train_skipped_reason = "constant_targets"
+            else:
+                self.train_guidance_predictor_from_embeddings(
+                    node_embeddings_list=train_batch.node_embeddings_list,
+                    graph_conditioning=train_batch.graph_conditioning,
+                    targets=train_batch.guidance_targets,
+                    mode="regression",
+                    learning_rate=guidance_learning_rate,
+                    maximum_epochs=guidance_maximum_epochs,
+                    batch_size=guidance_batch_size,
+                    noise_scale=guidance_noise_scale,
+                )
+                train_ran = True
+                guidance_ready = True
+
+            history.append(
+                {
+                    "cycle": int(cycle_idx + 1),
+                    "unguided_count": int(unguided_count),
+                    "guided_count": int(guided_count),
+                    "collected_examples": int(len(cycle_batch)),
+                    "cycle_feasible_rate": float(np.mean(cycle_batch.feasible_mask)) if len(cycle_batch) else 0.0,
+                    "cycle_mean_violation": float(np.mean(cycle_batch.violation_counts)) if len(cycle_batch) else 0.0,
+                    "cycle_median_violation": float(np.median(cycle_batch.violation_counts)) if len(cycle_batch) else 0.0,
+                    "cycle_mean_target": float(np.mean(cycle_batch.guidance_targets)) if len(cycle_batch) else 0.0,
+                    "cycle_median_target": float(np.median(cycle_batch.guidance_targets)) if len(cycle_batch) else 0.0,
+                    "cycle_bucket_summaries": cycle_bucket_summaries,
+                    "replay_buffer_size": int(len(replay_buffer)),
+                    "replay_bucket_summaries": replay_bucket_summaries,
+                    "train_sample_size": int(len(train_batch)),
+                    "train_ran": bool(train_ran),
+                    "train_skipped_reason": train_skipped_reason,
+                }
+            )
+
+        return {
+            "history": history,
+            "cycle_batches": cycle_batches,
+            "replay_buffer": self._concat_generated_guidance_batches(replay_batches),
+        }
+
+    def _decode_conditioning_batch(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+        guidance_scale: float = 1.0,
+    ) -> List[nx.Graph]:
+        """Run a single generator pass and decode graphs without feasibility retries.
+
+        Args:
+            graph_conditioning (GraphConditioningBatch): Input value.
+            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
+            guidance_scale (float): Optional input value.
+        Returns:
+            List[nx.Graph]: Computed result.
+        """
+        if int(self.verbose) >= 3:
+            print(f"Predicting node matrices for {len(graph_conditioning)} graphs...")
+        generated_nodes = self._predict_generated_nodes(
+            graph_conditioning,
+            sampling_mode="unguided",
+            desired_target=desired_target,
+            guidance_scale=guidance_scale,
+        )
+        return self._decode_generated_nodes(generated_nodes)
 
     def _decode_with_feasibility_slots(
         self,
@@ -2185,23 +2652,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             classifier_scale=classifier_scale,
         )
         self._log_generated_batch_info(graph_conditioning, generated_nodes)
-        predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
-        if predicted_edge_probability_matrices is None:
-            raise RuntimeError(
-                "Graph decoding requires explicit edge-probability matrices from the conditional node generator."
-            )
-        predicted_node_labels_list = self._resolve_predicted_node_labels(generated_nodes)
-        predicted_edge_labels_list, predicted_edge_label_matrices = self._resolve_predicted_edge_labels(
-            generated_nodes,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-        )
-        return self.graph_decoder.decode(
-            generated_nodes,
-            predicted_node_labels_list=predicted_node_labels_list,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-            predicted_edge_labels_list=predicted_edge_labels_list,
-            predicted_edge_label_matrices=predicted_edge_label_matrices,
-        )
+        return self._decode_generated_nodes(generated_nodes)
 
     def _decode_with_feasibility_slots_classifier_guided(
         self,
@@ -2350,29 +2801,13 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> List[nx.Graph]:
         if int(self.verbose) >= 3:
             print(f"Predicting regression-guided node matrices for {len(graph_conditioning)} graphs...")
-        generated_nodes = self.conditional_node_generator_model.predict_regression_guided(
+        generated_nodes = self._predict_generated_nodes(
             graph_conditioning,
+            sampling_mode="regression_guided",
             desired_target=desired_target,
             predictor_scale=predictor_scale,
         )
-        self._log_generated_batch_info(graph_conditioning, generated_nodes)
-        predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
-        if predicted_edge_probability_matrices is None:
-            raise RuntimeError(
-                "Graph decoding requires explicit edge-probability matrices from the conditional node generator."
-            )
-        predicted_node_labels_list = self._resolve_predicted_node_labels(generated_nodes)
-        predicted_edge_labels_list, predicted_edge_label_matrices = self._resolve_predicted_edge_labels(
-            generated_nodes,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-        )
-        return self.graph_decoder.decode(
-            generated_nodes,
-            predicted_node_labels_list=predicted_node_labels_list,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-            predicted_edge_labels_list=predicted_edge_labels_list,
-            predicted_edge_label_matrices=predicted_edge_label_matrices,
-        )
+        return self._decode_generated_nodes(generated_nodes)
 
     def _decode_with_feasibility_slots_regression_guided(
         self,
