@@ -37,7 +37,15 @@ dependencies = [
 dev = ["pytest", "pytest-cov", "jupyterlab", "notebook"]
 chem = ["rdkit-pypi"]
 
+[tool.setuptools]
+py-modules = ["_external_imports"]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["conditional_node_field_graph_generator*"]
+include = [
+  "conditional_node_field_graph_generator*",
+  "AbstractGraph",
+  "abstractgraph",
+  "abstractgraph_ml"
+]
 exclude = ["tests*", "docs*", "notebooks*", "*.egg-info"]

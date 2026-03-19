@@ -1,18 +1,13 @@
-"""Compatibility shim for local sibling checkouts of ``AbstractGraph``.
+"""Compatibility shim for local source checkouts of legacy ``AbstractGraph``."""
 
-This package exposes the canonical ``AbstractGraph`` import root and resolves
-it against a sibling source checkout when the package is not installed in the
-current environment.
-"""
+from _external_imports import build_optional_dependency_candidates, resolve_source_checkout
 
-from pathlib import Path
-
-_PROJECTS_ROOT = Path(__file__).resolve().parents[2]
 _CANDIDATE_ROOTS = [
-    _PROJECTS_ROOT / "AbstractGraph",
-    _PROJECTS_ROOT / "AbstractGraph_dev",
+    base / relative_root
+    for base in build_optional_dependency_candidates()
+    for relative_root in ("AbstractGraph", "AbstractGraph_dev")
 ]
-_SOURCE_ROOT = next((path for path in _CANDIDATE_ROOTS if path.exists()), None)
+_SOURCE_ROOT = resolve_source_checkout("AbstractGraph", "AbstractGraph_dev")
 
 if _SOURCE_ROOT is None:
     raise ModuleNotFoundError(
