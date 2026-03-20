@@ -342,6 +342,37 @@ Important distinction:
 - the ILP enforces structural consistency,
 - the feasibility estimator enforces domain-specific validity beyond the ILP.
 
+## Separation Oracle
+
+When the graph generator is configured with `use_feasibility_oracle=True` and
+the feasibility estimator exposes `violating_edge_sets(graphs)`, feasibility can
+also feed back into the structural solve itself.
+
+The loop is:
+
+1. solve the adjacency ILP,
+2. materialize the candidate graph,
+3. call `feasibility_estimator.violating_edge_sets([graph])`,
+4. canonicalize and deduplicate the returned undirected edge sets,
+5. add one no-good cut per violating set,
+6. re-solve until no violating sets remain or `max_oracle_iterations` is reached.
+
+Each cut has the form:
+
+- `sum(x_e for e in S) <= |S| - 1`
+
+This forbids the exact violating motif while still allowing strict subsets of
+its edges.
+
+This changes the role of the feasibility estimator:
+
+- `predict(...)` is still the post-hoc accept or reject interface,
+- `violating_edge_sets(...)` is the optional separation-oracle interface.
+
+If the estimator does not implement `violating_edge_sets(...)`, NodeField
+silently falls back to the previous one-shot structural decode plus optional
+feasibility filtering.
+
 ## Feasible-Rate Score
 
 The generator now exposes a scoring method built on top of this decoder-plus-filtering stage:
@@ -387,6 +418,7 @@ The decoder design is strong for small to medium graphs, but it has predictable 
 - global consistency instead of local thresholding,
 - explicit degree control,
 - optional connectivity guarantee,
+- optional oracle-guided exclusion of known invalid motifs,
 - clear separation between learned scores and hard constraints,
 - easy insertion of domain-specific feasibility filters.
 
@@ -395,6 +427,7 @@ The decoder design is strong for small to medium graphs, but it has predictable 
 - MILP solve time grows quickly with graph size,
 - degree predictions may still be mutually inconsistent,
 - connectivity makes the solve more expensive,
+- oracle-guided decode can require multiple full ILP solves for one sample,
 - labels are not part of the structural optimization,
 - feasibility filtering can require multiple full decode attempts.
 

@@ -228,6 +228,18 @@ def test_build_graph_generator_propagates_model_name_to_inner_generator():
     assert generator.conditional_node_generator_model.model_dir == "/tmp/models"
 
 
+def test_build_graph_generator_enables_feasibility_oracle_by_default_and_forwards_overrides():
+    default_generator = build_graph_generator()
+    overridden_generator = build_graph_generator(
+        use_feasibility_oracle=False,
+        max_oracle_iterations=3,
+    )
+
+    assert default_generator.use_feasibility_oracle is True
+    assert overridden_generator.use_feasibility_oracle is False
+    assert overridden_generator.max_oracle_iterations == 3
+
+
 def test_sample_hyperparameter_configuration_respects_typed_ranges():
     config = sample_hyperparameter_configuration(
         {

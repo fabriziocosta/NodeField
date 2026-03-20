@@ -128,6 +128,8 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(max_feasibility_attempts=0)
     with pytest.raises(ValueError, match="feasibility_candidates_per_attempt"):
         ConditionalNodeFieldGraphGenerator(feasibility_candidates_per_attempt=0)
+    with pytest.raises(ValueError, match="max_oracle_iterations"):
+        ConditionalNodeFieldGraphGenerator(max_oracle_iterations=0)
     with pytest.raises(ValueError, match="feasibility_failure_mode"):
         ConditionalNodeFieldGraphGenerator(feasibility_failure_mode="drop")
 
@@ -407,6 +409,49 @@ class _CollectDecoderStub:
                 graph.add_edge(0, 1, label="-")
             graphs.append(graph)
         return graphs
+
+
+class _OracleOnceEstimator:
+    def __init__(self, edge_sets_per_call):
+        self.edge_sets_per_call = list(edge_sets_per_call)
+        self.calls = []
+
+    def violating_edge_sets(self, graphs):
+        graph = graphs[0]
+        self.calls.append(frozenset(tuple(sorted(edge)) for edge in graph.edges()))
+        if self.edge_sets_per_call:
+            return [self.edge_sets_per_call.pop(0)]
+        return [[]]
+
+
+def _oracle_generated_batch():
+    return GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[2.0, 2.0, 2.0, 2.0]], dtype=float),
+        node_labels=[np.asarray(["C", "C", "C", "C"], dtype=object)],
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.95, 0.10, 0.95],
+                    [0.95, 0.0, 0.95, 0.10],
+                    [0.10, 0.95, 0.0, 0.95],
+                    [0.95, 0.10, 0.95, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+        edge_label_matrices=[
+            np.asarray(
+                [
+                    [None, "-", "-", "-"],
+                    ["-", None, "-", "-"],
+                    ["-", "-", None, "-"],
+                    ["-", "-", "-", None],
+                ],
+                dtype=object,
+            )
+        ],
+    )
 
 
 def test_collect_generated_guidance_examples_uses_generated_embeddings():
@@ -698,6 +743,71 @@ def test_parallel_decode_matches_serial_decode():
     for serial_graph, parallel_graph in zip(serial_graphs, parallel_graphs):
         assert sorted(serial_graph.nodes(data=True)) == sorted(parallel_graph.nodes(data=True))
         assert sorted(serial_graph.edges(data=True)) == sorted(parallel_graph.edges(data=True))
+
+
+def test_optimize_adjacency_matrix_applies_forbidden_edge_set_cuts():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True)
+    prob_matrix = np.asarray(
+        [
+            [0.0, 0.95, 0.10, 0.95],
+            [0.95, 0.0, 0.95, 0.10],
+            [0.10, 0.95, 0.0, 0.95],
+            [0.95, 0.10, 0.95, 0.0],
+        ],
+        dtype=float,
+    )
+
+    adj = decoder.optimize_adjacency_matrix(
+        prob_matrix,
+        [2, 2, 2, 2],
+        forbidden_edge_sets=[
+            [(1, 0), (2, 1), (3, 2), (0, 3)],
+            [(0, 1), (1, 2), (2, 3), (3, 0)],
+            [],
+        ],
+    )
+
+    edge_set = frozenset((min(u, v), max(u, v)) for u, v in nx.from_numpy_array(adj).edges())
+    assert edge_set != frozenset({(0, 1), (1, 2), (2, 3), (0, 3)})
+
+
+def test_decode_generated_nodes_uses_oracle_cuts_when_available():
+    first_cycle = frozenset({(0, 1), (1, 2), (2, 3), (0, 3)})
+    second_cycle = frozenset({(0, 1), (1, 3), (2, 3), (0, 2)})
+    estimator = _OracleOnceEstimator([
+        [[(1, 0), (2, 1), (3, 2), (3, 0)], [(0, 1), (3, 1), (3, 2), (2, 0)], []],
+        [],
+    ])
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True),
+        feasibility_estimator=estimator,
+        verbose=False,
+    )
+
+    decoded = generator._decode_generated_nodes(_oracle_generated_batch())
+
+    assert len(decoded) == 1
+    decoded_edge_set = frozenset((min(u, v), max(u, v)) for u, v in decoded[0].edges())
+    assert decoded_edge_set not in {first_cycle, second_cycle}
+    assert len(estimator.calls) >= 2
+    assert estimator.calls[0] == first_cycle
+
+
+def test_decode_generated_nodes_falls_back_when_oracle_method_missing():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.feasibility_estimator = _FakeFeasibilityEstimator()
+    generator.graph_decoder = _CollectDecoderStub()
+
+    decoded = generator._decode_generated_nodes(
+        GeneratedNodeBatch(
+            node_embeddings_list=[np.asarray([[0.0], [1.0]], dtype=float)],
+            node_presence_mask=np.asarray([[True, True]], dtype=bool),
+            edge_probability_matrices=[np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=float)],
+        )
+    )
+
+    assert len(decoded) == 1
+    assert decoded[0].graph["feasible"] is True
 
 
 def test_edge_importance_parameters_are_exposed_on_model():

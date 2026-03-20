@@ -757,7 +757,9 @@ ConditionalNodeFieldGraphGenerator(
     locality_sampling_strategy: str = "stratified_preserve",
     locality_target_positive_ratio: Optional[float] = None,
     feasibility_estimator: Any = None,
+    use_feasibility_oracle: bool = True,
     use_feasibility_filtering: bool = True,
+    max_oracle_iterations: int = 8,
     max_feasibility_attempts: int = 10,
     feasibility_candidates_per_attempt: int = 4,
     feasibility_failure_mode: str = "return_partial",
@@ -817,10 +819,23 @@ ConditionalNodeFieldGraphGenerator(
   Optional predictor that judges whether a decoded graph is acceptable.
   Better estimator quality improves rejection filtering quality.
 
+- `use_feasibility_oracle`
+  Whether to use `feasibility_estimator.violating_edge_sets(...)` as a bounded
+  separation oracle during adjacency decode when that method is available.
+  Enable: stronger structural correction before filtering, but potentially more
+  ILP solves.
+  Disable: use the previous single-solve structural decode path.
+
 - `use_feasibility_filtering`
   Whether to apply feasibility filtering during generation.
   Enable: safer outputs, but slower generation and possible partial batches.
   Disable: faster generation, but no rejection of bad outputs.
+
+- `max_oracle_iterations`
+  Maximum number of cut-generation rounds per decoded graph when the feasibility
+  oracle is active.
+  Increase: more chances to remove violating motifs, but slower decode.
+  Decrease: faster decode, but more residual violations may reach filtering.
 
 - `max_feasibility_attempts`
   Maximum rejection-sampling rounds per batch slot.
@@ -946,6 +961,7 @@ decode(
     desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
     guidance_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
+    use_feasibility_oracle: Optional[bool] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -967,6 +983,11 @@ Parameters:
   Enable: safer outputs, slower runtime.
   Disable: faster generation, no rejection filtering.
 
+- `use_feasibility_oracle`
+  Overrides the object-level oracle default for this call only.
+  Enable: use `violating_edge_sets(...)` when available.
+  Disable: skip oracle-guided cuts even if the estimator supports them.
+
 #### `decode_classifier_guided(...)`
 
 ```python
@@ -975,6 +996,7 @@ decode_classifier_guided(
     desired_class: Union[int, Sequence[Any]],
     classifier_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
+    use_feasibility_oracle: Optional[bool] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -990,6 +1012,9 @@ Parameters:
 - `apply_feasibility_filtering`
   Same effect as in `decode(...)`.
 
+- `use_feasibility_oracle`
+  Same effect as in `decode(...)`.
+
 #### `decode_regression_guided(...)`
 
 ```python
@@ -998,6 +1023,7 @@ decode_regression_guided(
     desired_target: Union[float, Sequence[Any]],
     predictor_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
+    use_feasibility_oracle: Optional[bool] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -1011,6 +1037,9 @@ Parameters:
   Decrease: weaker steering.
 
 - `apply_feasibility_filtering`
+  Same effect as in `decode(...)`.
+
+- `use_feasibility_oracle`
   Same effect as in `decode(...)`.
 
 #### `sample(...)`

@@ -379,7 +379,7 @@ This stage:
 
 The graph generator itself does not build edges directly. It delegates that responsibility to the decoder.
 
-### 4. Optional Feasibility Filtering
+### 4. Optional Feasibility Filtering And Oracle-Guided Decode
 
 If a feasibility estimator is configured, `_decode_with_feasibility_slots()` can:
 
@@ -394,6 +394,19 @@ Architecturally, this is separate from the ILP decode:
 
 - the decoder enforces local structural constraints,
 - the feasibility estimator acts as a post-hoc accept/reject model for domain-specific validity.
+
+There is now a second integration path as well:
+
+- when `use_feasibility_oracle=True` and the estimator exposes
+  `violating_edge_sets(graphs)`,
+- the generator uses the estimator during structural decode itself,
+- returned violating edge sets are converted into no-good cuts and the adjacency
+  ILP is re-solved for a bounded number of rounds.
+
+So the same feasibility estimator can contribute in two ways:
+
+- as a separation oracle during adjacency reconstruction,
+- as a post-hoc rejection filter after decode.
 
 ## Control Flow By Public API
 
@@ -414,6 +427,11 @@ Decode a supplied `GraphConditioningBatch` directly into graphs.
 
 Use this when conditioning vectors are already available.
 
+By default, decode now attempts oracle-guided feasibility cuts before falling
+back to the usual final feasibility filtering stage. If the configured
+feasibility estimator does not expose `violating_edge_sets(...)`, decode
+silently reuses the previous behavior.
+
 ### `sample(n_samples, ...)`
 
 Sample graph-level conditions from cached training conditioning, then decode them.
@@ -423,6 +441,10 @@ By default, this samples stored graph-conditioning rows directly. When `interpol
 ### `conditional_sample(graphs, n_samples, ...)`
 
 Encode each input graph, repeat each condition `n_samples` times, then decode multiple generated variants per input graph.
+
+Like `decode(...)` and `sample(...)`, this path now enables the feasibility
+oracle by default and only bypasses it when disabled per call or unsupported by
+the configured estimator.
 
 ### `score_feasible_rate(n_samples, max_feasibility_attempts, feasibility_candidates_per_attempt, ...)`
 
