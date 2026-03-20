@@ -12,3 +12,4 @@ This file tracks the work that is still genuinely open after the cleanup passes.
   - abstract-graph conditioning where high-level motif or scaffold tokens drive concrete graph generation
 
 - add the feasibility score as a singla for a regressor to guide the generation
+- add hot start : separate initialization of weights from fitting which should assume always to start hot
