@@ -29,6 +29,7 @@ from conditional_node_field_graph_generator.extensions.demo.visualization import
     offset_neg_graphs,
     select_pos_neg,
 )
+from conditional_node_field_graph_generator.extensions.synthetic import ArtificialGraphDatasetConstructor
 
 
 def _labeled_graph(label):
@@ -276,6 +277,55 @@ def test_build_graph_generator_enables_feasibility_oracle_by_default_and_forward
     assert default_generator.use_feasibility_oracle is True
     assert overridden_generator.use_feasibility_oracle is False
     assert overridden_generator.max_oracle_iterations == 3
+
+
+def test_build_graph_generator_disables_feasibility_when_optional_dependencies_are_missing(monkeypatch):
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.compose",
+        None,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.cycle",
+        None,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.neighborhood",
+        None,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.unlabel",
+        None,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.combination",
+        None,
+    )
+
+    generator = build_graph_generator()
+
+    assert generator.feasibility_estimator is None
+    assert generator.use_feasibility_oracle is False
+    assert generator.use_feasibility_filtering is False
+
+
+def test_artificial_graph_dataset_constructor_uses_internal_deduper_when_abstractgraph_is_missing():
+    graphs, targets = ArtificialGraphDatasetConstructor(
+        graph_generator_target_type_pos="cycle",
+        graph_generator_context_type_pos="cycle",
+        graph_generator_target_type_neg="tree",
+        graph_generator_context_type_neg="tree",
+        target_size_pos=5,
+        context_size_pos=5,
+        n_link_edges_pos=1,
+        alphabet_size_pos=3,
+        target_size_neg=5,
+        context_size_neg=5,
+        n_link_edges_neg=1,
+        alphabet_size_neg=3,
+    ).sample(8)
+
+    assert len(graphs) == len(targets)
+    assert len(graphs) > 0
 
 
 def test_sample_hyperparameter_configuration_respects_typed_ranges():

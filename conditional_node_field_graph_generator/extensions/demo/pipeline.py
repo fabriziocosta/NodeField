@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import math
 from typing import Any, Callable, Optional
+import warnings
 
 import networkx as nx
 import numpy as np
@@ -57,21 +58,20 @@ from .storage import describe_resume_checkpoint, find_latest_checkpoint
 from .visualization import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
 
 
-def _require_demo_feasibility_support():
-    if (
-        compose is None
-        or cycle is None
-        or neighborhood is None
-        or unlabel is None
-        or combination is None
-        or FeasibilityEstimator is None
-        or FeasibilityEstimatorFeatureCannotExist is None
-        or WithinRangeFeasibilityEstimatorFromNumericalFunction is None
-    ):
-        raise ModuleNotFoundError(
-            "build_graph_generator() requires optional dependencies 'abstractgraph' "
-            "and 'abstractgraph_ml'."
+def _has_demo_feasibility_support():
+    return not any(
+        dependency is None
+        for dependency in (
+            compose,
+            cycle,
+            neighborhood,
+            unlabel,
+            combination,
+            FeasibilityEstimator,
+            FeasibilityEstimatorFeatureCannotExist,
+            WithinRangeFeasibilityEstimatorFromNumericalFunction,
         )
+    )
 
 
 def _resolve_pubchem_dir() -> Path:
@@ -512,8 +512,6 @@ def build_graph_generator(
     if graph_vectorizer_nbits is None:
         graph_vectorizer_nbits = 11
 
-    _require_demo_feasibility_support()
-
     node_graph_vectorizer = NodeNSPPK(
         radius=node_vectorizer_radius,
         distance=node_vectorizer_distance,
@@ -533,41 +531,59 @@ def build_graph_generator(
         use_edges_as_features=graph_vectorizer_use_edges_as_features,
     )
 
-    feasibility_size = WithinRangeFeasibilityEstimatorFromNumericalFunction(
-        numerical_function=lambda graph: len(graph),
-        quantile=feasibility_size_quantile,
-    )
-    feasibility_unlabeled_structure = FeasibilityEstimatorFeatureCannotExist(
-        decomposition_function=compose(neighborhood(radius=feasibility_unlabeled_radius), unlabel()),
-        nbits=feasibility_unlabeled_nbits,
-        parallel=feasibility_parallel,
-        backend=feasibility_backend,
-        n_jobs=feasibility_n_jobs,
-    )
-    feasibility_valence = FeasibilityEstimatorFeatureCannotExist(
-        decomposition_function=neighborhood(radius=feasibility_valence_radius),
-        nbits=feasibility_valence_nbits,
-        parallel=feasibility_parallel,
-        backend=feasibility_backend,
-        n_jobs=feasibility_n_jobs,
-    )
-    feasibility_cycle = FeasibilityEstimatorFeatureCannotExist(
-        decomposition_function=cycle(),
-        nbits=feasibility_cycle_nbits,
-        parallel=feasibility_parallel,
-        backend=feasibility_backend,
-        n_jobs=feasibility_n_jobs,
-    )
-    feasibility_cycle_composition = FeasibilityEstimatorFeatureCannotExist(
-        decomposition_function=compose(combination(number_of_elements=(2,3), distance=0), cycle(), unlabel()),
-        nbits=feasibility_cycle_nbits,
-        parallel=feasibility_parallel,
-        backend=feasibility_backend,
-        n_jobs=feasibility_n_jobs,
-    )
-    feasibility_estimator = FeasibilityEstimator(
-        [feasibility_size, feasibility_valence, feasibility_cycle, feasibility_unlabeled_structure, feasibility_cycle_composition]
-    )
+    feasibility_estimator = None
+    if _has_demo_feasibility_support():
+        feasibility_size = WithinRangeFeasibilityEstimatorFromNumericalFunction(
+            numerical_function=lambda graph: len(graph),
+            quantile=feasibility_size_quantile,
+        )
+        feasibility_unlabeled_structure = FeasibilityEstimatorFeatureCannotExist(
+            decomposition_function=compose(neighborhood(radius=feasibility_unlabeled_radius), unlabel()),
+            nbits=feasibility_unlabeled_nbits,
+            parallel=feasibility_parallel,
+            backend=feasibility_backend,
+            n_jobs=feasibility_n_jobs,
+        )
+        feasibility_valence = FeasibilityEstimatorFeatureCannotExist(
+            decomposition_function=neighborhood(radius=feasibility_valence_radius),
+            nbits=feasibility_valence_nbits,
+            parallel=feasibility_parallel,
+            backend=feasibility_backend,
+            n_jobs=feasibility_n_jobs,
+        )
+        feasibility_cycle = FeasibilityEstimatorFeatureCannotExist(
+            decomposition_function=cycle(),
+            nbits=feasibility_cycle_nbits,
+            parallel=feasibility_parallel,
+            backend=feasibility_backend,
+            n_jobs=feasibility_n_jobs,
+        )
+        feasibility_cycle_composition = FeasibilityEstimatorFeatureCannotExist(
+            decomposition_function=compose(combination(number_of_elements=(2,3), distance=0), cycle(), unlabel()),
+            nbits=feasibility_cycle_nbits,
+            parallel=feasibility_parallel,
+            backend=feasibility_backend,
+            n_jobs=feasibility_n_jobs,
+        )
+        feasibility_estimator = FeasibilityEstimator(
+            [
+                feasibility_size,
+                feasibility_valence,
+                feasibility_cycle,
+                feasibility_unlabeled_structure,
+                feasibility_cycle_composition,
+            ]
+        )
+    else:
+        if use_feasibility_oracle or use_feasibility_filtering:
+            warnings.warn(
+                "Optional dependencies 'abstractgraph' and 'abstractgraph_ml' are not installed; "
+                "disabling feasibility oracle and feasibility filtering.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        use_feasibility_oracle = False
+        use_feasibility_filtering = False
 
     conditional_node_generator_model = ConditionalNodeFieldGenerator(
         latent_embedding_dimension=latent_embedding_dimension,

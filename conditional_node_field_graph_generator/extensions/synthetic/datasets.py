@@ -7,16 +7,62 @@ from toolz import curry
 from .primitives import make_graph_generator
 
 
+def _normalize_hash_value(value):
+    if isinstance(value, np.ndarray):
+        return tuple(_normalize_hash_value(item) for item in value.tolist())
+    if isinstance(value, (list, tuple)):
+        return tuple(_normalize_hash_value(item) for item in value)
+    if isinstance(value, dict):
+        return tuple(sorted((key, _normalize_hash_value(val)) for key, val in value.items()))
+    if isinstance(value, (np.generic,)):
+        return value.item()
+    return value
+
+
+def _graph_hash(graph):
+    hashed_graph = nx.Graph()
+    hashed_graph.add_nodes_from(graph.nodes())
+    hashed_graph.add_edges_from(graph.edges())
+
+    for node, attrs in graph.nodes(data=True):
+        hashed_graph.nodes[node]["_dedupe_label"] = repr(
+            tuple(sorted((key, _normalize_hash_value(val)) for key, val in attrs.items()))
+        )
+    for u, v, attrs in graph.edges(data=True):
+        hashed_graph.edges[u, v]["_dedupe_label"] = repr(
+            tuple(sorted((key, _normalize_hash_value(val)) for key, val in attrs.items()))
+        )
+    return nx.weisfeiler_lehman_graph_hash(
+        hashed_graph,
+        node_attr="_dedupe_label",
+        edge_attr="_dedupe_label",
+    )
+
+
+class _FallbackGraphHashDeduper:
+    def __init__(self):
+        self._seen_hashes = set()
+
+    def fit_filter(self, graphs):
+        self._seen_hashes = set()
+        return self.filter(graphs)
+
+    def filter(self, graphs):
+        unique_graphs = []
+        for graph in graphs:
+            graph_key = _graph_hash(graph)
+            if graph_key in self._seen_hashes:
+                continue
+            self._seen_hashes.add(graph_key)
+            unique_graphs.append(graph)
+        return unique_graphs
+
+
 def _make_duplicate_detection_estimator():
     try:
         from abstractgraph.hashing import GraphHashDeduper
     except ImportError as exc:
-        raise ImportError(
-            "Graph duplicate filtering requires optional dependency 'abstractgraph'. "
-            "Install it to use make_graphs_classification_dataset(), "
-            "make_two_types_graphs_classification_dataset(), or "
-            "ArtificialGraphDatasetConstructor.sample()."
-        ) from exc
+        GraphHashDeduper = _FallbackGraphHashDeduper
     return GraphHashDeduper()
 
 

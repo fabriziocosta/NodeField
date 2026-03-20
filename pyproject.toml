@@ -44,6 +44,7 @@ py-modules = ["_external_imports"]
 where = ["."]
 include = [
   "conditional_node_field_graph_generator*",
+  "abstractgraph",
   "abstractgraph_ml"
 ]
 exclude = ["tests*", "docs*", "notebooks*", "*.egg-info"]

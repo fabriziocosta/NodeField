@@ -25,6 +25,9 @@ def build_optional_dependency_candidates() -> list[Path]:
     candidates = [
         repo_parent,
         repo_parent / "abstractgraph-ecosystem" / "repos",
+        repo_parent / "abstractgraph_ecosystem" / "repos",
+        repo_parent / "abstractgraph-ecosystem",
+        repo_parent / "abstractgraph_ecosystem",
         repo_root,
     ]
     return _dedupe_paths(candidates)
