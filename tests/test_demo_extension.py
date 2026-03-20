@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from conditional_node_field_graph_generator.extensions.demo.pipeline import (
+    benchmark_regression_guidance,
     build_graph_generator,
     build_zinc_dataset,
     fit_graph_generator,
@@ -268,6 +269,86 @@ def test_score_graph_generator_feasible_rate_forwards_to_member_function():
         "guidance_scale": 1.0,
         "verbose": True,
     }
+
+
+class _FakeBenchmarkFeasibilityEstimator:
+    def number_of_violations(self, decoded_graphs):
+        return [int(graph.graph["violations"]) for graph in decoded_graphs]
+
+
+class _FakeBenchmarkGenerator:
+    def __init__(self):
+        self.feasibility_estimator = _FakeBenchmarkFeasibilityEstimator()
+
+    def _sample_conditions(self, n_samples, interpolate_between_n_samples=None):
+        del interpolate_between_n_samples
+        return [f"c{idx}" for idx in range(int(n_samples))]
+
+    def _predict_generated_nodes(
+        self,
+        graph_conditioning,
+        sampling_mode,
+        desired_target,
+        guidance_scale,
+        predictor_scale,
+    ):
+        del desired_target, guidance_scale, predictor_scale
+        return type(
+            "_Generated",
+            (),
+            {
+                "node_embeddings_list": [
+                    np.asarray([[float(idx)]], dtype=float)
+                    for idx, _conditioning in enumerate(graph_conditioning)
+                ],
+                "sampling_mode": sampling_mode,
+            },
+        )()
+
+    def _decode_generated_nodes(self, generated_nodes):
+        decoded = []
+        for idx, _embedding in enumerate(generated_nodes.node_embeddings_list):
+            graph = nx.Graph()
+            if generated_nodes.sampling_mode == "unguided":
+                graph.graph["violations"] = [0, 2, 5, 1][idx]
+            else:
+                graph.graph["violations"] = [0, 0, 6, 3][idx]
+            decoded.append(graph)
+        return decoded
+
+    @staticmethod
+    def _compute_guidance_targets(violation_counts):
+        violations = np.asarray(violation_counts, dtype=float)
+        return 1.0 / (1.0 + np.log1p(violations))
+
+
+def test_benchmark_regression_guidance_returns_paired_summary():
+    result = benchmark_regression_guidance(
+        _FakeBenchmarkGenerator(),
+        n_samples=4,
+        bootstrap_samples=200,
+        random_state=7,
+    )
+
+    assert set(result.keys()) == {
+        "summary",
+        "paired_summary",
+        "per_sample",
+        "unguided_batch",
+        "guided_batch",
+    }
+    summary = result["summary"]
+    assert summary["label"].tolist() == ["unguided", "regression_guided"]
+    assert summary["feasible_count"].tolist() == [1, 2]
+    assert summary["count"].tolist() == [4, 4]
+    paired = result["paired_summary"].iloc[0]
+    assert int(paired["guided_only_feasible"]) == 1
+    assert int(paired["unguided_only_feasible"]) == 0
+    assert int(paired["both_feasible"]) == 1
+    assert int(paired["neither_feasible"]) == 2
+    assert paired["mean_feasible_rate_delta"] == pytest.approx(0.25)
+    per_sample = result["per_sample"]
+    assert per_sample["violation_delta"].tolist() == [0.0, -2.0, 1.0, 2.0]
 
 
 class _FakeCompareGenerator:

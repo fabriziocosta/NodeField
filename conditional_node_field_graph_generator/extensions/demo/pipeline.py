@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import math
 from typing import Any, Callable, Optional
 
 import networkx as nx
@@ -40,7 +41,11 @@ except ModuleNotFoundError:
     from nsppk import NSPPK, NodeNSPPK
 
 from ...conditional_node_field_generator import ConditionalNodeFieldGenerator
-from ...conditional_node_field_graph_generator import ConditionalNodeFieldGraphDecoder, ConditionalNodeFieldGraphGenerator
+from ...conditional_node_field_graph_generator import (
+    ConditionalNodeFieldGraphDecoder,
+    ConditionalNodeFieldGraphGenerator,
+    GeneratedGuidanceBatch,
+)
 from ...persistence import save_graph_generator
 from ..molecular import (
     PubChemLoader,
@@ -190,6 +195,206 @@ def score_graph_generator_feasible_rate(
         guidance_scale=guidance_scale,
         verbose=verbose,
     )
+
+
+def _resolve_violation_counts(feasibility_estimator, decoded_graphs):
+    try:
+        raw_violation_counts = feasibility_estimator.number_of_violations(decoded_graphs)
+    except AttributeError as exc:
+        if "has no attribute 'get'" not in str(exc):
+            raise
+        raw_violation_counts = feasibility_estimator.number_of_violations(
+            [graph.graph if hasattr(graph, "graph") else graph for graph in decoded_graphs]
+        )
+    return np.asarray(raw_violation_counts, dtype=np.int64).reshape(-1)
+
+
+def _evaluate_guidance_mode(
+    graph_generator,
+    graph_conditioning,
+    *,
+    sampling_mode,
+    desired_target,
+    guidance_scale,
+    predictor_scale,
+):
+    generated_nodes = graph_generator._predict_generated_nodes(
+        graph_conditioning,
+        sampling_mode=sampling_mode,
+        desired_target=desired_target,
+        guidance_scale=guidance_scale,
+        predictor_scale=predictor_scale,
+    )
+    decoded_graphs = graph_generator._decode_generated_nodes(generated_nodes)
+    violation_counts = _resolve_violation_counts(graph_generator.feasibility_estimator, decoded_graphs)
+    if violation_counts.shape[0] != len(decoded_graphs):
+        raise RuntimeError(
+            "Feasibility estimator returned an unexpected number of violation counts "
+            f"({violation_counts.shape[0]} for {len(decoded_graphs)} graphs)."
+        )
+    return GeneratedGuidanceBatch(
+        node_embeddings_list=[
+            np.asarray(embedding, dtype=float)
+            for embedding in generated_nodes.node_embeddings_list or []
+        ],
+        graph_conditioning=graph_conditioning,
+        decoded_graphs=decoded_graphs,
+        violation_counts=violation_counts,
+        guidance_targets=graph_generator._compute_guidance_targets(violation_counts),
+        feasible_mask=np.asarray(violation_counts == 0, dtype=bool),
+        sampling_mode=str(sampling_mode),
+    )
+
+
+def _wilson_interval(successes, total, confidence_level=0.95):
+    if int(total) <= 0:
+        return 0.0, 0.0
+    z = 1.959963984540054 if float(confidence_level) == 0.95 else 1.959963984540054
+    n = float(total)
+    p = float(successes) / n
+    denom = 1.0 + (z * z) / n
+    center = (p + (z * z) / (2.0 * n)) / denom
+    margin = (z / denom) * math.sqrt((p * (1.0 - p) / n) + (z * z) / (4.0 * n * n))
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+
+def _bootstrap_interval(values, rng, confidence_level=0.95, n_resamples=1000):
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    if arr.size == 0:
+        return 0.0, 0.0
+    if arr.size == 1:
+        return float(arr[0]), float(arr[0])
+    resampled_means = np.empty(int(n_resamples), dtype=float)
+    for idx in range(int(n_resamples)):
+        sample = rng.choice(arr, size=arr.size, replace=True)
+        resampled_means[idx] = float(np.mean(sample))
+    alpha = 1.0 - float(confidence_level)
+    lower = float(np.quantile(resampled_means, alpha / 2.0))
+    upper = float(np.quantile(resampled_means, 1.0 - alpha / 2.0))
+    return lower, upper
+
+
+def benchmark_regression_guidance(
+    graph_generator,
+    n_samples=200,
+    interpolate_between_n_samples=None,
+    desired_target=1.0,
+    guidance_scale=1.0,
+    predictor_scale=1.0,
+    bootstrap_samples=1000,
+    confidence_level=0.95,
+    random_state=0,
+):
+    """Compare unguided and regression-guided generation on the same sampled conditioning."""
+    if graph_generator.feasibility_estimator is None:
+        raise RuntimeError("benchmark_regression_guidance() requires graph_generator.feasibility_estimator.")
+    graph_conditioning = graph_generator._sample_conditions(
+        int(n_samples),
+        interpolate_between_n_samples=interpolate_between_n_samples,
+    )
+    unguided_batch = _evaluate_guidance_mode(
+        graph_generator,
+        graph_conditioning,
+        sampling_mode="unguided",
+        desired_target=desired_target,
+        guidance_scale=guidance_scale,
+        predictor_scale=predictor_scale,
+    )
+    guided_batch = _evaluate_guidance_mode(
+        graph_generator,
+        graph_conditioning,
+        sampling_mode="regression_guided",
+        desired_target=desired_target,
+        guidance_scale=guidance_scale,
+        predictor_scale=predictor_scale,
+    )
+
+    rng = np.random.default_rng(random_state)
+    rows = []
+    for batch in (unguided_batch, guided_batch):
+        feasible_count = int(np.sum(batch.feasible_mask))
+        count = len(batch)
+        feasible_ci_low, feasible_ci_high = _wilson_interval(
+            feasible_count,
+            count,
+            confidence_level=confidence_level,
+        )
+        rows.append(
+            {
+                "label": batch.sampling_mode,
+                "count": count,
+                "feasible_count": feasible_count,
+                "feasible_rate": float(np.mean(batch.feasible_mask)) if count else 0.0,
+                "feasible_rate_ci_low": feasible_ci_low,
+                "feasible_rate_ci_high": feasible_ci_high,
+                "mean_violations": float(np.mean(batch.violation_counts)) if count else 0.0,
+                "median_violations": float(np.median(batch.violation_counts)) if count else 0.0,
+                "mean_target": float(np.mean(batch.guidance_targets)) if count else 0.0,
+                "median_target": float(np.median(batch.guidance_targets)) if count else 0.0,
+            }
+        )
+
+    feasible_delta = np.asarray(guided_batch.feasible_mask, dtype=float) - np.asarray(unguided_batch.feasible_mask, dtype=float)
+    violation_delta = np.asarray(guided_batch.violation_counts, dtype=float) - np.asarray(unguided_batch.violation_counts, dtype=float)
+    target_delta = np.asarray(guided_batch.guidance_targets, dtype=float) - np.asarray(unguided_batch.guidance_targets, dtype=float)
+    feasible_delta_ci_low, feasible_delta_ci_high = _bootstrap_interval(
+        feasible_delta,
+        rng,
+        confidence_level=confidence_level,
+        n_resamples=bootstrap_samples,
+    )
+    violation_delta_ci_low, violation_delta_ci_high = _bootstrap_interval(
+        violation_delta,
+        rng,
+        confidence_level=confidence_level,
+        n_resamples=bootstrap_samples,
+    )
+    target_delta_ci_low, target_delta_ci_high = _bootstrap_interval(
+        target_delta,
+        rng,
+        confidence_level=confidence_level,
+        n_resamples=bootstrap_samples,
+    )
+    paired_summary = pd.DataFrame(
+        [
+            {
+                "count": len(unguided_batch),
+                "guided_only_feasible": int(np.sum(guided_batch.feasible_mask & ~unguided_batch.feasible_mask)),
+                "unguided_only_feasible": int(np.sum(unguided_batch.feasible_mask & ~guided_batch.feasible_mask)),
+                "both_feasible": int(np.sum(guided_batch.feasible_mask & unguided_batch.feasible_mask)),
+                "neither_feasible": int(np.sum(~guided_batch.feasible_mask & ~unguided_batch.feasible_mask)),
+                "mean_feasible_rate_delta": float(np.mean(feasible_delta)) if feasible_delta.size else 0.0,
+                "feasible_rate_delta_ci_low": feasible_delta_ci_low,
+                "feasible_rate_delta_ci_high": feasible_delta_ci_high,
+                "mean_violation_delta": float(np.mean(violation_delta)) if violation_delta.size else 0.0,
+                "violation_delta_ci_low": violation_delta_ci_low,
+                "violation_delta_ci_high": violation_delta_ci_high,
+                "mean_target_delta": float(np.mean(target_delta)) if target_delta.size else 0.0,
+                "target_delta_ci_low": target_delta_ci_low,
+                "target_delta_ci_high": target_delta_ci_high,
+            }
+        ]
+    )
+    per_sample = pd.DataFrame(
+        {
+            "conditioning_index": np.arange(len(unguided_batch), dtype=int),
+            "unguided_feasible": np.asarray(unguided_batch.feasible_mask, dtype=bool),
+            "guided_feasible": np.asarray(guided_batch.feasible_mask, dtype=bool),
+            "unguided_violations": np.asarray(unguided_batch.violation_counts, dtype=int),
+            "guided_violations": np.asarray(guided_batch.violation_counts, dtype=int),
+            "violation_delta": violation_delta,
+            "unguided_target": np.asarray(unguided_batch.guidance_targets, dtype=float),
+            "guided_target": np.asarray(guided_batch.guidance_targets, dtype=float),
+            "target_delta": target_delta,
+        }
+    )
+    return {
+        "summary": pd.DataFrame(rows),
+        "paired_summary": paired_summary,
+        "per_sample": per_sample,
+        "unguided_batch": unguided_batch,
+        "guided_batch": guided_batch,
+    }
 
 
 def sample_hyperparameter_configuration(

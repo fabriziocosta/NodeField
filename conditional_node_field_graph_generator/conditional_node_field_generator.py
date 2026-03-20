@@ -1,6 +1,7 @@
 """Node-level Conditional Node Field engine."""
 
 from dataclasses import dataclass
+import math
 from typing import List, Any, Optional, Tuple, Sequence, Union
 import os
 
@@ -21,6 +22,8 @@ from .training_policy import (
     format_restored_checkpoint_summary,
     suppress_output,
 )
+
+_EDGE_COUNT_GRAPH_SIZE_EXPONENT = math.log2(3.0)
 
 @dataclass
 class GraphConditioningBatch:
@@ -741,12 +744,23 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             torch.ones_like(sym_edge_probs, dtype=torch.bool),
             diagonal=1,
         )
-        expected_edge_counts = sym_edge_probs.masked_select(upper_mask).reshape(edge_probs.shape[0], -1).sum(dim=1)
-        return ConditionalNodeFieldModule._scale_normalized_huber_loss(
-            expected_edge_counts,
-            target_edge_counts.to(dtype=edge_probs.dtype),
-            target_edge_counts.to(dtype=edge_probs.dtype),
+        expected_edge_counts = (
+            sym_edge_probs.masked_select(upper_mask).reshape(edge_probs.shape[0], -1).sum(dim=1).to(torch.float64)
         )
+        target_edge_counts = target_edge_counts.to(dtype=torch.float64)
+        expected_edge_counts = torch.round(expected_edge_counts * 1_000_000.0) / 1_000_000.0
+        target_edge_counts = torch.round(target_edge_counts * 1_000_000.0) / 1_000_000.0
+        active_node_counts = node_presence_mask.to(dtype=torch.float64).sum(dim=1).clamp_min(2.0)
+        sparse_graph_scale = target_edge_counts * torch.pow(
+            2.0 / active_node_counts,
+            _EDGE_COUNT_GRAPH_SIZE_EXPONENT,
+        )
+        sparse_graph_scale = sparse_graph_scale.clamp_min(torch.finfo(torch.float64).eps)
+        return F.huber_loss(
+            expected_edge_counts / sparse_graph_scale,
+            target_edge_counts / sparse_graph_scale,
+            reduction="mean",
+        ).to(dtype=edge_probs.dtype)
 
     def _recover_edge_count_targets(self, global_condition: torch.Tensor) -> torch.Tensor:
         """Recover unscaled edge-count targets from the scaled conditioning tensor.

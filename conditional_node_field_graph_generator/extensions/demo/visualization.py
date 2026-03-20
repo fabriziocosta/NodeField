@@ -38,10 +38,11 @@ def sample_positive_endpoint_pair(graphs, targets):
 def offset_neg_graphs(graphs, targets, offset=10):
     out_graphs = []
     for graph, target in zip(graphs, targets):
+        graph_copy = graph.copy()
         if target == 0:
-            for u in graph.nodes():
-                graph.nodes[u]["label"] += offset
-        out_graphs.append(graph.copy())
+            for u in graph_copy.nodes():
+                graph_copy.nodes[u]["label"] += offset
+        out_graphs.append(graph_copy)
     return out_graphs, targets
 
 

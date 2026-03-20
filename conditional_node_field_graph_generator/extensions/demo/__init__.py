@@ -2,6 +2,7 @@
 
 from ...persistence import list_saved_graph_generators, load_graph_generator, save_graph_generator
 from .pipeline import (
+    benchmark_regression_guidance,
     build_dataset,
     build_graph_generator,
     build_zinc_dataset,
@@ -30,6 +31,7 @@ __all__ = [
     "build_dataset",
     "build_graph_generator",
     "build_zinc_dataset",
+    "benchmark_regression_guidance",
     "compare_real_vs_generated",
     "describe_resume_checkpoint",
     "find_latest_checkpoint",

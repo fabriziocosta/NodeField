@@ -2,6 +2,7 @@
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
+import inspect
 import logging
 import os
 import time
@@ -1560,11 +1561,20 @@ class ConditionalNodeFieldGraphGenerator(object):
                 graph_conditioning=graph_conditioning,
                 targets=targets,
             )
+            fit_kwargs = {
+                "node_batch": node_batch,
+                "graph_conditioning": graph_conditioning,
+                "targets": targets,
+            }
+            fit_signature = inspect.signature(self.conditional_node_generator_model.fit)
+            accepts_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in fit_signature.parameters.values()
+            )
+            if "ckpt_path" in fit_signature.parameters or accepts_kwargs:
+                fit_kwargs["ckpt_path"] = ckpt_path
             self.conditional_node_generator_model.fit(
-                node_batch=node_batch,
-                graph_conditioning=graph_conditioning,
-                targets=targets,
-                ckpt_path=ckpt_path,
+                **fit_kwargs,
             )
 
         self.is_fitted_ = True
@@ -2277,10 +2287,15 @@ class ConditionalNodeFieldGraphGenerator(object):
         if generated_nodes.node_embeddings_list is None:
             raise RuntimeError("Generated node embeddings are unavailable for guidance collection.")
         decoded_graphs = self._decode_generated_nodes(generated_nodes)
-        violation_counts = np.asarray(
-            self.feasibility_estimator.number_of_violations(decoded_graphs),
-            dtype=np.int64,
-        ).reshape(-1)
+        try:
+            raw_violation_counts = self.feasibility_estimator.number_of_violations(decoded_graphs)
+        except AttributeError as exc:
+            if "has no attribute 'get'" not in str(exc):
+                raise
+            raw_violation_counts = self.feasibility_estimator.number_of_violations(
+                [graph.graph if hasattr(graph, "graph") else graph for graph in decoded_graphs]
+            )
+        violation_counts = np.asarray(raw_violation_counts, dtype=np.int64).reshape(-1)
         if violation_counts.shape[0] != len(decoded_graphs):
             raise RuntimeError(
                 "Feasibility estimator returned an unexpected number of violation counts "

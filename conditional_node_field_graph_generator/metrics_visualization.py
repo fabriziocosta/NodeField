@@ -209,4 +209,5 @@ def plot_metrics(
     legend_ncols = max(1, len(train_lines))
     fig.legend(legend_lines, legend_labels, loc="upper center", ncol=legend_ncols, fontsize="small")
     fig.subplots_adjust(left=0.08, right=0.68, top=0.90, hspace=0.30)
-    plt.show()
+    plt.show(block=False)
+    plt.close(fig)

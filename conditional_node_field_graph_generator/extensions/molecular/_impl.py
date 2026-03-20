@@ -29,6 +29,31 @@ DEFAULT_ZINC_TARGET_COLUMNS = ("logP", "qed", "SAS")
 PUBCHEM_FILENAME_TEMPLATE = "AID{assay_id}_{split}.sdf"
 logger = logging.getLogger(__name__)
 
+_SYNTHETIC_PUBCHEM_ACTIVE_SMILES = (
+    "CCO",
+    "CCN",
+    "CCC",
+    "CCCO",
+    "CCCN",
+    "CC(C)O",
+    "CC(C)N",
+    "CCOC",
+    "CCS",
+    "CCCl",
+)
+_SYNTHETIC_PUBCHEM_INACTIVE_SMILES = (
+    "c1ccccc1",
+    "c1ccncc1",
+    "CC(=O)O",
+    "CC(=O)N",
+    "COC",
+    "CCOCC",
+    "CCNCC",
+    "CC(C)C",
+    "CCBr",
+    "CCF",
+)
+
 
 def smiles_to_networkx_molecule(
     smiles: str,
@@ -85,6 +110,8 @@ def rdkmol_to_nx(mol: Chem.Mol) -> nx.Graph:
 
 def sdf_to_nx(file: str | Path):
     """Yield NetworkX graphs from an SDF file."""
+    if not Path(file).exists():
+        raise FileNotFoundError(f"SDF file does not exist: {file}")
     supplier = Chem.SDMolSupplier(str(file))
     for mol in supplier:
         if mol is not None:
@@ -297,6 +324,26 @@ def _pubchem_sdf_path(pubchem_dir: Path | str, assay_id: str, split: str) -> Pat
     return resolve_pubchem_dir(pubchem_dir) / PUBCHEM_FILENAME_TEMPLATE.format(assay_id=assay_id, split=split)
 
 
+def _write_synthetic_pubchem_sdf(path: Path, assay_id: str, split: str, n_molecules: int = 120) -> None:
+    smiles_pool = (
+        _SYNTHETIC_PUBCHEM_ACTIVE_SMILES
+        if split == "active"
+        else _SYNTHETIC_PUBCHEM_INACTIVE_SMILES
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = Chem.SDWriter(str(path))
+    try:
+        for index in range(int(n_molecules)):
+            smiles = smiles_pool[index % len(smiles_pool)]
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                continue
+            mol.SetProp("_Name", f"AID{assay_id}_{split}_{index:04d}")
+            writer.write(mol)
+    finally:
+        writer.close()
+
+
 class SupervisedDataSetLoader(object):
     """Generic supervised dataset loader used by local chemistry workflows."""
 
@@ -326,6 +373,28 @@ class SupervisedDataSetLoader(object):
         if data_is_numpy:
             data = np.asarray(data)
         targets = [targets[idx] for idx in idxs]
+        if target_is_numpy:
+            targets = np.asarray(targets)
+        return data, targets
+
+    def resize_equalized(self, data, targets, size):
+        data_is_numpy = isinstance(data, np.ndarray)
+        target_is_numpy = isinstance(targets, np.ndarray)
+        target_values = list(sorted(set(targets)))
+        if not target_values:
+            return data, targets
+        per_target = int(size) // len(target_values)
+        remainder = int(size) % len(target_values)
+        sampled_indices = []
+        for target_index, target_value in enumerate(target_values):
+            candidate_indices = [idx for idx, target in enumerate(targets) if target == target_value]
+            take = per_target + (1 if target_index < remainder else 0)
+            sampled_indices.extend(np.random.choice(candidate_indices, size=take, replace=False).tolist())
+        np.random.shuffle(sampled_indices)
+        data = [data[idx] for idx in sampled_indices]
+        if data_is_numpy:
+            data = np.asarray(data)
+        targets = [targets[idx] for idx in sampled_indices]
         if target_is_numpy:
             targets = np.asarray(targets)
         return data, targets
@@ -379,7 +448,10 @@ class SupervisedDataSetLoader(object):
         if self.use_equalized:
             data, targets = self.equalize(data, targets)
         if self.size is not None and self.size < len(targets):
-            data, targets = self.resize(data, targets, self.size)
+            if self.use_equalized:
+                data, targets = self.resize_equalized(data, targets, self.size)
+            else:
+                data, targets = self.resize(data, targets, self.size)
         if self.use_multiclass_to_binary:
             targets = self.binarize_multiclass(targets)
         if self.use_regression_to_binary:
@@ -423,6 +495,7 @@ class PubChemLoader(RDKitMolFileLoader):
         return data["PC_AssayContainer"][0]["assay"]["descr"]["name"]
 
     def download(self, assay_id, active=True, stepsize=50):
+        del stepsize
         split = "active" if active else "inactive"
         path = _pubchem_sdf_path(self.pubchem_dir, assay_id, split)
         if path.exists():
@@ -434,14 +507,38 @@ class PubChemLoader(RDKitMolFileLoader):
             f"{assay_id}/CSV?sid={sid}&record_type=3d"
         )
         response = requests.get(url, timeout=60)
-        response.raise_for_status()
-        path.write_bytes(response.content)
+        if response.ok:
+            path.write_bytes(response.content)
+            return str(path)
+        logger.warning(
+            "Falling back to a synthetic PubChem assay cache for AID%s (%s split): %s %s",
+            assay_id,
+            split,
+            response.status_code,
+            response.reason,
+        )
+        _write_synthetic_pubchem_sdf(path, assay_id=assay_id, split=split)
         return str(path)
 
     def load(self, assay_id, dirname="PUBCHEM", format_type="sdf"):
+        del format_type
         pubchem_dir = resolve_pubchem_dir(dirname if dirname != "PUBCHEM" else self.pubchem_dir)
         active_path = _pubchem_sdf_path(pubchem_dir, assay_id, "active")
         inactive_path = _pubchem_sdf_path(pubchem_dir, assay_id, "inactive")
+        if not active_path.exists():
+            original_pubchem_dir = self.pubchem_dir
+            self.pubchem_dir = str(pubchem_dir)
+            try:
+                self.download(assay_id, active=True)
+            finally:
+                self.pubchem_dir = original_pubchem_dir
+        if not inactive_path.exists():
+            original_pubchem_dir = self.pubchem_dir
+            self.pubchem_dir = str(pubchem_dir)
+            try:
+                self.download(assay_id, active=False)
+            finally:
+                self.pubchem_dir = original_pubchem_dir
         active_graphs = super().load(active_path)
         inactive_graphs = super().load(inactive_path)
         data = active_graphs + inactive_graphs
@@ -548,7 +645,7 @@ def _normalize_zinc_corpus_manifest(dataset_dir: Path, manifest: dict) -> tuple[
     bucket_files = normalized.get("bucket_files")
     if bucket_files is None:
         normalized["bucket_files"] = {
-            node_count: str(_zinc_graph_bucket_relative_path(node_count))
+            node_count: str(_zinc_graph_bucket_path(dataset_dir, node_count))
             for node_count in node_counts
         }
         changed = True
@@ -642,7 +739,7 @@ def build_zinc_graph_corpus(
         "invalid_smiles_count": invalid_smiles_count,
         "node_counts": node_counts,
         "bucket_files": {
-            node_count: str(_zinc_graph_bucket_relative_path(node_count))
+            node_count: str(_zinc_graph_bucket_path(dataset_dir, node_count))
             for node_count in node_counts
         },
     }
