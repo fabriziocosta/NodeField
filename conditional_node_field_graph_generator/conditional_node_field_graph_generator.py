@@ -2260,7 +2260,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         n_samples: int,
         interpolate_between_n_samples: Optional[int] = None,
         sampling_mode: str = "unguided",
-        desired_target: float = 1.0,
+        desired_target: Optional[float] = None,
         guidance_scale: float = 1.0,
         predictor_scale: float = 1.0,
     ) -> GeneratedGuidanceBatch:

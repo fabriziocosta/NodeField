@@ -218,10 +218,11 @@ def _evaluate_guidance_mode(
     guidance_scale,
     predictor_scale,
 ):
+    effective_desired_target = None if sampling_mode == "unguided" else desired_target
     generated_nodes = graph_generator._predict_generated_nodes(
         graph_conditioning,
         sampling_mode=sampling_mode,
-        desired_target=desired_target,
+        desired_target=effective_desired_target,
         guidance_scale=guidance_scale,
         predictor_scale=predictor_scale,
     )

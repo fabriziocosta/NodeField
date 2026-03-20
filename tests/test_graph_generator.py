@@ -476,7 +476,7 @@ class _BootstrapGenerator:
         n_samples,
         interpolate_between_n_samples=None,
         sampling_mode="unguided",
-        desired_target=1.0,
+        desired_target=None,
         guidance_scale=1.0,
         predictor_scale=1.0,
     ):
@@ -523,8 +523,11 @@ def test_bootstrap_guidance_regressor_uses_unguided_then_mixed_cycles():
 
     assert [row["cycle"] for row in result["history"]] == [1, 2, 3]
     assert generator.collect_calls[0]["sampling_mode"] == "unguided"
+    assert generator.collect_calls[0]["desired_target"] is None
     assert generator.collect_calls[1]["sampling_mode"] == "unguided"
+    assert generator.collect_calls[1]["desired_target"] is None
     assert generator.collect_calls[2]["sampling_mode"] == "regression_guided"
+    assert generator.collect_calls[2]["desired_target"] == 1.0
     assert result["history"][0]["guided_count"] == 0
     assert result["history"][1]["guided_count"] == 2
     assert result["history"][1]["unguided_count"] == 2
