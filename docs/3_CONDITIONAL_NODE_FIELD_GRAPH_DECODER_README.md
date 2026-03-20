@@ -1,13 +1,25 @@
-# Graph Decoder And Constraint Solver
+# Graph Decoder, Separation Oracle, And Constraint Solver
 
-This document explains the decoder used by `ConditionalNodeFieldGraphGenerator`, with a focus on how graph structure is reconstructed from node-generator outputs and how the constraint solver turns soft edge scores into valid adjacency matrices.
+This document explains the reconstruction stage used by
+`ConditionalNodeFieldGraphGenerator`.
 
-The implementation lives in [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py), mainly inside:
+The key idea is:
+
+- the neural model predicts soft structural signals,
+- the decoder projects those signals into a discrete graph with a MILP,
+- an optional feasibility estimator can now participate twice:
+  - inside the structural solve as a separation oracle through
+    `violating_edge_sets(...)`,
+  - after decode as a post-hoc accept or reject filter through `predict(...)`.
+
+The implementation lives mainly in
+[`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py),
+inside:
 
 - `ConditionalNodeFieldGraphDecoder`
 - `ConditionalNodeFieldGraphGenerator._decode_*`
 
-For a parameter-by-parameter interface reference, see
+For the full interface reference, see
 [`4_MAIN_CLASS_INTERFACES_README.md`](4_MAIN_CLASS_INTERFACES_README.md).
 
 ## Scope
@@ -15,14 +27,22 @@ For a parameter-by-parameter interface reference, see
 The decoder is responsible for the second half of generation:
 
 1. receive node-level generator outputs,
-2. infer which nodes exist,
-3. infer degree targets,
-4. infer edge probabilities,
-5. solve for a binary adjacency matrix that respects structural constraints,
-6. attach node and edge labels,
-7. optionally reject infeasible outputs and resample.
+2. reconstruct a valid binary adjacency matrix,
+3. optionally add feasibility-driven no-good cuts and re-solve,
+4. attach node and edge labels,
+5. optionally run post-decode feasibility filtering and retries.
 
-It is not a neural decoder in the usual sense. The neural model predicts soft graph signals, but the final graph structure is produced by a constrained combinatorial optimization step.
+It is not a neural decoder in the usual sense.
+
+The neural model predicts:
+
+- node existence,
+- node degrees,
+- edge probabilities,
+- node labels,
+- edge labels.
+
+The decoder then performs constrained combinatorial reconstruction.
 
 ## High-Level Architecture
 
@@ -30,162 +50,181 @@ At generation time the overall flow is:
 
 1. `ConditionalNodeFieldGraphGenerator.decode(...)` receives graph-level conditioning.
 2. The conditional node generator predicts a `GeneratedNodeBatch`.
-3. `ConditionalNodeFieldGraphDecoder.decode(...)` reconstructs final `networkx.Graph` objects.
+3. Structural decode solves a MILP from node existence, degree targets, and edge probabilities.
+4. If enabled, a feasibility oracle adds no-good cuts and the MILP is re-solved.
+5. Labels are attached to the final adjacency.
+6. If enabled, feasibility filtering accepts or rejects decoded graphs and may retry.
 
 ```mermaid
 flowchart LR
     GC[GraphConditioningBatch]
     GNB[GeneratedNodeBatch]
-    DEC[Conditional Node Field Graph Decoder]
-    ILP[Constraint Solver]
+    STR[Structural Decode]
+    ORA[Separation Oracle Loop]
     LAB[Label Reconstruction]
-    G[Decoded Graphs]
-    FEAS[Feasibility Filter]
-    OUT[Accepted Outputs]
+    DEC[Decoded Graphs]
+    FIL[Feasibility Filtering]
+    OUT[Returned Graphs]
 
-    GC --> DEC
-    GNB --> DEC
-    DEC --> ILP --> LAB --> G --> FEAS --> OUT
+    GC --> GNB
+    GNB --> STR --> ORA --> LAB --> DEC --> FIL --> OUT
 
     classDef data fill:#f6efe5,stroke:#9a6b2f,stroke-width:1.2px,color:#2f2419;
-    classDef model fill:#e7f0ea,stroke:#2e6a4f,stroke-width:1.2px,color:#173728;
     classDef decode fill:#e8eef7,stroke:#3d5f8c,stroke-width:1.2px,color:#1d2d44;
+    classDef process fill:#f7f4ea,stroke:#8a7a3d,stroke-width:1.2px,color:#3a3218;
 
-    class GC,GNB,G,OUT data;
-    class DEC,ILP,LAB,FEAS decode;
+    class GC,GNB,DEC,OUT data;
+    class STR,ORA,LAB,FIL decode;
 ```
+
+The important architectural change is that feasibility is no longer only a
+post-hoc rejection stage. When the estimator exposes `violating_edge_sets(...)`,
+it can actively shape the decoded adjacency before the graph is finalized.
+
+## Decoder Inputs
 
 The decoder operates on these predicted channels:
 
 - `node_presence_mask`
 - `node_degree_predictions`
-- `node_labels` or a constant/disabled node-label policy
 - `edge_probability_matrices`
-- `edge_label_matrices` or a constant/disabled edge-label policy
+- `node_labels` or a constant or disabled node-label policy
+- `edge_label_matrices` or a constant or disabled edge-label policy
 
-`GeneratedNodeBatch` contains only explicit structural and semantic prediction channels. Structural decode depends on node existence, degree, and edge-probability predictions.
-
-The supervision plan built during training determines which channels are:
+`GeneratedNodeBatch` contains explicit prediction channels only. The supervision
+plan built during training tells the generator and decoder whether each channel
+is:
 
 - `learned`
 - `constant`
 - `disabled`
 
-That matters because the decoder can fall back to constant labels without needing a learned head.
+That is why unlabeled datasets can still decode cleanly. The decoder can attach
+constant dummy labels or no labels at all without requiring a learned label
+head.
 
 ## Decoder Responsibilities
 
-The decoder has four main jobs:
+The decoder has four main jobs.
 
 ### 1. Structural Reconstruction
 
 `decode_adjacency_matrix(...)` takes:
 
-- predicted node existence,
-- predicted node degrees,
-- predicted edge probabilities,
+- node existence predictions,
+- node degree predictions,
+- edge probability matrices,
 
-and converts them into binary adjacency matrices.
+and turns them into binary adjacency matrices.
 
-This is the key constraint-satisfaction stage.
+This is the core global-consistency step.
 
-### 2. Node Label Reconstruction
+### 2. Oracle-Guided Cut Generation
 
-`decode_node_labels(...)` handles node labels according to the supervision plan:
+When `use_feasibility_oracle=True` and the configured feasibility estimator
+exposes `violating_edge_sets(graphs)`, the generator runs a bounded
+cut-generation loop:
 
-- `constant`: assign the same label to every node,
-- `disabled`: assign no label,
-- otherwise expect generator-provided node labels.
+- solve the current adjacency MILP,
+- materialize the candidate graph,
+- ask the feasibility estimator for violating edge sets,
+- add one no-good cut per violating set,
+- re-solve until no violating sets remain or the iteration budget is exhausted.
 
-This is why unlabeled training graphs can still decode cleanly if the training plan collapses node labels to a constant dummy label.
+### 3. Label Reconstruction
 
-### 3. Edge Label Reconstruction
+`decode_node_labels(...)` and `decode_edge_labels(...)` attach semantics after
+the final adjacency is fixed.
 
-`decode_edge_labels(...)` does the same for edge labels:
+### 4. Optional Post-Decode Filtering
 
-- use predicted edge-label matrices if available,
-- otherwise assign a constant label,
-- otherwise leave edges unlabeled.
+The graph generator can still apply rejection sampling after decode:
 
-### 4. Feasibility Filtering
+- score each decoded graph with `feasibility_estimator.predict(...)`,
+- keep feasible outputs,
+- retry missing slots for a bounded number of rounds.
 
-The graph generator can optionally use a separate feasibility estimator after decoding.
-
-If enabled:
-
-- multiple candidate graphs are decoded per requested sample,
-- each candidate is scored as feasible/infeasible,
-- only accepted graphs are returned,
-- rejected slots are retried up to a fixed maximum.
-
-This is not part of the ILP itself. It is a separate post-decode rejection filter.
+This remains separate from the MILP and the separation-oracle loop.
 
 ## Structural Decode Pipeline
 
-The structural pipeline in `decode_adjacency_matrix(...)` is:
+The structural pipeline is:
 
-1. Require `node_presence_mask`.
-2. Require `node_degree_predictions`.
-3. Require predicted edge-probability matrices unless direct-edge reconstruction is disabled by plan.
-4. Reconstruct a dense edge-probability matrix per graph.
-5. Zero out all edges touching non-existent nodes.
-6. Symmetrize the matrix.
-7. Convert predicted degrees plus node existence into integer degree targets.
-8. Solve an optimization problem that chooses the final binary adjacency matrix.
+1. require `node_presence_mask`,
+2. require `node_degree_predictions`,
+3. require `edge_probability_matrices`,
+4. reconstruct one dense edge-probability matrix per graph,
+5. zero out edges touching non-existent nodes,
+6. symmetrize the matrix,
+7. convert predicted degrees plus node existence into integer degree targets,
+8. solve the adjacency MILP,
+9. optionally add feasibility cuts and re-solve.
 
 ```mermaid
 flowchart TD
-    A[Predicted Node Existence]
-    B[Predicted Degrees]
-    C[Predicted Edge Probabilities]
-    D[Mask Invalid Nodes]
-    E[Symmetrize Edge Scores]
-    F[Build Integer Degree Targets]
-    G[Formulate MILP]
-    H[Solve Adjacency]
-    I[Binary Graph Structure]
+    EX[Node Existence]
+    DEG[Degree Predictions]
+    PROB[Edge Probabilities]
+    MASK[Mask Missing Nodes]
+    SYM[Symmetrize Scores]
+    TGT[Integer Degree Targets]
+    MILP[Adjacency MILP]
+    G1[Candidate Graph]
+    ORA[violating_edge_sets]
+    CUTS[Add No-Good Cuts]
+    FINAL[Final Adjacency]
 
-    A --> D
-    C --> D --> E --> G
-    B --> F --> G
-    G --> H --> I
+    EX --> MASK
+    PROB --> MASK --> SYM --> MILP
+    DEG --> TGT --> MILP
+    MILP --> G1 --> ORA
+    ORA -->|violations| CUTS --> MILP
+    ORA -->|none| FINAL
 
     classDef data fill:#f6efe5,stroke:#9a6b2f,stroke-width:1.2px,color:#2f2419;
     classDef process fill:#f7f4ea,stroke:#8a7a3d,stroke-width:1.2px,color:#3a3218;
     classDef decode fill:#e8eef7,stroke:#3d5f8c,stroke-width:1.2px,color:#1d2d44;
 
-    class A,B,C,I data;
-    class D,E,F process;
-    class G,H decode;
+    class EX,DEG,PROB,G1,FINAL data;
+    class MASK,SYM,TGT process;
+    class MILP,ORA,CUTS decode;
 ```
 
-The important design choice is that the final graph is not obtained by thresholding edges independently. It is obtained by a global optimization that tries to satisfy all node degrees at once and optionally enforce connectivity.
+The crucial design choice is unchanged:
+
+- the final graph is not produced by thresholding edges independently,
+- it is produced by a global optimization that tries to satisfy all degree and
+  connectivity requirements together.
+
+The new piece is that feasibility can now reject not just whole graphs after the
+fact, but specific realized edge motifs during reconstruction.
 
 ## Why A Constraint Solver Is Needed
 
-If the model predicts:
+Suppose the model predicts:
 
-- node A degree 3,
-- node B degree 1,
-- node C degree 2,
+- one node should have degree 3,
+- another should have degree 1,
+- another should have degree 2,
+- and several pairwise edges all look plausible.
 
-and also predicts pairwise edge probabilities, naive thresholding can easily produce a graph that:
+Naive thresholding can easily produce a graph that:
 
 - violates degree targets,
 - disconnects the graph,
-- wastes high-confidence edges on impossible degree assignments.
+- spends degree budget on mutually incompatible high-probability edges.
 
 The decoder therefore solves a global consistency problem:
 
 - maximize agreement with predicted edge probabilities,
 - penalize deviation from predicted degrees,
-- optionally force the result to be connected.
-
-This is the core “constraint satisfaction” step.
+- optionally force connectivity,
+- optionally forbid exact violating motifs returned by the feasibility oracle.
 
 ## The Optimization Problem
 
-The method `optimize_adjacency_matrix(...)` formulates a mixed-integer linear optimization problem using PuLP and solves it with CBC.
+`optimize_adjacency_matrix(...)` formulates a mixed-integer linear program using
+PuLP and solves it with CBC.
 
 ### Decision Variables
 
@@ -193,25 +232,27 @@ For every undirected edge candidate `(i, j)` with `i < j`:
 
 - `x_(i,j) in {0,1}`
 
-This is the final edge decision.
+This is the binary edge decision.
 
 For every node `i`:
 
 - `u_i >= 0`
 - `v_i >= 0`
 
-These are degree slack variables. They allow the solver to absorb inconsistency between predicted degrees and what is graph-theoretically achievable.
+These are degree slack variables. They absorb inconsistency between predicted
+degrees and what is graph-theoretically achievable.
 
 If connectivity is enforced, the model also introduces:
 
-- continuous flow variables on directed versions of the chosen undirected edges.
+- continuous flow variables on directed versions of the selected undirected
+  edges.
 
 ### Objective
 
 The solver maximizes:
 
-- total chosen edge probability,
-- minus a large penalty for degree slack.
+- total selected edge probability,
+- minus a large penalty for total degree slack.
 
 Conceptually:
 
@@ -220,71 +261,104 @@ Conceptually:
 So the solver prefers:
 
 - high-probability edges,
-- while strongly avoiding degree mismatches.
+- while strongly discouraging degree mismatch.
 
 ### Degree Constraints
 
-For each node `i`, the sum of incident selected edges must match the target degree up to slack:
+For each node `i`:
 
 `incident_edges(i) + u_i - v_i = target_degree(i)`
 
 This means:
 
-- if the target degree is too high, positive slack can absorb the shortfall,
-- if it is too low, slack can absorb the excess,
-- but both are heavily penalized.
+- positive slack can absorb missing degree,
+- opposite slack can absorb excess degree,
+- but both are expensive.
 
 ### Connectivity Constraints
 
-If `enforce_connectivity=True`, the decoder adds a single-commodity flow construction.
+If `enforce_connectivity=True`, the decoder adds a single-commodity flow
+construction.
 
 The idea is:
 
-- pick one root node,
-- send `n-1` units of flow out of the root,
+- choose one root node,
+- send `n - 1` units of flow out of the root,
 - require every other node to consume one unit,
-- only allow flow through selected edges.
+- allow flow only through selected edges.
 
 This forces the selected graph to be connected.
 
-The implementation does this by:
+### Oracle Cuts
 
-- expanding each undirected edge into two directed flow arcs,
-- constraining flow to be zero unless the corresponding edge is selected,
-- enforcing balance equations at each node.
+If the feasibility oracle returns violating edge sets
+`S_1, S_2, ..., S_K`, the decoder adds one no-good cut per set:
 
-This is a standard MILP connectivity trick.
+`sum(x_e for e in S_k) <= |S_k| - 1`
 
-## Warm Start Strategy
+Interpretation:
 
-If `warm_start_mst=True`, the solver receives an initial edge assignment from a maximum spanning tree over the predicted edge-probability matrix.
+- the exact violating motif may not reappear,
+- any strict subset of its edges is still allowed,
+- the MILP never needs to know what the motif means semantically.
+
+The decoder canonicalizes and deduplicates these edge sets before adding them,
+so reversed undirected edges and duplicate cuts do not create redundant
+constraints.
+
+## Oracle Loop Semantics
+
+The separation oracle is implemented at the generator level around the decoder.
+
+For one graph:
+
+1. decode an adjacency matrix,
+2. attach the currently implied labels,
+3. materialize a `networkx.Graph`,
+4. call `feasibility_estimator.violating_edge_sets([graph])`,
+5. add all newly discovered cuts,
+6. re-run the structural solve.
+
+Important points:
+
+- `violating_edge_sets(...)` is optional,
+- if it is missing, NodeField silently falls back to the older one-shot decode
+  path,
+- the loop is bounded by `max_oracle_iterations`,
+- labels are still reconstructed outside the MILP itself,
+- post-decode feasibility filtering may still reject the final graph.
+
+So the oracle improves structural decode, but it does not replace the rest of
+the generation pipeline.
+
+## Warm Start And Probability Shaping
+
+### Warm Start
+
+If `warm_start_mst=True`, the solver receives an initial edge assignment from a
+maximum spanning tree built from the edge-probability matrix.
 
 Why this helps:
 
-- it gives CBC a connected, plausible initial solution,
-- it biases the search toward high-probability edges,
-- it can reduce solver time on noisy or ambiguous predictions.
+- it gives CBC a connected plausible starting point,
+- it biases the initial solution toward high-probability edges,
+- it can reduce solve time on noisy predictions.
 
-This warm start does not replace optimization. It is just a good initial guess.
+This does not replace optimization. It is just a seed.
 
-## Probability Smoothing
+### Probability Smoothing
 
-Before optimization, the decoder can transform edge probabilities with:
+Before optimization, the decoder may transform edge probabilities with:
 
 `prob_matrix = prob_matrix ** alpha`
 
 with default `alpha = 0.7`.
 
-This has two effects:
-
-- compresses differences less aggressively than thresholding,
-- can reshape confidence scores before they enter the objective.
-
-It is a heuristic, not a hard probabilistic calibration step.
+This is a heuristic reshaping step, not a calibrated probabilistic correction.
 
 ## Failure Handling
 
-The decoder now validates solver outcome before reading variables.
+The decoder prefers explicit failure over silent malformed output.
 
 If CBC does not return an optimal solution:
 
@@ -294,92 +368,67 @@ If any decision variable is unset:
 
 - decoding raises a `RuntimeError`.
 
-This is important because silent fallback to invalid or partially assigned solutions would be much worse than an explicit failure.
+If required channels are missing:
 
-## Label Decode Behavior
+- decoding raises a targeted error message explaining which prediction channel is
+  absent.
 
-The decoder treats labels as separate channels from structure.
+This is especially important for oracle-guided decode, because it is better to
+fail loudly than to continue after a partial or inconsistent structural solve.
+
+## Label Reconstruction
+
+Labels are treated as separate channels from structure.
 
 ### Node Labels
 
-Node labels do not participate in the adjacency ILP.
+Node labels do not participate in the adjacency MILP.
 
-They are decoded after structure reconstruction by one of:
+They are reconstructed after structure by:
 
 - using generator-predicted node labels,
 - assigning a constant label from the supervision plan,
-- leaving labels absent.
+- or leaving labels absent.
 
 ### Edge Labels
 
-Edge labels are also decoded after adjacency is fixed.
+Edge labels are also reconstructed after adjacency is fixed.
 
 This means:
 
-- the ILP decides which edges exist,
-- the edge-label decoder decides what labels those edges should receive.
+- the MILP decides which edges exist,
+- the edge-label decoder decides what labels to assign to those realized edges.
 
-So structure and semantics are coupled only loosely:
+So semantics are attached to a graph whose structure has already been chosen.
 
-- structure is solved globally,
-- labels are attached afterward.
+## Feasibility Filtering After Decode
 
-## Feasibility Filtering
-
-The graph generator can optionally apply a separate feasibility estimator after decoding.
+The graph generator can optionally apply a separate feasibility estimator after
+decode.
 
 This works like rejection sampling:
 
 1. decode one or more candidate graphs for each requested slot,
 2. evaluate each with `feasibility_estimator.predict(...)`,
-3. accept the first feasible graph for each slot,
-4. retry failed slots until either:
-   - all are filled, or
-   - `max_feasibility_attempts` is exhausted.
+3. accept feasible candidates,
+4. retry unfilled slots until all are filled or
+   `max_feasibility_attempts` is exhausted.
 
-Important distinction:
+This stage remains useful even when the oracle is enabled:
 
-- the ILP enforces structural consistency,
-- the feasibility estimator enforces domain-specific validity beyond the ILP.
-
-## Separation Oracle
-
-When the graph generator is configured with `use_feasibility_oracle=True` and
-the feasibility estimator exposes `violating_edge_sets(graphs)`, feasibility can
-also feed back into the structural solve itself.
-
-The loop is:
-
-1. solve the adjacency ILP,
-2. materialize the candidate graph,
-3. call `feasibility_estimator.violating_edge_sets([graph])`,
-4. canonicalize and deduplicate the returned undirected edge sets,
-5. add one no-good cut per violating set,
-6. re-solve until no violating sets remain or `max_oracle_iterations` is reached.
-
-Each cut has the form:
-
-- `sum(x_e for e in S) <= |S| - 1`
-
-This forbids the exact violating motif while still allowing strict subsets of
-its edges.
-
-This changes the role of the feasibility estimator:
-
-- `predict(...)` is still the post-hoc accept or reject interface,
-- `violating_edge_sets(...)` is the optional separation-oracle interface.
-
-If the estimator does not implement `violating_edge_sets(...)`, NodeField
-silently falls back to the previous one-shot structural decode plus optional
-feasibility filtering.
+- the oracle forbids specific known violating motifs,
+- post-hoc filtering still checks whole-graph domain validity,
+- some violations may remain if the estimator cannot localize them into edge
+  sets,
+- the oracle loop may stop at its iteration budget before all violations are
+  eliminated.
 
 ## Feasible-Rate Score
 
-The generator now exposes a scoring method built on top of this decoder-plus-filtering stage:
+`ConditionalNodeFieldGraphGenerator.score_feasible_rate(...)` measures how often
+the full decode-plus-filtering stage yields feasible candidates.
 
-- `ConditionalNodeFieldGraphGenerator.score_feasible_rate(...)`
-
-The main returned score is:
+The main returned quantity is:
 
 - `score = feasible_rate`
 
@@ -387,211 +436,109 @@ where:
 
 - `feasible_rate = feasible_candidates / generated_candidates`
 
-Interpretation:
+This is useful for hyperparameter search only when the retry budget is held
+fixed across runs:
 
-- the decoder produces candidate graphs,
-- the feasibility estimator accepts or rejects them,
-- the score measures how often that full stage produces feasible candidates under a fixed retry budget.
-
-This makes the score useful as a hyperparameter-search objective when:
-
-- `max_feasibility_attempts`,
-- `feasibility_candidates_per_attempt`,
+- `max_feasibility_attempts`
+- `feasibility_candidates_per_attempt`
 - `n_samples`
 
-are held fixed for the experiment.
+Otherwise the score changes partly because the decoder is being allowed a
+different amount of search effort.
 
-In that setting, higher score means the current generator configuration makes the decoder produce feasible outputs more reliably.
-
-Examples of “feasibility” could include:
-
-- chemistry validity,
-- graph grammar compliance,
-- optimization-domain admissibility.
-
-## Decoder Limits And Tradeoffs
-
-The decoder design is strong for small to medium graphs, but it has predictable costs.
+## Decoder Strengths And Tradeoffs
 
 ### Strengths
 
 - global consistency instead of local thresholding,
 - explicit degree control,
 - optional connectivity guarantee,
-- optional oracle-guided exclusion of known invalid motifs,
+- optional oracle-guided exclusion of exact violating motifs,
 - clear separation between learned scores and hard constraints,
-- easy insertion of domain-specific feasibility filters.
+- compatibility with post-hoc domain filtering.
 
 ### Weaknesses
 
 - MILP solve time grows quickly with graph size,
-- degree predictions may still be mutually inconsistent,
-- connectivity makes the solve more expensive,
-- oracle-guided decode can require multiple full ILP solves for one sample,
-- labels are not part of the structural optimization,
-- feasibility filtering can require multiple full decode attempts.
+- connectivity makes solves more expensive,
+- degree predictions can still be mutually inconsistent,
+- oracle-guided decode may require multiple full ILP solves per graph,
+- labels are not optimized jointly with structure,
+- feasibility filtering can still require multiple full decode attempts.
 
-In practice, this decoder is best viewed as:
+In practice, the decoder is best viewed as:
 
-- a principled constrained projection layer,
+- a constrained projection layer for small to medium graphs,
 - not a general-purpose large-graph combinatorial solver.
-
-## Typical Failure Modes
-
-Common failure modes include:
-
-### Infeasible Or Non-Optimal ILP
-
-Causes:
-
-- impossible degree targets,
-- too-tight connectivity requirements,
-- solver time limits.
-
-Current behavior:
-
-- explicit runtime failure instead of silent malformed output.
-
-### Missing Predicted Channels
-
-Examples:
-
-- no node existence mask,
-- no degree predictions,
-- no edge probabilities when direct-edge decoding is expected.
-
-Current behavior:
-
-- explicit runtime failure with a targeted error message.
-
-### Poor Structural Quality Despite Solver Success
-
-Causes:
-
-- weak edge probabilities,
-- bad degree predictions,
-- slack penalty too low,
-- feasibility estimator not used when domain validity matters.
-
-This is a modeling problem, not a solver bug.
-
-## Tuning Guide
-
-The most important decoder-level knobs are:
-
-### `degree_slack_penalty`
-
-Higher values:
-
-- enforce degree targets more aggressively,
-- but can make optimization harder or force low-probability edges.
-
-Lower values:
-
-- trust edge probabilities more,
-- but allow degree mismatches more easily.
-
-### `enforce_connectivity`
-
-`True`:
-
-- graph is forced to be connected,
-- solves are slower and stricter.
-
-`False`:
-
-- faster and easier,
-- disconnected graphs are allowed.
-
-### `warm_start_mst`
-
-`True`:
-
-- usually a good default,
-- gives the solver a connected high-probability seed.
-
-### `max_feasibility_attempts`
-
-Controls how hard the generator tries to fill all requested outputs when feasibility filtering rejects some candidates.
-
-### `feasibility_candidates_per_attempt`
-
-Higher values:
-
-- increase acceptance probability per retry round,
-- but increase compute cost per round.
-
-### Score Interpretation
-
-When comparing runs with `score_feasible_rate(...)`, keep the retry-budget parameters fixed.
-
-If you change:
-
-- `max_feasibility_attempts`,
-- `feasibility_candidates_per_attempt`,
-- `n_samples`
-
-then the score is no longer a like-for-like comparison of generator quality, because the decoder is being allowed a different amount of search effort.
 
 ## Suggested Mental Model
 
-The decoder is best understood as three layers:
+The decoder is easiest to reason about as four layers:
 
 1. Neural prediction layer
-   - soft node existence, degrees, edge probabilities, labels
+   Soft node existence, degree, edge-probability, and label signals.
 2. Constraint projection layer
-   - MILP chooses a globally coherent adjacency
-3. Domain filtering layer
-   - optional feasibility rejection and retry
+   MILP chooses a globally coherent adjacency.
+3. Oracle refinement layer
+   Optional feasibility cuts exclude realized violating motifs.
+4. Domain acceptance layer
+   Optional feasibility filtering accepts, rejects, and retries complete graphs.
 
-This division is one of the cleaner parts of the architecture. It lets the model learn uncertain local signals while keeping final graph validity under explicit control.
+That division is one of the stronger parts of the architecture. It lets the
+neural model remain soft and uncertain while keeping final structural validity
+under explicit control.
 
 ## Glossary
 
 ### Adjacency Matrix
 
-A dense `n x n` binary matrix indicating whether each undirected edge exists in the final graph.
-
-### Auxiliary Locality
-
-A higher-horizon pairwise supervision signal used during training as regularization. It is not itself the final adjacency.
+A dense `n x n` binary matrix indicating which undirected edges exist.
 
 ### CBC
 
 The default open-source MILP solver used through PuLP.
 
-### Constraint Satisfaction
-
-The process of choosing a final graph that respects hard or strongly penalized conditions such as degree targets and connectivity.
-
 ### Degree Slack
 
-Non-negative auxiliary variables that absorb mismatch between predicted node degree and achievable degree in the final graph.
+Non-negative auxiliary variables that absorb mismatch between predicted degree
+and achievable degree.
 
 ### Direct Edges
 
-The horizon-1 edge-presence channel used by the decoder as the main structural signal.
+The horizon-1 edge-presence channel used as the main structural signal.
 
 ### Feasibility Estimator
 
-A separate model or rule system that decides whether a decoded graph is acceptable for the target domain.
+A separate model or rule system that evaluates whether a decoded graph is valid
+for the target domain.
 
 ### Flow Constraints
 
-A MILP technique used to enforce graph connectivity by routing artificial flow through selected edges.
+A MILP trick that enforces connectivity by routing artificial flow through
+selected edges.
 
 ### GeneratedNodeBatch
 
-The node generator’s output object containing predicted structural and semantic channels.
+The conditional node generator output object containing predicted structural and
+semantic channels.
 
 ### MILP
 
-Mixed-Integer Linear Programming. The optimization framework used to reconstruct adjacency matrices.
+Mixed-Integer Linear Programming, the optimization framework used for adjacency
+reconstruction.
+
+### Separation Oracle
+
+An interface that inspects a decoded graph, returns violating edge sets, and
+thereby allows the solver to add no-good cuts without encoding the domain rule
+directly inside the MILP.
 
 ### Supervision Plan
 
-The graph-level training-time plan that decides whether each prediction channel is learned, constant, or disabled.
+The training-time plan that decides whether each channel is learned, constant,
+or disabled.
 
 ### Warm Start
 
-An initial candidate solution given to the solver before optimization begins. Here it is derived from a maximum spanning tree over edge probabilities.
+An initial candidate solution given to the MILP solver before optimization
+begins.

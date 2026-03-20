@@ -12,6 +12,14 @@ import networkx as nx
 import random
 import pulp
 import dill as pickle
+try:
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover
+    plt = None
+try:
+    from .extensions.molecular import molecule_graphs_to_grid_image
+except Exception:  # pragma: no cover
+    molecule_graphs_to_grid_image = None
 from .runtime_utils import get_runtime_logger, timeit, verbose_log
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union, FrozenSet, Iterable
 from .conditional_node_field_generator import (
@@ -248,6 +256,108 @@ def _parallel_map(func, jobs, max_workers: int, verbose: bool = False):
             return list(executor.map(func, jobs))
 
 
+def _plot_decoder_diagnostics(
+    *,
+    prob_matrix: np.ndarray,
+    adj_mtx: np.ndarray,
+    target_degrees: Sequence[int],
+    title: str,
+    violating_edge_sets: Optional[Iterable[Iterable[Sequence[Any]]]] = None,
+    decoded_graph: Optional[nx.Graph] = None,
+) -> None:
+    if plt is None:
+        return
+    prob_matrix = np.asarray(prob_matrix, dtype=float)
+    adj_mtx = np.asarray(adj_mtx, dtype=float)
+    target_degrees = np.asarray(target_degrees, dtype=float)
+    realized_degrees = adj_mtx.sum(axis=1)
+    normalized_violations = _normalize_violating_edge_sets(
+        [] if violating_edge_sets is None else violating_edge_sets,
+        n_nodes=adj_mtx.shape[0],
+    )
+
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+
+    im0 = axes[0].imshow(prob_matrix, vmin=0.0, vmax=max(1.0, float(np.max(prob_matrix)) if prob_matrix.size else 1.0), cmap="viridis")
+    axes[0].set_title("Edge probabilities")
+    axes[0].set_xlabel("node j")
+    axes[0].set_ylabel("node i")
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+    axes[1].imshow(adj_mtx, vmin=0.0, vmax=1.0, cmap="Greys")
+    axes[1].set_title("Decoded adjacency")
+    axes[1].set_xlabel("node j")
+    axes[1].set_ylabel("node i")
+    if normalized_violations:
+        for edge_set in normalized_violations:
+            for i, j in edge_set:
+                axes[1].plot([j, i], [i, j], marker="s", color="tab:red", markersize=6, linewidth=1.5)
+                axes[1].plot([i, j], [j, i], marker="s", color="tab:red", markersize=6, linewidth=1.5)
+
+    node_idx = np.arange(len(target_degrees))
+    axes[2].bar(node_idx - 0.18, target_degrees, width=0.36, label="target")
+    axes[2].bar(node_idx + 0.18, realized_degrees, width=0.36, label="realized")
+    axes[2].set_title("Degree targets vs realized")
+    axes[2].set_xlabel("node")
+    axes[2].set_ylabel("degree")
+    axes[2].legend()
+
+    graph = nx.from_numpy_array(adj_mtx.astype(int))
+    violating_edges = {
+        (min(i, j), max(i, j))
+        for edge_set in normalized_violations
+        for i, j in edge_set
+    }
+    rendered_with_molecule_drawer = False
+    if molecule_graphs_to_grid_image is not None and decoded_graph is not None:
+        try:
+            image = molecule_graphs_to_grid_image(
+                [decoded_graph],
+                legends=[""],
+                mols_per_row=1,
+                sub_img_size=(320, 320),
+            )
+            if image is not None:
+                axes[3].imshow(np.asarray(image))
+                axes[3].set_title("Decoded molecule")
+                axes[3].set_axis_off()
+                rendered_with_molecule_drawer = True
+        except Exception:
+            rendered_with_molecule_drawer = False
+    if not rendered_with_molecule_drawer:
+        layout = nx.circular_layout(graph)
+        edge_colors = [
+            "tab:red" if (min(u, v), max(u, v)) in violating_edges else "black"
+            for u, v in graph.edges()
+        ]
+        edge_widths = [
+            2.5 if (min(u, v), max(u, v)) in violating_edges else 1.5
+            for u, v in graph.edges()
+        ]
+        nx.draw_networkx(
+            graph,
+            pos=layout,
+            ax=axes[3],
+            node_color="white",
+            edge_color=edge_colors,
+            width=edge_widths,
+            with_labels=True,
+            font_size=9,
+            node_size=500,
+            linewidths=1.5,
+        )
+        axes[3].set_title("Decoded graph")
+    axes[3].set_axis_off()
+
+    suffix = ""
+    if normalized_violations:
+        suffix = f" | violating_sets={len(normalized_violations)}"
+    fig.suptitle(f"{title}{suffix}")
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
 def _decode_single_adjacency_job(
     prob_list: np.ndarray,
     existence_mask: np.ndarray,
@@ -255,10 +365,10 @@ def _decode_single_adjacency_job(
     degree_slack_penalty: float,
     enforce_connectivity: bool,
     warm_start_mst: bool,
-    verbose: bool,
+    verbose: int,
 ) -> np.ndarray:
     decoder = ConditionalNodeFieldGraphDecoder(
-        verbose=verbose,
+        verbose=bool(verbose),
         degree_slack_penalty=degree_slack_penalty,
         enforce_connectivity=enforce_connectivity,
         warm_start_mst=warm_start_mst,
@@ -281,7 +391,15 @@ def _decode_single_adjacency_job(
         np.asarray(degree_prediction[:n_nodes], dtype=float),
         existent,
     )
-    return decoder.optimize_adjacency_matrix(prob_matrix, target_degrees)
+    adj_mtx = decoder.optimize_adjacency_matrix(prob_matrix, target_degrees)
+    if int(verbose) >= 4:
+        _plot_decoder_diagnostics(
+            prob_matrix=prob_matrix,
+            adj_mtx=adj_mtx,
+            target_degrees=target_degrees,
+            title="Decoder solve",
+        )
+    return adj_mtx
 
 
 def _decode_single_adjacency_job_star(args) -> np.ndarray:
@@ -881,10 +999,12 @@ class ConditionalNodeFieldGraphDecoder(object):
                 float(self.degree_slack_penalty),
                 bool(self.enforce_connectivity),
                 bool(self.warm_start_mst),
-                bool(self.verbose),
+                int(self.verbose),
             )
             for graph_idx in range(len(predicted_probs_list))
         ]
+        if int(self.verbose) >= 4 and self.n_jobs != 1 and len(jobs) > 1:
+            print("Decoder plots for verbose>=4 are only shown when n_jobs=1; skipping plots during parallel adjacency decode.")
         if self.n_jobs == 1 or len(jobs) <= 1:
             return [_decode_single_adjacency_job(*job) for job in jobs]
         return _parallel_map(_decode_single_adjacency_job_star, jobs, self.n_jobs, verbose=bool(self.verbose))
@@ -1222,6 +1342,26 @@ class ConditionalNodeFieldGraphGenerator(object):
                 )
                 violating_sets_raw = self.feasibility_estimator.violating_edge_sets([graph])[0]
                 violating_sets = _normalize_violating_edge_sets(violating_sets_raw, n_nodes=single_adj_mtx.shape[0])
+                if int(self.verbose) >= 4:
+                    existence_mask = np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool)
+                    degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
+                    prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
+                    existent = np.asarray(existence_mask[: prob_matrix.shape[0]], dtype=bool)
+                    masked_prob_matrix = np.array(prob_matrix, copy=True)
+                    for i in range(masked_prob_matrix.shape[0]):
+                        for j in range(masked_prob_matrix.shape[1]):
+                            if i == j or not (existent[i] and existent[j]):
+                                masked_prob_matrix[i, j] = 0.0
+                    masked_prob_matrix = (masked_prob_matrix + masked_prob_matrix.T) / 2.0
+                    target_degrees = self.graph_decoder.get_degrees(degree_predictions, existence_mask)
+                    _plot_decoder_diagnostics(
+                        prob_matrix=masked_prob_matrix,
+                        adj_mtx=single_adj_mtx,
+                        target_degrees=target_degrees,
+                        title=f"Oracle decode graph={graph_idx} iteration={_iteration_idx + 1}",
+                        violating_edge_sets=violating_sets,
+                        decoded_graph=graph,
+                    )
                 new_cuts = [edge_set for edge_set in violating_sets if edge_set not in accumulated_cuts]
                 if not new_cuts:
                     break
@@ -3570,6 +3710,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         G2: nx.Graph,
         k: int = 7,
         apply_feasibility_filtering: Optional[bool] = None,
+        apply_feasibility_oracle: Optional[bool] = True,
         interpolation_mode: str = "slerp",
         use_feasibility_oracle: Optional[bool] = None,
     ) -> Dict[str, Any]:
@@ -3580,12 +3721,15 @@ class ConditionalNodeFieldGraphGenerator(object):
             G2 (nx.Graph): Input value.
             k (int): Optional input value.
             apply_feasibility_filtering (Optional[bool]): Optional input value.
+            apply_feasibility_oracle (Optional[bool]): Optional input value.
             interpolation_mode (str): Optional input value.
 
         Returns:
             Dict[str, Any]: Computed result.
         """
         self._require_fitted_for_generation()
+        if use_feasibility_oracle is None:
+            use_feasibility_oracle = apply_feasibility_oracle
 
         cond_a = self.graph_encode([G1])
         cond_b = self.graph_encode([G2])

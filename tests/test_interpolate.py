@@ -23,14 +23,29 @@ class _FakeGraphGenerator:
             edge_counts=np.asarray([graph["edge_count"]], dtype=np.int64),
         )
 
-    def _decode_with_feasibility_slots(self, conditioning, apply_feasibility_filtering=True):
-        self.last_decode_args = (conditioning, apply_feasibility_filtering)
+    def _decode_with_feasibility_slots(
+        self,
+        conditioning,
+        apply_feasibility_filtering=True,
+        use_feasibility_oracle=None,
+    ):
+        self.last_decode_args = (conditioning, apply_feasibility_filtering, use_feasibility_oracle)
         out = []
         for idx in range(len(conditioning)):
             out.append(None if idx % 2 else {"decoded_index": idx})
         return out
 
-    def interpolate(self, graph_a, graph_b, k=7, apply_feasibility_filtering=True):
+    def interpolate(
+        self,
+        graph_a,
+        graph_b,
+        k=7,
+        apply_feasibility_filtering=True,
+        apply_feasibility_oracle=True,
+        use_feasibility_oracle=None,
+    ):
+        if use_feasibility_oracle is None:
+            use_feasibility_oracle = apply_feasibility_oracle
         cond_a = self.graph_encode([graph_a])
         cond_b = self.graph_encode([graph_b])
         ts = np.linspace(0.0, 1.0, k + 2)[1:-1]
@@ -59,6 +74,7 @@ class _FakeGraphGenerator:
         decoded_slots = self._decode_with_feasibility_slots(
             interpolated_conditioning,
             apply_feasibility_filtering=apply_feasibility_filtering,
+            use_feasibility_oracle=use_feasibility_oracle,
         )
         step_summary = pd.DataFrame(
             {
@@ -128,3 +144,29 @@ def test_interpolate_returns_conditioning_and_summary():
     assert result["summary"]["decoded"].tolist() == [True, False, True]
     assert len(result["generated_graphs"]) == 2
     assert gen.last_decode_args[1] is False
+    assert gen.last_decode_args[2] is True
+
+
+def test_interpolate_forwards_apply_feasibility_oracle():
+    graph_a = {
+        "embedding": np.array([1.0, 0.0, 2.0]),
+        "node_count": 3,
+        "edge_count": 2,
+    }
+    graph_b = {
+        "embedding": np.array([0.0, 2.0, 1.0]),
+        "node_count": 5,
+        "edge_count": 8,
+    }
+    gen = _FakeGraphGenerator()
+
+    gen.interpolate(
+        graph_a,
+        graph_b,
+        k=2,
+        apply_feasibility_filtering=True,
+        apply_feasibility_oracle=False,
+    )
+
+    assert gen.last_decode_args[1] is True
+    assert gen.last_decode_args[2] is False
