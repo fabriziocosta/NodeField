@@ -5,6 +5,7 @@ import networkx as nx
 import pytest
 import pulp
 
+import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
@@ -705,6 +706,44 @@ def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
     assert adj_mtx_list[0].shape == (2, 2)
 
 
+def test_decode_forwards_diagnostic_graph_renderer_with_decoded_graph(monkeypatch):
+    plot_calls = []
+
+    def fake_plot_decoder_diagnostics(**kwargs):
+        plot_calls.append(kwargs)
+
+    monkeypatch.setattr(cngg_module, "_plot_decoder_diagnostics", fake_plot_decoder_diagnostics)
+
+    def fake_renderer(graphs, legends=None):
+        return None
+
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=4,
+        n_jobs=1,
+        diagnostic_graph_renderer=fake_renderer,
+    )
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[1, 1]], dtype=float),
+        edge_probability_matrices=[np.asarray([[0.0, 0.9], [0.9, 0.0]], dtype=float)],
+    )
+    predicted_node_labels = [np.asarray(["C", "O"], dtype=object)]
+    predicted_edge_label_matrices = [np.asarray([[None, "-"], ["-", None]], dtype=object)]
+
+    decoded_graphs = decoder.decode(
+        generated_nodes,
+        predicted_node_labels_list=predicted_node_labels,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        predicted_edge_label_matrices=predicted_edge_label_matrices,
+    )
+
+    assert len(plot_calls) == 1
+    assert plot_calls[0]["graph_renderer"] is fake_renderer
+    assert plot_calls[0]["decoded_graph"] is decoded_graphs[0]
+    assert decoded_graphs[0].nodes[0]["label"] == "C"
+    assert decoded_graphs[0].edges[(0, 1)]["label"] == "-"
+
+
 def test_parallel_decode_matches_serial_decode():
     generated_nodes = GeneratedNodeBatch(
         node_presence_mask=np.asarray([[True, True], [True, True]], dtype=bool),
@@ -791,6 +830,42 @@ def test_decode_generated_nodes_uses_oracle_cuts_when_available():
     assert decoded_edge_set not in {first_cycle, second_cycle}
     assert len(estimator.calls) >= 2
     assert estimator.calls[0] == first_cycle
+
+
+def test_decode_generated_nodes_relaxes_oracle_cuts_to_zero_on_last_attempt(monkeypatch):
+    estimator = _OracleOnceEstimator([
+        [[(0, 1), (1, 2), (2, 3), (0, 3)]],
+        [[(0, 1), (1, 2), (2, 3), (0, 3)]],
+    ])
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True)
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_decoder=decoder,
+        feasibility_estimator=estimator,
+        verbose=False,
+        max_oracle_iterations=3,
+    )
+
+    original_optimize = decoder.optimize_adjacency_matrix
+    active_cut_counts = []
+
+    def wrapped_optimize(prob_matrix, target_degrees, *args, forbidden_edge_sets=None, **kwargs):
+        active_cut_counts.append(len(list(forbidden_edge_sets or [])))
+        if forbidden_edge_sets:
+            raise RuntimeError("forced infeasible under oracle cuts")
+        return original_optimize(
+            prob_matrix,
+            target_degrees,
+            *args,
+            forbidden_edge_sets=forbidden_edge_sets,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(decoder, "optimize_adjacency_matrix", wrapped_optimize)
+
+    decoded = generator._decode_generated_nodes(_oracle_generated_batch())
+
+    assert len(decoded) == 1
+    assert active_cut_counts[-2:] == [1, 0]
 
 
 def test_decode_generated_nodes_falls_back_when_oracle_method_missing():

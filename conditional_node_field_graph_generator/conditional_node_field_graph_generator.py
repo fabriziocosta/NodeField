@@ -16,12 +16,8 @@ try:
     import matplotlib.pyplot as plt
 except Exception:  # pragma: no cover
     plt = None
-try:
-    from .extensions.molecular import molecule_graphs_to_grid_image
-except Exception:  # pragma: no cover
-    molecule_graphs_to_grid_image = None
 from .runtime_utils import get_runtime_logger, timeit, verbose_log
-from typing import List, Tuple, Optional, Any, Sequence, Dict, Union, FrozenSet, Iterable
+from typing import List, Tuple, Optional, Any, Sequence, Dict, Union, FrozenSet, Iterable, Callable
 from .conditional_node_field_generator import (
     ConditionalNodeGeneratorBase,
     GeneratedNodeBatch,
@@ -264,6 +260,7 @@ def _plot_decoder_diagnostics(
     title: str,
     violating_edge_sets: Optional[Iterable[Iterable[Sequence[Any]]]] = None,
     decoded_graph: Optional[nx.Graph] = None,
+    graph_renderer: Optional[Callable[..., Any]] = None,
 ) -> None:
     if plt is None:
         return
@@ -308,23 +305,7 @@ def _plot_decoder_diagnostics(
         for edge_set in normalized_violations
         for i, j in edge_set
     }
-    rendered_with_molecule_drawer = False
-    if molecule_graphs_to_grid_image is not None and decoded_graph is not None:
-        try:
-            image = molecule_graphs_to_grid_image(
-                [decoded_graph],
-                legends=[""],
-                mols_per_row=1,
-                sub_img_size=(320, 320),
-            )
-            if image is not None:
-                axes[3].imshow(np.asarray(image))
-                axes[3].set_title("Decoded molecule")
-                axes[3].set_axis_off()
-                rendered_with_molecule_drawer = True
-        except Exception:
-            rendered_with_molecule_drawer = False
-    if not rendered_with_molecule_drawer:
+    if graph_renderer is None or decoded_graph is None:
         layout = nx.circular_layout(graph)
         edge_colors = [
             "tab:red" if (min(u, v), max(u, v)) in violating_edges else "black"
@@ -347,6 +328,16 @@ def _plot_decoder_diagnostics(
             linewidths=1.5,
         )
         axes[3].set_title("Decoded graph")
+    else:
+        axes[3].text(
+            0.5,
+            0.5,
+            "Custom graph renderer\nshown below",
+            ha="center",
+            va="center",
+            fontsize=11,
+        )
+        axes[3].set_title("Decoded graph")
     axes[3].set_axis_off()
 
     suffix = ""
@@ -356,6 +347,26 @@ def _plot_decoder_diagnostics(
     plt.tight_layout()
     plt.show()
     plt.close(fig)
+    if graph_renderer is not None and decoded_graph is not None:
+        try:
+            graph_renderer([decoded_graph], legends=[title])
+        except TypeError:
+            graph_renderer([decoded_graph])
+
+
+def _build_masked_prob_matrix(
+    existence_mask: np.ndarray,
+    degree_prediction: np.ndarray,
+    prob_matrix: np.ndarray,
+) -> np.ndarray:
+    n_nodes = min(len(existence_mask), len(degree_prediction))
+    masked_prob_matrix = np.asarray(prob_matrix, dtype=float)[:n_nodes, :n_nodes].copy()
+    existent = np.asarray(existence_mask[:n_nodes], dtype=bool)
+    for i in range(n_nodes):
+        for j in range(n_nodes):
+            if i == j or not (existent[i] and existent[j]):
+                masked_prob_matrix[i, j] = 0.0
+    return (masked_prob_matrix + masked_prob_matrix.T) / 2.0
 
 
 def _decode_single_adjacency_job(
@@ -366,12 +377,14 @@ def _decode_single_adjacency_job(
     enforce_connectivity: bool,
     warm_start_mst: bool,
     verbose: int,
+    diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
 ) -> np.ndarray:
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
         degree_slack_penalty=degree_slack_penalty,
         enforce_connectivity=enforce_connectivity,
         warm_start_mst=warm_start_mst,
+        diagnostic_graph_renderer=diagnostic_graph_renderer,
     )
     n_nodes = min(len(existence_mask), len(degree_prediction))
     prob_matrix = np.zeros((n_nodes, n_nodes))
@@ -392,12 +405,13 @@ def _decode_single_adjacency_job(
         existent,
     )
     adj_mtx = decoder.optimize_adjacency_matrix(prob_matrix, target_degrees)
-    if int(verbose) >= 4:
+    if int(verbose) >= 4 and diagnostic_graph_renderer is None:
         _plot_decoder_diagnostics(
             prob_matrix=prob_matrix,
             adj_mtx=adj_mtx,
             target_degrees=target_degrees,
             title="Decoder solve",
+            graph_renderer=decoder.diagnostic_graph_renderer,
         )
     return adj_mtx
 
@@ -452,6 +466,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         degree_slack_penalty: float = 1e6,
         warm_start_mst: bool = True,
         n_jobs: int = 1,
+        diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
     ) -> None:
         """Store graph decoding hyper-parameters.
 
@@ -463,6 +478,8 @@ class ConditionalNodeFieldGraphDecoder(object):
             warm_start_mst (bool): Optional input value.
             n_jobs (int): Number of worker processes used for per-graph decode. Use `1`
                 to disable parallelism and `-1` to use all available CPUs.
+            diagnostic_graph_renderer (Optional[Callable[..., Any]]): Optional callable
+                used when `verbose >= 4` to render decoded graphs in notebook workflows.
         """
         self.verbose                    = verbose
         self.existence_threshold        = existence_threshold
@@ -470,6 +487,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         self.degree_slack_penalty       = degree_slack_penalty
         self.warm_start_mst             = warm_start_mst
         self.n_jobs                     = _normalize_n_jobs(n_jobs)
+        self.diagnostic_graph_renderer  = diagnostic_graph_renderer
 
     def optimize_adjacency_matrix(
         self,
@@ -1000,6 +1018,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 bool(self.enforce_connectivity),
                 bool(self.warm_start_mst),
                 int(self.verbose),
+                self.diagnostic_graph_renderer if self.n_jobs == 1 else None,
             )
             for graph_idx in range(len(predicted_probs_list))
         ]
@@ -1128,9 +1147,32 @@ class ConditionalNodeFieldGraphDecoder(object):
             )
         ]
         if self.n_jobs == 1 or len(jobs) <= 1:
-            return [_assemble_graph_job(*job) for job in jobs]
-        return _parallel_map(_assemble_graph_job_star, jobs, self.n_jobs, verbose=bool(self.verbose))
-    
+            decoded_graphs = [_assemble_graph_job(*job) for job in jobs]
+        else:
+            decoded_graphs = _parallel_map(_assemble_graph_job_star, jobs, self.n_jobs, verbose=bool(self.verbose))
+
+        if int(self.verbose) >= 4:
+            for graph_idx, (adj_mtx, decoded_graph) in enumerate(zip(adj_mtx_list, decoded_graphs)):
+                existence_mask = np.asarray(generated_nodes.node_presence_mask[graph_idx], dtype=bool)
+                degree_prediction = np.asarray(generated_nodes.node_degree_predictions[graph_idx], dtype=float)
+                prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
+                masked_prob_matrix = _build_masked_prob_matrix(
+                    existence_mask=existence_mask,
+                    degree_prediction=degree_prediction,
+                    prob_matrix=prob_matrix,
+                )
+                target_degrees = self.get_degrees(degree_prediction, existence_mask)
+                _plot_decoder_diagnostics(
+                    prob_matrix=masked_prob_matrix,
+                    adj_mtx=np.asarray(adj_mtx, dtype=float),
+                    target_degrees=target_degrees,
+                    title=f"Decoder solve graph={graph_idx}",
+                    decoded_graph=decoded_graph,
+                    graph_renderer=self.diagnostic_graph_renderer,
+                )
+
+        return decoded_graphs
+
     def save(self, filename: str = 'generative_model.obj') -> None:
         """Serialise the current object to `filename` using pickle.
 
@@ -1302,6 +1344,57 @@ class ConditionalNodeFieldGraphGenerator(object):
             edge_label_matrices=edge_label_matrices,
         )
 
+    def _sample_oracle_cuts_for_iteration(
+        self,
+        accumulated_cuts: Sequence[FrozenSet[Edge]],
+        solve_iteration_idx: int,
+    ) -> List[FrozenSet[Edge]]:
+        if not accumulated_cuts:
+            return []
+        if self.max_oracle_iterations <= 1:
+            return []
+        if solve_iteration_idx >= self.max_oracle_iterations - 1:
+            return []
+        keep_fraction = 1.0 - (float(solve_iteration_idx) / float(self.max_oracle_iterations - 1))
+        keep_count = int(np.ceil(len(accumulated_cuts) * keep_fraction))
+        keep_count = max(0, min(len(accumulated_cuts), keep_count))
+        if keep_count <= 0:
+            return []
+        if keep_count >= len(accumulated_cuts):
+            return list(accumulated_cuts)
+        selected_indices = sorted(random.sample(range(len(accumulated_cuts)), keep_count))
+        return [accumulated_cuts[idx] for idx in selected_indices]
+
+    def _solve_oracle_relaxed_adjacency(
+        self,
+        *,
+        masked_prob_matrix: np.ndarray,
+        target_degrees: List[int],
+        accumulated_cuts: Sequence[FrozenSet[Edge]],
+        start_iteration_idx: int,
+    ) -> np.ndarray:
+        last_error: Optional[Exception] = None
+        for solve_iteration_idx in range(start_iteration_idx, self.max_oracle_iterations):
+            active_cuts = self._sample_oracle_cuts_for_iteration(accumulated_cuts, solve_iteration_idx)
+            try:
+                return self.graph_decoder.optimize_adjacency_matrix(
+                    masked_prob_matrix,
+                    target_degrees,
+                    forbidden_edge_sets=active_cuts,
+                )
+            except Exception as exc:
+                last_error = exc
+                if int(self.verbose) >= 1:
+                    verbose_log(
+                        self,
+                        "Oracle-guided adjacency solve failed with "
+                        f"{len(active_cuts)} active cuts at iteration {solve_iteration_idx + 1}/"
+                        f"{self.max_oracle_iterations}; retrying with fewer cuts."
+                    )
+        if last_error is not None:
+            raise RuntimeError("Oracle-guided adjacency solve failed even after relaxing all oracle cuts.") from last_error
+        raise RuntimeError("Oracle-guided adjacency solve could not be attempted.")
+
     def _decode_generated_nodes_with_oracle(self, generated_nodes: GeneratedNodeBatch) -> List[nx.Graph]:
         predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
         if predicted_edge_probability_matrices is None:
@@ -1346,13 +1439,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     existence_mask = np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool)
                     degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
                     prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
-                    existent = np.asarray(existence_mask[: prob_matrix.shape[0]], dtype=bool)
-                    masked_prob_matrix = np.array(prob_matrix, copy=True)
-                    for i in range(masked_prob_matrix.shape[0]):
-                        for j in range(masked_prob_matrix.shape[1]):
-                            if i == j or not (existent[i] and existent[j]):
-                                masked_prob_matrix[i, j] = 0.0
-                    masked_prob_matrix = (masked_prob_matrix + masked_prob_matrix.T) / 2.0
+                    masked_prob_matrix = _build_masked_prob_matrix(
+                        existence_mask=existence_mask,
+                        degree_prediction=degree_predictions,
+                        prob_matrix=prob_matrix,
+                    )
                     target_degrees = self.graph_decoder.get_degrees(degree_predictions, existence_mask)
                     _plot_decoder_diagnostics(
                         prob_matrix=masked_prob_matrix,
@@ -1361,26 +1452,28 @@ class ConditionalNodeFieldGraphGenerator(object):
                         title=f"Oracle decode graph={graph_idx} iteration={_iteration_idx + 1}",
                         violating_edge_sets=violating_sets,
                         decoded_graph=graph,
+                        graph_renderer=self.graph_decoder.diagnostic_graph_renderer,
                     )
                 new_cuts = [edge_set for edge_set in violating_sets if edge_set not in accumulated_cuts]
                 if not new_cuts:
                     break
                 accumulated_cuts.extend(new_cuts)
+                if _iteration_idx + 1 >= self.max_oracle_iterations:
+                    break
                 existence_mask = np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool)
                 degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
                 prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
-                existent = np.asarray(existence_mask[: prob_matrix.shape[0]], dtype=bool)
-                masked_prob_matrix = np.array(prob_matrix, copy=True)
-                for i in range(masked_prob_matrix.shape[0]):
-                    for j in range(masked_prob_matrix.shape[1]):
-                        if i == j or not (existent[i] and existent[j]):
-                            masked_prob_matrix[i, j] = 0.0
-                masked_prob_matrix = (masked_prob_matrix + masked_prob_matrix.T) / 2.0
+                masked_prob_matrix = _build_masked_prob_matrix(
+                    existence_mask=existence_mask,
+                    degree_prediction=degree_predictions,
+                    prob_matrix=prob_matrix,
+                )
                 target_degrees = self.graph_decoder.get_degrees(degree_predictions, existence_mask)
-                single_adj_mtx = self.graph_decoder.optimize_adjacency_matrix(
-                    masked_prob_matrix,
-                    target_degrees,
-                    forbidden_edge_sets=accumulated_cuts,
+                single_adj_mtx = self._solve_oracle_relaxed_adjacency(
+                    masked_prob_matrix=masked_prob_matrix,
+                    target_degrees=target_degrees,
+                    accumulated_cuts=accumulated_cuts,
+                    start_iteration_idx=_iteration_idx + 1,
                 )
             if graph is None:
                 raise RuntimeError("Oracle-guided decoding failed to assemble a graph.")
