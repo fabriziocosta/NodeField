@@ -2047,7 +2047,7 @@ class ConditionalNodeFieldGraphGenerator(object):
     @staticmethod
     def _compute_guidance_targets(violation_counts: Sequence[Any]) -> np.ndarray:
         violations = np.asarray(violation_counts, dtype=float)
-        return 1.0 / (1.0 + np.log1p(violations))
+        return 1.0 / (1.0 + np.sqrt(violations))
 
     @staticmethod
     def _empty_generated_guidance_batch() -> GeneratedGuidanceBatch:

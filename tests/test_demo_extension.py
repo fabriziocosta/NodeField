@@ -319,7 +319,7 @@ class _FakeBenchmarkGenerator:
     @staticmethod
     def _compute_guidance_targets(violation_counts):
         violations = np.asarray(violation_counts, dtype=float)
-        return 1.0 / (1.0 + np.log1p(violations))
+        return 1.0 / (1.0 + np.sqrt(violations))
 
 
 def test_benchmark_regression_guidance_returns_paired_summary():
