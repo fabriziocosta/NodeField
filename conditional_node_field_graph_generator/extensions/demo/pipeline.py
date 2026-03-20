@@ -15,7 +15,11 @@ from sklearn.model_selection import train_test_split
 try:
     from abstractgraph.operators import compose, cycle, neighborhood, unlabel, combination
 except ModuleNotFoundError:
-    from AbstractGraph.abstract_graph_operators import compose, cycle, neighborhood, unlabel, combination
+    compose = None
+    cycle = None
+    neighborhood = None
+    unlabel = None
+    combination = None
 
 try:
     from abstractgraph_ml.feasibility import (
@@ -24,16 +28,9 @@ try:
         WithinRangeFeasibilityEstimatorFromNumericalFunction,
     )
 except ModuleNotFoundError:
-    try:
-        from AbstractGraph.feasibility import (
-            FeasibilityEstimator,
-            FeasibilityEstimatorFeatureCannotExist,
-            WithinRangeFeasibilityEstimatorFromNumericalFunction,
-        )
-    except ModuleNotFoundError:
-        FeasibilityEstimator = None
-        FeasibilityEstimatorFeatureCannotExist = None
-        WithinRangeFeasibilityEstimatorFromNumericalFunction = None
+    FeasibilityEstimator = None
+    FeasibilityEstimatorFeatureCannotExist = None
+    WithinRangeFeasibilityEstimatorFromNumericalFunction = None
 
 try:
     from NSPPK.nsppk import NSPPK, NodeNSPPK
@@ -62,13 +59,18 @@ from .visualization import offset_neg_graphs, plot_networkx_graphs, select_pos_n
 
 def _require_demo_feasibility_support():
     if (
-        FeasibilityEstimator is None
+        compose is None
+        or cycle is None
+        or neighborhood is None
+        or unlabel is None
+        or combination is None
+        or FeasibilityEstimator is None
         or FeasibilityEstimatorFeatureCannotExist is None
         or WithinRangeFeasibilityEstimatorFromNumericalFunction is None
     ):
         raise ModuleNotFoundError(
-            "build_graph_generator() requires feasibility support from 'abstractgraph_ml' "
-            "(preferred) or the legacy 'AbstractGraph.feasibility' module."
+            "build_graph_generator() requires optional dependencies 'abstractgraph' "
+            "and 'abstractgraph_ml'."
         )
 
 

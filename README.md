@@ -143,7 +143,8 @@ Optional extras:
 
 Additional external packages used by some notebook/demo workflows are not bundled as install requirements here:
 - `NSPPK`
-- `AbstractGraph`
+- `abstractgraph`
+- `abstractgraph_ml`
 
 ## Quick Start
 

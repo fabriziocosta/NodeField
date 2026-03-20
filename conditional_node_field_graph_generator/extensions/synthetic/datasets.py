@@ -11,16 +11,12 @@ def _make_duplicate_detection_estimator():
     try:
         from abstractgraph.hashing import GraphHashDeduper
     except ImportError as exc:
-        try:
-            from AbstractGraph.hash_graph import GraphHashDeduper
-        except ImportError as legacy_exc:
-            raise ImportError(
-                "Graph duplicate filtering requires optional dependency 'abstractgraph' "
-                "(preferred) or legacy 'AbstractGraph'. Install it to use "
-                "make_graphs_classification_dataset(), "
-                "make_two_types_graphs_classification_dataset(), or "
-                "ArtificialGraphDatasetConstructor.sample()."
-            ) from legacy_exc
+        raise ImportError(
+            "Graph duplicate filtering requires optional dependency 'abstractgraph'. "
+            "Install it to use make_graphs_classification_dataset(), "
+            "make_two_types_graphs_classification_dataset(), or "
+            "ArtificialGraphDatasetConstructor.sample()."
+        ) from exc
     return GraphHashDeduper()
 
 

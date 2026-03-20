@@ -9,7 +9,8 @@ def test_build_optional_dependency_candidates_includes_workspace_roots():
     assert candidates
     assert all(isinstance(path, Path) for path in candidates)
     assert any(path.name == "NodeField" for path in candidates)
-    assert any(path.name == "code" for path in candidates)
+    assert any(path.name == "Projects" for path in candidates)
+    assert any(path.name == "repos" for path in candidates)
 
 
 def test_resolve_source_checkout_uses_supplied_candidate_bases(tmp_path):

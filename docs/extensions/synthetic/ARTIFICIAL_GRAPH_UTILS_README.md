@@ -106,7 +106,7 @@ The main binary dataset builders are:
   Positive and negative classes are built from different target/context graph families.
 
 Both functions:
-- deduplicate graphs using `AbstractGraph.hash_graph.GraphHashDeduper`
+- deduplicate graphs using `abstractgraph.hashing.GraphHashDeduper`
 - return:
   - `graphs`
   - `targets`
@@ -151,7 +151,7 @@ Typical use:
 
 ## Dependency note
 
-The synthetic dataset builders depend on `AbstractGraph` for graph deduplication.
+The synthetic dataset builders depend on `abstractgraph` for graph deduplication.
 
 That dependency enters through:
 - `GraphHashDeduper`

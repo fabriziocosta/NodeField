@@ -6,13 +6,21 @@ import pandas as pd
 import pytest
 
 from conditional_node_field_graph_generator.extensions.demo.pipeline import (
+    FeasibilityEstimator,
+    FeasibilityEstimatorFeatureCannotExist,
+    WithinRangeFeasibilityEstimatorFromNumericalFunction,
     benchmark_regression_guidance,
     build_graph_generator,
     build_zinc_dataset,
+    combination,
+    compose,
+    cycle,
     fit_graph_generator,
+    neighborhood,
     prepare_experiment,
     sample_hyperparameter_configuration,
     score_graph_generator_feasible_rate,
+    unlabel,
 )
 from conditional_node_field_graph_generator.extensions.demo.visualization import (
     _temporary_decoder_n_jobs,
@@ -217,6 +225,21 @@ def test_fit_graph_generator_falls_back_when_latest_checkpoint_is_incompatible(t
 
 
 def test_build_graph_generator_propagates_model_name_to_inner_generator():
+    if any(
+        dependency is None
+        for dependency in (
+            compose,
+            cycle,
+            neighborhood,
+            unlabel,
+            combination,
+            FeasibilityEstimator,
+            FeasibilityEstimatorFeatureCannotExist,
+            WithinRangeFeasibilityEstimatorFromNumericalFunction,
+        )
+    ):
+        pytest.skip("abstractgraph and abstractgraph_ml are not installed")
+
     generator = build_graph_generator(
         model_name="demo-artificial-n100-size8",
         model_dir="/tmp/models",
@@ -229,6 +252,21 @@ def test_build_graph_generator_propagates_model_name_to_inner_generator():
 
 
 def test_build_graph_generator_enables_feasibility_oracle_by_default_and_forwards_overrides():
+    if any(
+        dependency is None
+        for dependency in (
+            compose,
+            cycle,
+            neighborhood,
+            unlabel,
+            combination,
+            FeasibilityEstimator,
+            FeasibilityEstimatorFeatureCannotExist,
+            WithinRangeFeasibilityEstimatorFromNumericalFunction,
+        )
+    ):
+        pytest.skip("abstractgraph and abstractgraph_ml are not installed")
+
     default_generator = build_graph_generator()
     overridden_generator = build_graph_generator(
         use_feasibility_oracle=False,
