@@ -5,6 +5,8 @@ import numpy as np
 import networkx as nx
 import pytest
 import pulp
+import torch
+from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
@@ -68,6 +70,26 @@ class _TrainableNodeModel(_Component):
         self.fit_calls.append(kwargs)
 
 
+class _PredictiveStubModel(torch.nn.Module):
+    def __init__(self, generated, cached_outputs):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(1))
+        self.generated = torch.as_tensor(generated, dtype=torch.float32)
+        self.cached_outputs = cached_outputs
+        self.generate_calls = []
+
+    def generate(self, cond_tensor, **kwargs):
+        self.generate_calls.append(
+            {
+                "cond_shape": tuple(cond_tensor.shape),
+                **kwargs,
+            }
+        )
+        for name, value in self.cached_outputs.items():
+            setattr(self, name, None if value is None else value.detach().cpu().clone())
+        return self.generated.to(cond_tensor.device)
+
+
 def _labeled_graph():
     graph = nx.Graph()
     graph.add_node(0, label="C")
@@ -115,6 +137,92 @@ def _make_fitted_sampling_generator():
     )
     generator.fit(_sampling_graphs(), train_node_generator=False)
     return generator
+
+
+def _sample_graph_conditioning(batch_size=2):
+    return GraphConditioningBatch(
+        graph_embeddings=np.asarray([[1.0], [2.0]], dtype=float)[:batch_size],
+        node_counts=np.asarray([2, 3], dtype=np.int64)[:batch_size],
+        edge_counts=np.asarray([1, 2], dtype=np.int64)[:batch_size],
+    )
+
+
+def _make_stubbed_node_field_generator(model, *, guidance_enabled=False):
+    generator = ConditionalNodeFieldGenerator(verbose=False)
+    generator.model = model
+    generator.x_scaler = MinMaxScaler().fit(np.asarray([[0.0, 0.0]], dtype=float))
+    generator.y_scaler = MinMaxScaler().fit(np.asarray([[0.0, 0.0, 0.0]], dtype=float))
+    generator.base_condition_scaler_ = MinMaxScaler().fit(np.asarray([[0.0, 0.0, 0.0]], dtype=float))
+    generator.is_setup_ = True
+    generator.guidance_enabled_ = guidance_enabled
+    generator.target_condition_dim_ = 0
+    generator.target_condition_start_ = 3
+    generator.node_label_classes_ = np.asarray(["C", "N", "O"], dtype=object)
+    generator.edge_label_classes_ = np.asarray(["-", "="], dtype=object)
+    generator._inverse_transform_input = lambda values: values
+    return generator
+
+
+def _rich_cached_outputs():
+    node_label_logits = torch.tensor(
+        [
+            [[3.0, 1.0, -1.0], [0.1, 0.2, 4.0], [0.2, 5.0, 0.1]],
+            [[1.0, 2.0, 0.5], [4.0, 0.1, 0.0], [0.3, 0.2, 3.0]],
+        ],
+        dtype=torch.float32,
+    )
+    edge_label_logits = torch.tensor(
+        [
+            [
+                [[0.0, 0.0], [4.0, 1.0], [1.0, 3.0]],
+                [[2.0, 1.0], [0.0, 0.0], [3.0, 2.0]],
+                [[1.0, 3.0], [0.5, 4.0], [0.0, 0.0]],
+            ],
+            [
+                [[0.0, 0.0], [1.0, 2.5], [2.0, 0.5]],
+                [[3.0, 1.0], [0.0, 0.0], [0.5, 2.0]],
+                [[4.0, 0.1], [1.5, 2.5], [0.0, 0.0]],
+            ],
+        ],
+        dtype=torch.float32,
+    )
+    edge_probs = torch.tensor(
+        [
+            [[0.0, 0.9, 0.2], [0.9, 0.0, 0.7], [0.2, 0.7, 0.0]],
+            [[0.0, 0.6, 0.4], [0.6, 0.0, 0.8], [0.4, 0.8, 0.0]],
+        ],
+        dtype=torch.float32,
+    )
+    return {
+        "_last_node_presence_mask": torch.tensor(
+            [[True, True, False], [False, False, False]],
+            dtype=torch.bool,
+        ),
+        "_last_deg_classes": torch.tensor([[1, 2, 0], [0, 1, 2]], dtype=torch.int64),
+        "_last_node_label_classes": torch.argmax(node_label_logits, dim=-1),
+        "_last_node_label_logits": node_label_logits,
+        "_last_node_label_probabilities": torch.softmax(node_label_logits, dim=-1),
+        "_last_edge_probability_matrices": edge_probs,
+        "_last_edge_existence_probabilities": edge_probs,
+        "_last_edge_label_matrices": torch.argmax(edge_label_logits, dim=-1),
+        "_last_edge_label_logits": edge_label_logits,
+        "_last_edge_label_probabilities": torch.softmax(edge_label_logits, dim=-1),
+    }
+
+
+def _assert_rich_generated_batch(batch):
+    assert batch.node_label_logits is not None
+    assert batch.node_label_probabilities is not None
+    assert batch.edge_existence_probabilities is not None
+    assert batch.edge_label_logits is not None
+    assert batch.edge_label_probabilities is not None
+    assert batch.node_label_logits[0].shape == (3, 3)
+    assert batch.node_label_probabilities[0].shape == (3, 3)
+    assert batch.edge_existence_probabilities[0].shape == (3, 3)
+    assert batch.edge_label_logits[0].shape == (3, 3, 2)
+    assert batch.edge_label_probabilities[0].shape == (3, 3, 2)
+    assert batch.node_labels[0].tolist() == ["C", "O", "N"]
+    assert batch.edge_label_matrices[0].shape == (3, 3)
 
 
 def test_graph_generator_init_validates_inputs():
@@ -676,6 +784,128 @@ def test_generator_resolves_dummy_constant_node_labels_for_unlabelled_training_s
     )
 
     assert labels[0].tolist() == [DEFAULT_DUMMY_NODE_LABEL, DEFAULT_DUMMY_NODE_LABEL]
+
+
+def test_generated_node_batch_len_supports_rich_distribution_fields():
+    batch = GeneratedNodeBatch(
+        node_label_logits=[
+            np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=float),
+            np.asarray([[0.2, 0.8]], dtype=float),
+        ]
+    )
+
+    assert len(batch) == 2
+
+
+def test_predict_returns_rich_distribution_tensors_and_legacy_outputs():
+    generated = np.asarray(
+        [
+            [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]],
+            [[4.0, 40.0], [5.0, 50.0], [6.0, 60.0]],
+        ],
+        dtype=float,
+    )
+    model = _PredictiveStubModel(generated=generated, cached_outputs=_rich_cached_outputs())
+    generator = _make_stubbed_node_field_generator(model)
+
+    batch = generator.predict(_sample_graph_conditioning())
+
+    _assert_rich_generated_batch(batch)
+    assert batch.edge_probability_matrices is not None
+    assert batch.node_embeddings_list[0].shape == (2, 2)
+    assert batch.node_embeddings_list[1].shape == (1, 2)
+    np.testing.assert_array_equal(batch.node_presence_mask[0], np.asarray([True, True, False], dtype=bool))
+    np.testing.assert_allclose(batch.edge_probability_matrices[0], batch.edge_existence_probabilities[0])
+    assert generator.last_predicted_node_label_logits_ is batch.node_label_logits
+    assert generator.last_predicted_node_label_probabilities_ is batch.node_label_probabilities
+    assert generator.last_predicted_edge_existence_probabilities_ is batch.edge_existence_probabilities
+    assert generator.last_predicted_edge_label_logits_ is batch.edge_label_logits
+    assert generator.last_predicted_edge_label_probabilities_ is batch.edge_label_probabilities
+
+
+def test_predict_leaves_rich_distribution_fields_none_when_heads_are_disabled():
+    generated = np.asarray([[[1.0, 2.0], [3.0, 4.0]]], dtype=float)
+    model = _PredictiveStubModel(
+        generated=generated,
+        cached_outputs={
+            "_last_node_presence_mask": torch.tensor([[True, False]], dtype=torch.bool),
+            "_last_deg_classes": torch.tensor([[1, 0]], dtype=torch.int64),
+            "_last_node_label_classes": None,
+            "_last_node_label_logits": None,
+            "_last_node_label_probabilities": None,
+            "_last_edge_probability_matrices": None,
+            "_last_edge_existence_probabilities": None,
+            "_last_edge_label_matrices": None,
+            "_last_edge_label_logits": None,
+            "_last_edge_label_probabilities": None,
+        },
+    )
+    generator = _make_stubbed_node_field_generator(model)
+
+    batch = generator.predict(_sample_graph_conditioning(batch_size=1))
+
+    assert batch.node_label_logits is None
+    assert batch.node_label_probabilities is None
+    assert batch.edge_existence_probabilities is None
+    assert batch.edge_label_logits is None
+    assert batch.edge_label_probabilities is None
+    assert batch.node_labels is None
+    assert batch.edge_probability_matrices is None
+    assert batch.edge_label_matrices is None
+
+
+def test_predict_classifier_guided_returns_rich_distribution_tensors():
+    generated = np.asarray(
+        [
+            [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+            [[4.0, 0.0], [5.0, 0.0], [6.0, 0.0]],
+        ],
+        dtype=float,
+    )
+    model = _PredictiveStubModel(generated=generated, cached_outputs=_rich_cached_outputs())
+    generator = _make_stubbed_node_field_generator(model)
+    generator.guidance_predictor_ = object()
+    generator.guidance_predictor_mode_ = "classification"
+    generator.guidance_predictor_label_to_index_ = {"low": 0, "high": 1}
+    generator._classification_guidance_gradient = lambda x, base_condition, desired: torch.zeros_like(x)
+
+    batch = generator.predict_classifier_guided(
+        _sample_graph_conditioning(),
+        desired_class=["low", "high"],
+        classifier_scale=1.5,
+    )
+
+    _assert_rich_generated_batch(batch)
+    assert model.generate_calls[-1]["classifier_scale"] == pytest.approx(1.5)
+    assert callable(model.generate_calls[-1]["classifier_guidance_fn"])
+
+
+def test_predict_regression_guided_returns_rich_distribution_tensors():
+    generated = np.asarray(
+        [
+            [[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]],
+            [[4.0, 0.0], [5.0, 0.0], [6.0, 0.0]],
+        ],
+        dtype=float,
+    )
+    model = _PredictiveStubModel(generated=generated, cached_outputs=_rich_cached_outputs())
+    generator = _make_stubbed_node_field_generator(model)
+    generator.guidance_predictor_ = object()
+    generator.guidance_predictor_mode_ = "regression"
+    generator.guidance_predictor_target_scaler_ = MinMaxScaler().fit(
+        np.asarray([[0.0], [1.0]], dtype=float)
+    )
+    generator._regression_guidance_gradient = lambda x, base_condition, desired: torch.zeros_like(x)
+
+    batch = generator.predict_regression_guided(
+        _sample_graph_conditioning(),
+        desired_target=[0.25, 0.75],
+        predictor_scale=2.0,
+    )
+
+    _assert_rich_generated_batch(batch)
+    assert model.generate_calls[-1]["classifier_scale"] == pytest.approx(2.0)
+    assert callable(model.generate_calls[-1]["classifier_guidance_fn"])
 
 
 def test_decoder_decode_node_labels_requires_explicit_labels():

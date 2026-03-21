@@ -172,6 +172,11 @@ When guidance targets are available, sampling can also use classifier-free condi
 `desired_target` and `guidance_scale`. The detailed mechanics are documented in
 [`docs/2D_TARGET_GUIDANCE_README.md`](docs/2D_TARGET_GUIDANCE_README.md).
 
+At the node-field level, `ConditionalNodeFieldGenerator.predict*()` now returns
+both the legacy hard decode channels and richer full-shape distribution tensors
+for node labels, edge existence, and edge labels. The interface details are
+documented in [`docs/4_MAIN_CLASS_INTERFACES_README.md`](docs/4_MAIN_CLASS_INTERFACES_README.md).
+
 Notebook examples:
 - `notebooks/demo.ipynb`
 - `notebooks/demo_chem.ipynb`

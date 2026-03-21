@@ -103,6 +103,12 @@ That is why unlabeled datasets can still decode cleanly. The decoder can attach
 constant dummy labels or no labels at all without requiring a learned label
 head.
 
+`GeneratedNodeBatch` may also carry richer full-shape distribution tensors such
+as `node_label_logits`, `node_label_probabilities`,
+`edge_existence_probabilities`, `edge_label_logits`, and
+`edge_label_probabilities`. Those are currently analysis-facing outputs. The
+decoder still reconstructs graphs from the hard channels listed above.
+
 ## Decoder Responsibilities
 
 The decoder has four main jobs.

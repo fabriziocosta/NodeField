@@ -58,7 +58,12 @@ class NodeGenerationBatch:
 
 @dataclass
 class GeneratedNodeBatch:
-    """Generator outputs as explicit structural and semantic predictions."""
+    """Generator outputs as explicit structural and semantic predictions.
+
+    Rich distribution tensors keep full decoder shapes. Consumers should mask
+    inactive nodes with ``node_presence_mask`` and mask inactive/self edges as
+    needed before downstream analysis.
+    """
 
     node_embeddings_list: Optional[List[np.ndarray]] = None
     node_presence_mask: Optional[np.ndarray] = None
@@ -66,6 +71,11 @@ class GeneratedNodeBatch:
     node_labels: Optional[List[np.ndarray]] = None
     edge_probability_matrices: Optional[List[np.ndarray]] = None
     edge_label_matrices: Optional[List[np.ndarray]] = None
+    node_label_logits: Optional[List[np.ndarray]] = None
+    node_label_probabilities: Optional[List[np.ndarray]] = None
+    edge_existence_probabilities: Optional[List[np.ndarray]] = None
+    edge_label_logits: Optional[List[np.ndarray]] = None
+    edge_label_probabilities: Optional[List[np.ndarray]] = None
 
     def __len__(self) -> int:
         if self.node_embeddings_list is not None:
@@ -80,6 +90,16 @@ class GeneratedNodeBatch:
             return int(len(self.edge_probability_matrices))
         if self.edge_label_matrices is not None:
             return int(len(self.edge_label_matrices))
+        if self.node_label_logits is not None:
+            return int(len(self.node_label_logits))
+        if self.node_label_probabilities is not None:
+            return int(len(self.node_label_probabilities))
+        if self.edge_existence_probabilities is not None:
+            return int(len(self.edge_existence_probabilities))
+        if self.edge_label_logits is not None:
+            return int(len(self.edge_label_logits))
+        if self.edge_label_probabilities is not None:
+            return int(len(self.edge_label_probabilities))
         return 0
 
 
@@ -1396,10 +1416,15 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                 "do not pass both global_condition_unconditional and classifier_guidance_fn."
             )
         self._last_edge_probability_matrices = None
+        self._last_edge_existence_probabilities = None
         self._last_edge_label_matrices = None
+        self._last_edge_label_logits = None
+        self._last_edge_label_probabilities = None
         self._last_node_presence_mask = None
         self._last_deg_classes = None
         self._last_node_label_classes = None
+        self._last_node_label_logits = None
+        self._last_node_label_probabilities = None
 
         node_mask = None
         x = torch.randn(
@@ -1460,12 +1485,17 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                 ).cpu()
             self._last_deg_classes = torch.argmax(logits_deg, dim=-1).detach().cpu()
             if logits_label is not None:
+                self._last_node_label_logits = logits_label.detach().cpu()
+                self._last_node_label_probabilities = torch.softmax(logits_label, dim=-1).detach().cpu()
                 self._last_node_label_classes = torch.argmax(logits_label, dim=-1).detach().cpu()
             if self.use_locality_supervision:
                 edge_probs = self._compute_edge_probability_matrices(latent_tokens)
+                self._last_edge_existence_probabilities = edge_probs.detach().cpu()
                 self._last_edge_probability_matrices = edge_probs.detach().cpu()
             if self.use_edge_label_head:
                 edge_label_logits = self._compute_edge_label_logits(latent_tokens)
+                self._last_edge_label_logits = edge_label_logits.detach().cpu()
+                self._last_edge_label_probabilities = torch.softmax(edge_label_logits, dim=-1).detach().cpu()
                 edge_label_classes = torch.argmax(edge_label_logits, dim=-1)
                 self._last_edge_label_matrices = edge_label_classes.detach().cpu()
 
@@ -1590,8 +1620,13 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.base_condition_scaler_ = None
         self.num_node_label_classes_ = 0
         self.last_predicted_node_label_classes_ = None
+        self.last_predicted_node_label_logits_ = None
+        self.last_predicted_node_label_probabilities_ = None
         self.last_predicted_edge_probability_matrices_ = None
+        self.last_predicted_edge_existence_probabilities_ = None
         self.last_predicted_edge_label_matrices_ = None
+        self.last_predicted_edge_label_logits_ = None
+        self.last_predicted_edge_label_probabilities_ = None
         self.target_mode_ = None
         self.target_classes_ = None
         self.target_to_index_ = None
@@ -2676,6 +2711,94 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         grad = torch.autograd.grad(objective, x, retain_graph=True)[0]
         return grad
 
+    @staticmethod
+    def _tensor_batch_to_numpy_list(
+        batch_tensor: Optional[torch.Tensor],
+    ) -> Optional[List[np.ndarray]]:
+        if batch_tensor is None:
+            return None
+        batch_array = batch_tensor.cpu().numpy()
+        return [batch_array[index] for index in range(batch_array.shape[0])]
+
+    def _build_generated_node_batch(self, gen_orig: np.ndarray) -> GeneratedNodeBatch:
+        node_presence_mask = getattr(self.model, "_last_node_presence_mask", None)
+        if node_presence_mask is None:
+            node_presence_mask = np.ones(
+                (len(gen_orig), gen_orig.shape[1]),
+                dtype=bool,
+            )
+        else:
+            node_presence_mask = node_presence_mask.cpu().numpy()
+
+        deg_classes = getattr(self.model, "_last_deg_classes", None)
+        node_degree_predictions = None if deg_classes is None else deg_classes.cpu().numpy()
+
+        label_classes = getattr(self.model, "_last_node_label_classes", None)
+        node_label_logits = self._tensor_batch_to_numpy_list(
+            getattr(self.model, "_last_node_label_logits", None)
+        )
+        node_label_probabilities = self._tensor_batch_to_numpy_list(
+            getattr(self.model, "_last_node_label_probabilities", None)
+        )
+        predicted_node_labels = None
+        self.last_predicted_node_label_classes_ = None
+        self.last_predicted_node_label_logits_ = node_label_logits
+        self.last_predicted_node_label_probabilities_ = node_label_probabilities
+        if label_classes is not None and self.node_label_classes_ is not None:
+            label_classes = label_classes.cpu().numpy()
+            predicted_node_labels = [
+                self.node_label_classes_[label_classes[index]]
+                for index in range(label_classes.shape[0])
+            ]
+            self.last_predicted_node_label_classes_ = predicted_node_labels
+
+        edge_probability_matrices = self._tensor_batch_to_numpy_list(
+            getattr(self.model, "_last_edge_probability_matrices", None)
+        )
+        edge_existence_probabilities = self._tensor_batch_to_numpy_list(
+            getattr(self.model, "_last_edge_existence_probabilities", None)
+        )
+        self.last_predicted_edge_probability_matrices_ = edge_probability_matrices
+        self.last_predicted_edge_existence_probabilities_ = edge_existence_probabilities
+
+        edge_label_class_indices = getattr(self.model, "_last_edge_label_matrices", None)
+        edge_label_logits = self._tensor_batch_to_numpy_list(
+            getattr(self.model, "_last_edge_label_logits", None)
+        )
+        edge_label_probabilities = self._tensor_batch_to_numpy_list(
+            getattr(self.model, "_last_edge_label_probabilities", None)
+        )
+        predicted_edge_label_matrices = None
+        self.last_predicted_edge_label_matrices_ = None
+        self.last_predicted_edge_label_logits_ = edge_label_logits
+        self.last_predicted_edge_label_probabilities_ = edge_label_probabilities
+        if edge_label_class_indices is not None and self.edge_label_classes_ is not None:
+            edge_label_class_indices = edge_label_class_indices.cpu().numpy()
+            predicted_edge_label_matrices = [
+                self.edge_label_classes_[edge_label_class_indices[index]]
+                for index in range(edge_label_class_indices.shape[0])
+            ]
+            self.last_predicted_edge_label_matrices_ = predicted_edge_label_matrices
+
+        return GeneratedNodeBatch(
+            node_embeddings_list=[
+                np.asarray(gen_orig[index][node_presence_mask[index]], dtype=float)
+                if np.any(node_presence_mask[index])
+                else np.asarray(gen_orig[index][:1], dtype=float)
+                for index in range(len(gen_orig))
+            ],
+            node_presence_mask=node_presence_mask,
+            node_degree_predictions=node_degree_predictions,
+            node_labels=predicted_node_labels,
+            edge_probability_matrices=edge_probability_matrices,
+            edge_label_matrices=predicted_edge_label_matrices,
+            node_label_logits=node_label_logits,
+            node_label_probabilities=node_label_probabilities,
+            edge_existence_probabilities=edge_existence_probabilities,
+            edge_label_logits=edge_label_logits,
+            edge_label_probabilities=edge_label_probabilities,
+        )
+
     def predict(
         self,
         graph_conditioning: GraphConditioningBatch,
@@ -2719,63 +2842,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
 
         gen_np = generated.detach().cpu().numpy()
         gen_orig = self._inverse_transform_input(gen_np)
-        node_presence_mask = getattr(self.model, "_last_node_presence_mask", None)
-        if node_presence_mask is None:
-            node_presence_mask = np.ones(
-                (len(gen_orig), gen_orig.shape[1]),
-                dtype=bool,
-            )
-        else:
-            node_presence_mask = node_presence_mask.numpy()
-
-        deg_classes = getattr(self.model, "_last_deg_classes", None)
-        node_degree_predictions = None
-        if deg_classes is not None:
-            node_degree_predictions = deg_classes.cpu().numpy()
-        label_classes = getattr(self.model, "_last_node_label_classes", None)
-        predicted_node_labels = None
-        self.last_predicted_node_label_classes_ = None
-        if label_classes is not None and self.node_label_classes_ is not None:
-            label_classes = label_classes.cpu().numpy()
-            predicted_node_labels = [
-                self.node_label_classes_[label_classes[index]]
-                for index in range(label_classes.shape[0])
-            ]
-            self.last_predicted_node_label_classes_ = predicted_node_labels
-        edge_probability_matrices = getattr(self.model, "_last_edge_probability_matrices", None)
-        predicted_edge_probability_matrices = None
-        self.last_predicted_edge_probability_matrices_ = None
-        if edge_probability_matrices is not None:
-            edge_probability_matrices = edge_probability_matrices.cpu().numpy()
-            predicted_edge_probability_matrices = [
-                edge_probability_matrices[index]
-                for index in range(edge_probability_matrices.shape[0])
-            ]
-            self.last_predicted_edge_probability_matrices_ = predicted_edge_probability_matrices
-        edge_label_matrices = getattr(self.model, "_last_edge_label_matrices", None)
-        predicted_edge_label_matrices = None
-        self.last_predicted_edge_label_matrices_ = None
-        if edge_label_matrices is not None and self.edge_label_classes_ is not None:
-            edge_label_matrices = edge_label_matrices.cpu().numpy()
-            predicted_edge_label_matrices = [
-                self.edge_label_classes_[edge_label_matrices[index]]
-                for index in range(edge_label_matrices.shape[0])
-            ]
-            self.last_predicted_edge_label_matrices_ = predicted_edge_label_matrices
-
-        return GeneratedNodeBatch(
-            node_embeddings_list=[
-                np.asarray(gen_orig[index][node_presence_mask[index]], dtype=float)
-                if np.any(node_presence_mask[index])
-                else np.asarray(gen_orig[index][:1], dtype=float)
-                for index in range(len(gen_orig))
-            ],
-            node_presence_mask=node_presence_mask,
-            node_degree_predictions=node_degree_predictions,
-            node_labels=predicted_node_labels,
-            edge_probability_matrices=predicted_edge_probability_matrices,
-            edge_label_matrices=predicted_edge_label_matrices,
-        )
+        return self._build_generated_node_batch(gen_orig)
 
     def predict_classifier_guided(
         self,
@@ -2868,63 +2935,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
 
         gen_np = generated.detach().cpu().numpy()
         gen_orig = self._inverse_transform_input(gen_np)
-        node_presence_mask = getattr(self.model, "_last_node_presence_mask", None)
-        if node_presence_mask is None:
-            node_presence_mask = np.ones(
-                (len(gen_orig), gen_orig.shape[1]),
-                dtype=bool,
-            )
-        else:
-            node_presence_mask = node_presence_mask.numpy()
-
-        deg_classes = getattr(self.model, "_last_deg_classes", None)
-        node_degree_predictions = None
-        if deg_classes is not None:
-            node_degree_predictions = deg_classes.cpu().numpy()
-        label_classes = getattr(self.model, "_last_node_label_classes", None)
-        predicted_node_labels = None
-        self.last_predicted_node_label_classes_ = None
-        if label_classes is not None and self.node_label_classes_ is not None:
-            label_classes = label_classes.cpu().numpy()
-            predicted_node_labels = [
-                self.node_label_classes_[label_classes[index]]
-                for index in range(label_classes.shape[0])
-            ]
-            self.last_predicted_node_label_classes_ = predicted_node_labels
-        edge_probability_matrices = getattr(self.model, "_last_edge_probability_matrices", None)
-        predicted_edge_probability_matrices = None
-        self.last_predicted_edge_probability_matrices_ = None
-        if edge_probability_matrices is not None:
-            edge_probability_matrices = edge_probability_matrices.cpu().numpy()
-            predicted_edge_probability_matrices = [
-                edge_probability_matrices[index]
-                for index in range(edge_probability_matrices.shape[0])
-            ]
-            self.last_predicted_edge_probability_matrices_ = predicted_edge_probability_matrices
-        edge_label_matrices = getattr(self.model, "_last_edge_label_matrices", None)
-        predicted_edge_label_matrices = None
-        self.last_predicted_edge_label_matrices_ = None
-        if edge_label_matrices is not None and self.edge_label_classes_ is not None:
-            edge_label_matrices = edge_label_matrices.cpu().numpy()
-            predicted_edge_label_matrices = [
-                self.edge_label_classes_[edge_label_matrices[index]]
-                for index in range(edge_label_matrices.shape[0])
-            ]
-            self.last_predicted_edge_label_matrices_ = predicted_edge_label_matrices
-
-        return GeneratedNodeBatch(
-            node_embeddings_list=[
-                np.asarray(gen_orig[index][node_presence_mask[index]], dtype=float)
-                if np.any(node_presence_mask[index])
-                else np.asarray(gen_orig[index][:1], dtype=float)
-                for index in range(len(gen_orig))
-            ],
-            node_presence_mask=node_presence_mask,
-            node_degree_predictions=node_degree_predictions,
-            node_labels=predicted_node_labels,
-            edge_probability_matrices=predicted_edge_probability_matrices,
-            edge_label_matrices=predicted_edge_label_matrices,
-        )
+        return self._build_generated_node_batch(gen_orig)
 
     def plot_metrics(self, window: int = 10, alpha: float = 0.3):
         if self.model is None:

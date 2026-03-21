@@ -155,6 +155,11 @@ GeneratedNodeBatch(
     node_labels: Optional[List[np.ndarray]] = None,
     edge_probability_matrices: Optional[List[np.ndarray]] = None,
     edge_label_matrices: Optional[List[np.ndarray]] = None,
+    node_label_logits: Optional[List[np.ndarray]] = None,
+    node_label_probabilities: Optional[List[np.ndarray]] = None,
+    edge_existence_probabilities: Optional[List[np.ndarray]] = None,
+    edge_label_logits: Optional[List[np.ndarray]] = None,
+    edge_label_probabilities: Optional[List[np.ndarray]] = None,
 )
 ```
 
@@ -172,14 +177,48 @@ Fields:
 
 - `node_labels`
   Optional predicted node labels.
+  These are convenience argmax labels derived from the node-label head when that
+  head is enabled.
 
 - `edge_probability_matrices`
   Optional dense per-graph edge-probability matrices.
   Higher probabilities give the decoder more confidence in including edges.
   Lower probabilities make the decoder rely more on constraint tradeoffs.
+  This legacy field remains the main decoder input.
 
 - `edge_label_matrices`
   Optional dense per-graph edge-label predictions.
+  These are convenience argmax labels derived from the edge-label head when that
+  head is enabled.
+
+- `node_label_logits`
+  Optional dense per-graph node-label logits with shape `[N, C_node]`.
+  `N` is the full decoder row count before masking, and `C_node` is the learned
+  node-label vocabulary size.
+
+- `node_label_probabilities`
+  Optional dense per-graph node-label probabilities with shape `[N, C_node]`.
+  These are `softmax(node_label_logits, axis=-1)`.
+
+- `edge_existence_probabilities`
+  Optional dense per-graph edge-existence probabilities with shape `[N, N]`.
+  These are the full ordered-pair Bernoulli-style edge scores before any
+  thresholding or decoder optimization.
+
+- `edge_label_logits`
+  Optional dense per-graph edge-label logits with shape `[N, N, C_edge]`.
+  `C_edge` is the learned edge-label vocabulary size.
+
+- `edge_label_probabilities`
+  Optional dense per-graph edge-label probabilities with shape `[N, N, C_edge]`.
+  These are `softmax(edge_label_logits, axis=-1)`.
+
+Masking convention:
+
+- The rich tensors keep full decoder shapes.
+- Use `node_presence_mask` to ignore inactive node rows.
+- Use `node_presence_mask` plus diagonal masking to ignore inactive or self-edge
+  entries in edge tensors.
 
 ## `ConditionalNodeFieldGenerator`
 
@@ -508,6 +547,13 @@ Parameters:
   Decrease toward `1.0`: ordinary conditional generation.
   Decrease toward `0.0`: moves toward the unconditional branch.
 
+Returns:
+
+- `GeneratedNodeBatch`
+  Contains both the legacy hard channels used by the decoder and the richer
+  full-shape distribution tensors exposed for downstream analysis and future
+  oracle logic.
+
 #### `set_guidance_predictor(...)`
 
 ```python
@@ -627,6 +673,12 @@ Parameters:
   Increase: stronger push toward the requested class, less diversity, more artifact risk if the classifier is imperfect.
   Decrease: weaker target steering.
 
+Returns:
+
+- `GeneratedNodeBatch`
+  Same output structure as `predict(...)`, including the rich distribution
+  tensors when the corresponding heads are enabled.
+
 #### `predict_regression_guided(...)`
 
 ```python
@@ -646,6 +698,12 @@ Parameters:
   Strength of regression guidance.
   Increase: stronger push toward the requested target value, often lower diversity and higher instability.
   Decrease: weaker steering.
+
+Returns:
+
+- `GeneratedNodeBatch`
+  Same output structure as `predict(...)`, including the rich distribution
+  tensors when the corresponding heads are enabled.
 
 ### Practical Notes
 

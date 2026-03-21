@@ -171,9 +171,16 @@ This is the output of the conditional node generator during inference:
 - predicted degrees,
 - optional predicted node labels,
 - optional edge probability matrices,
-- optional edge label matrices.
+- optional edge label matrices,
+- optional node-label logits and probabilities,
+- optional edge-existence probabilities,
+- optional edge-label logits and probabilities.
 
 The decoder consumes this object and reconstructs `networkx` graphs.
+The richer probability tensors keep full decoder shapes and are intended for
+inspection, analysis, and future oracle logic. The current decoder still relies
+on the hard channels (`node_labels`, `edge_probability_matrices`,
+`edge_label_matrices`) for reconstruction.
 
 Conceptually:
 
@@ -361,7 +368,10 @@ This produces `GeneratedNodeBatch`, which may contain:
 - degree predictions,
 - node labels,
 - edge probabilities,
-- edge labels.
+- edge labels,
+- node-label logits and probabilities,
+- edge-existence probabilities,
+- edge-label logits and probabilities.
 
 The exact set depends on the supervision plan and the fitted model heads.
 
