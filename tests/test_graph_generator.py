@@ -1192,6 +1192,23 @@ def test_can_use_feasibility_oracle_respects_attempt_budget():
     ) is False
 
 
+def test_apply_legacy_feasibility_config_maps_old_boolean_flag():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    del generator.feasibility_oracle_candidates_per_attempt
+    generator.use_feasibility_oracle = False
+
+    generator._apply_legacy_feasibility_config()
+
+    assert generator.feasibility_oracle_candidates_per_attempt == 0
+
+    del generator.feasibility_oracle_candidates_per_attempt
+    generator.use_feasibility_oracle = True
+
+    generator._apply_legacy_feasibility_config()
+
+    assert generator.feasibility_oracle_candidates_per_attempt == 2
+
+
 def test_edge_importance_parameters_are_exposed_on_model():
     model = ConditionalNodeFieldGenerator(
         lambda_direct_edge_importance=12.0,

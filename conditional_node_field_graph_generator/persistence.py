@@ -103,6 +103,9 @@ def load_graph_generator(model_name, model_dir=None):
     path = candidates[0]
     with open(path, "rb") as handle:
         graph_generator = pickle.load(handle)
+    migrate_legacy = getattr(graph_generator, "_apply_legacy_feasibility_config", None)
+    if callable(migrate_legacy):
+        migrate_legacy()
     print(f"Loaded graph generator: {path.name}")
     print(path)
     return graph_generator

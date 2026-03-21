@@ -1277,6 +1277,8 @@ class ConditionalNodeFieldGraphDecoder(object):
 
 class ConditionalNodeFieldGraphGenerator(object):
     """End-to-end manager that vectorises graphs, trains generators, and rebuilds structures."""
+    _DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT = 2
+
     def __init__(
             self,
             graph_vectorizer: Any = None,
@@ -1290,7 +1292,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             locality_sampling_strategy: str = "stratified_preserve",
             locality_target_positive_ratio: Optional[float] = None,
             feasibility_estimator: Any = None,
-            feasibility_oracle_candidates_per_attempt: int = 2,
+            feasibility_oracle_candidates_per_attempt: int = _DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT,
             use_feasibility_filtering: bool = True,
             max_oracle_iterations: int = 8,
             max_feasibility_attempts: int = 10,
@@ -1375,6 +1377,24 @@ class ConditionalNodeFieldGraphGenerator(object):
                 f"feasibility_failure_mode must be one of {sorted(valid_feasibility_failure_modes)} "
                 f"(got {self.feasibility_failure_mode!r})."
             )
+
+    def _apply_legacy_feasibility_config(self) -> None:
+        if not hasattr(self, "feasibility_oracle_candidates_per_attempt"):
+            legacy_use_oracle = getattr(self, "use_feasibility_oracle", True)
+            self.feasibility_oracle_candidates_per_attempt = (
+                int(self._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT)
+                if bool(legacy_use_oracle)
+                else 0
+            )
+        self.feasibility_oracle_candidates_per_attempt = int(
+            self.feasibility_oracle_candidates_per_attempt
+        )
+        if self.feasibility_oracle_candidates_per_attempt < 0:
+            self.feasibility_oracle_candidates_per_attempt = 0
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._apply_legacy_feasibility_config()
 
     def set_feasibility_filtering(self, enabled: bool) -> None:
         """Enable or disable feasibility filtering during generation without discarding the fitted estimator.
