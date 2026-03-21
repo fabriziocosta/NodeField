@@ -1285,6 +1285,40 @@ def test_decode_generated_nodes_repairs_edge_labels_before_structural_cuts():
     assert estimator.edge_calls >= 2
 
 
+def test_decode_generated_nodes_jointly_repairs_node_and_edge_labels():
+    estimator = _LabelAwareOracleEstimator(
+        edge_sets_per_call=[[[(0, 1)]], []],
+        node_sets_per_call=[[[0]], []],
+    )
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.feasibility_estimator = estimator
+    generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
+    generator.node_label_to_index_ = {"C": 0, "O": 1}
+    generator.edge_label_classes_ = np.asarray(["-", "="], dtype=object)
+    generator.edge_label_to_index_ = {"-": 0, "=": 1}
+
+    decoded = generator._decode_generated_nodes(
+        _oracle_label_generated_batch(
+            node_labels=["C", "C"],
+            edge_label_matrix=[[None, "-"], ["-", None]],
+            node_label_probabilities=[
+                [0.05, 0.95],
+                [0.95, 0.05],
+            ],
+            edge_label_probabilities=[
+                [[1.0, 0.0], [0.05, 0.95]],
+                [[0.05, 0.95], [1.0, 0.0]],
+            ],
+        )
+    )
+
+    assert len(decoded) == 1
+    assert decoded[0].nodes[0]["label"] == "O"
+    assert decoded[0].edges[(0, 1)]["label"] == "="
+    assert estimator.node_calls >= 2
+    assert estimator.edge_calls >= 2
+
+
 def test_decode_generated_nodes_skips_node_label_repair_without_probabilities():
     estimator = _LabelAwareOracleEstimator(
         edge_sets_per_call=[[], []],
@@ -1345,6 +1379,91 @@ def test_oracle_candidate_score_prefers_higher_probability_feasible_labels():
     )
 
     assert score_high > score_low
+
+
+def test_decode_generated_nodes_reruns_joint_label_repair_after_structural_change(monkeypatch):
+    estimator = _OracleOnceEstimator([
+        [[(1, 0), (2, 1), (3, 2), (3, 0)]],
+        [],
+    ])
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True),
+        feasibility_estimator=estimator,
+        verbose=False,
+    )
+    generator.node_label_classes_ = np.asarray(["C"], dtype=object)
+    generator.node_label_to_index_ = {"C": 0}
+    generator.edge_label_classes_ = np.asarray(["-", "="], dtype=object)
+    generator.edge_label_to_index_ = {"-": 0, "=": 1}
+
+    generated = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[2.0, 2.0, 2.0, 2.0]], dtype=float),
+        node_labels=[np.asarray(["C", "C", "C", "C"], dtype=object)],
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.95, 0.10, 0.95],
+                    [0.95, 0.0, 0.95, 0.10],
+                    [0.10, 0.95, 0.0, 0.95],
+                    [0.95, 0.10, 0.95, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+        edge_existence_probabilities=[
+            np.asarray(
+                [
+                    [0.0, 0.95, 0.10, 0.95],
+                    [0.95, 0.0, 0.95, 0.10],
+                    [0.10, 0.95, 0.0, 0.95],
+                    [0.95, 0.10, 0.95, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+        edge_label_matrices=[
+            np.asarray(
+                [
+                    [None, "-", "-", "-"],
+                    ["-", None, "-", "-"],
+                    ["-", "-", None, "-"],
+                    ["-", "-", "-", None],
+                ],
+                dtype=object,
+            )
+        ],
+        edge_label_probabilities=[
+            np.repeat(
+                np.asarray(
+                    [
+                        [0.0, 1.0],
+                        [0.8, 0.2],
+                        [0.8, 0.2],
+                        [0.8, 0.2],
+                    ],
+                    dtype=float,
+                )[None, :, :],
+                4,
+                axis=0,
+            )
+        ],
+    )
+
+    call_adjacencies = []
+    original_repair = generator._repair_labels_with_oracle
+
+    def wrapped_repair(*args, **kwargs):
+        call_adjacencies.append(np.asarray(kwargs["adj_mtx"], dtype=int).copy())
+        return original_repair(*args, **kwargs)
+
+    monkeypatch.setattr(generator, "_repair_labels_with_oracle", wrapped_repair)
+
+    decoded = generator._decode_generated_nodes(generated)
+
+    assert len(decoded) == 1
+    assert len(call_adjacencies) >= 2
+    assert not np.array_equal(call_adjacencies[0], call_adjacencies[-1])
 
 
 def test_decode_generated_nodes_falls_back_when_oracle_method_missing():

@@ -14,13 +14,15 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 try:
-    from abstractgraph.operators import compose, cycle, neighborhood, unlabel, combination
+    from abstractgraph.operators import compose, cycle, neighborhood, unlabel, combination, edge, path
 except ModuleNotFoundError:
     compose = None
     cycle = None
     neighborhood = None
     unlabel = None
     combination = None
+    edge = None
+    path = None
 
 try:
     from abstractgraph_ml.feasibility import (
@@ -72,6 +74,25 @@ def _has_demo_feasibility_support():
             WithinRangeFeasibilityEstimatorFromNumericalFunction,
         )
     )
+
+
+def _build_demo_operator(operator_fn, /, *args, **kwargs):
+    """Build a curried abstractgraph operator using keyword-first style when available.
+
+    This keeps the demo pipeline resilient to operator API drift between older and
+    newer abstractgraph checkouts.
+    """
+    if operator_fn is None:
+        raise RuntimeError("Requested abstractgraph operator is unavailable.")
+    try:
+        return operator_fn(*args, **kwargs)
+    except Exception:
+        if kwargs and not args:
+            # Fallback for operators that still expect a single positional config
+            # argument rather than a named keyword.
+            if len(kwargs) == 1:
+                return operator_fn(next(iter(kwargs.values())))
+        raise
 
 
 def _resolve_pubchem_dir() -> Path:
@@ -546,6 +567,20 @@ def build_graph_generator(
             backend=feasibility_backend,
             n_jobs=feasibility_n_jobs,
         )
+        feasibility_edge = FeasibilityEstimatorFeatureCannotExist(
+            decomposition_function=_build_demo_operator(edge),
+            nbits=feasibility_valence_nbits,
+            parallel=feasibility_parallel,
+            backend=feasibility_backend,
+            n_jobs=feasibility_n_jobs,
+        )
+        feasibility_path = FeasibilityEstimatorFeatureCannotExist(
+            decomposition_function=_build_demo_operator(path, number_of_edges=2),
+            nbits=feasibility_valence_nbits,
+            parallel=feasibility_parallel,
+            backend=feasibility_backend,
+            n_jobs=feasibility_n_jobs,
+        )
         feasibility_valence = FeasibilityEstimatorFeatureCannotExist(
             decomposition_function=neighborhood(radius=feasibility_valence_radius),
             nbits=feasibility_valence_nbits,
@@ -554,7 +589,7 @@ def build_graph_generator(
             n_jobs=feasibility_n_jobs,
         )
         feasibility_cycle = FeasibilityEstimatorFeatureCannotExist(
-            decomposition_function=cycle(),
+            decomposition_function=_build_demo_operator(cycle),
             nbits=feasibility_cycle_nbits,
             parallel=feasibility_parallel,
             backend=feasibility_backend,
@@ -569,11 +604,13 @@ def build_graph_generator(
         )
         feasibility_estimator = FeasibilityEstimator(
             [
-                feasibility_size,
+                #feasibility_size,
+                feasibility_edge,
+                feasibility_path,
                 feasibility_valence,
                 feasibility_cycle,
-                feasibility_unlabeled_structure,
-                feasibility_cycle_composition,
+                #feasibility_unlabeled_structure,
+                #feasibility_cycle_composition,
             ]
         )
     else:

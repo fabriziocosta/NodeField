@@ -421,39 +421,70 @@ def _plot_decoder_diagnostics(
         heatmap_axis = axes[3]
         im3 = heatmap_axis.imshow(label_probs, vmin=0.0, vmax=1.0, cmap="magma", aspect="auto")
         heatmap_axis.set_title("Node-label probabilities\nrows=node ids, cols=labels")
-        heatmap_axis.set_xlabel("decoded label")
+        heatmap_axis.set_xlabel("decoded node label")
         heatmap_axis.set_ylabel("node id")
+        label_names: Optional[List[str]] = None
         if node_label_names is not None:
             label_names = [str(label) for label in node_label_names]
             if len(label_names) == label_probs.shape[1]:
                 heatmap_axis.set_xticks(np.arange(len(label_names)))
                 heatmap_axis.set_xticklabels(label_names, rotation=45, ha="right")
+            else:
+                label_names = None
+        if label_names is None:
+            heatmap_axis.set_xticks(np.arange(label_probs.shape[1]))
+            heatmap_axis.set_xticklabels([str(idx) for idx in range(label_probs.shape[1])], rotation=45, ha="right")
         node_ids = np.arange(label_probs.shape[0])
         heatmap_axis.set_yticks(node_ids)
         heatmap_axis.set_yticklabels([f"node {idx}" for idx in node_ids])
-        if (
-            node_labels is not None
-            and node_label_names is not None
-            and len(node_labels) == label_probs.shape[0]
-            and len(node_label_names) == label_probs.shape[1]
-        ):
-            label_to_col = {label: idx for idx, label in enumerate(node_label_names)}
+        chosen_cols: List[Optional[int]] = [None] * label_probs.shape[0]
+        if node_labels is not None and len(node_labels) == label_probs.shape[0]:
+            label_to_col = None
+            if node_label_names is not None and len(node_label_names) == label_probs.shape[1]:
+                label_to_col = {label: idx for idx, label in enumerate(node_label_names)}
             for row_idx, label in enumerate(node_labels):
                 if active_mask is not None and row_idx < len(active_mask) and not bool(active_mask[row_idx]):
                     continue
-                col_idx = label_to_col.get(label)
+                col_idx: Optional[int] = None
+                if label_to_col is not None:
+                    col_idx = label_to_col.get(label)
                 if col_idx is None:
+                    try:
+                        numeric_label = int(label)
+                    except (TypeError, ValueError):
+                        numeric_label = None
+                    if numeric_label is not None and 0 <= numeric_label < label_probs.shape[1]:
+                        col_idx = numeric_label
+                if col_idx is None and row_idx < label_probs.shape[0] and label_probs.shape[1] > 0:
+                    col_idx = int(np.argmax(label_probs[row_idx]))
+                chosen_cols[row_idx] = col_idx
+        else:
+            for row_idx in range(label_probs.shape[0]):
+                if active_mask is not None and row_idx < len(active_mask) and not bool(active_mask[row_idx]):
                     continue
-                # Mark the currently decoded label for each node.
-                heatmap_axis.scatter(
-                    [col_idx],
-                    [row_idx],
-                    marker="s",
-                    s=44,
-                    facecolors="none",
-                    edgecolors="cyan",
-                    linewidths=1.4,
-                )
+                if label_probs.shape[1] > 0:
+                    chosen_cols[row_idx] = int(np.argmax(label_probs[row_idx]))
+        for row_idx, col_idx in enumerate(chosen_cols):
+            if col_idx is None:
+                continue
+            heatmap_axis.scatter(
+                [col_idx],
+                [row_idx],
+                marker="x",
+                s=72,
+                color="black",
+                linewidths=2.6,
+                zorder=3,
+            )
+            heatmap_axis.scatter(
+                [col_idx],
+                [row_idx],
+                marker="x",
+                s=48,
+                color="white",
+                linewidths=1.4,
+                zorder=4,
+            )
         heatmap_axis.set_xticks(np.arange(-0.5, label_probs.shape[1], 1), minor=True)
         heatmap_axis.set_yticks(np.arange(-0.5, label_probs.shape[0], 1), minor=True)
         heatmap_axis.grid(which="minor", color="white", linestyle="-", linewidth=0.3, alpha=0.2)
@@ -1365,7 +1396,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                         generated_nodes.node_label_probabilities[graph_idx],
                         dtype=float,
                     ),
-                    node_label_names=getattr(self, "node_label_classes_", None),
+                    node_label_names=self._get_node_label_names(),
                     node_labels=None if predicted_node_labels_list is None else np.asarray(
                         predicted_node_labels_list[graph_idx],
                         dtype=object,
@@ -1525,6 +1556,52 @@ class ConditionalNodeFieldGraphGenerator(object):
             self.edge_label_classes_ = None
         if not hasattr(self, "edge_label_to_index_"):
             self.edge_label_to_index_ = None
+        self._restore_label_vocab_metadata_from_node_model()
+
+    def _restore_label_vocab_metadata_from_node_model(self) -> None:
+        node_model = getattr(self, "conditional_node_generator_model", None)
+        if node_model is None:
+            return
+
+        if getattr(self, "node_label_classes_", None) is None:
+            model_node_classes = getattr(node_model, "node_label_classes_", None)
+            if model_node_classes is not None:
+                self.node_label_classes_ = np.asarray(model_node_classes, dtype=object)
+        if getattr(self, "node_label_to_index_", None) is None:
+            model_node_to_index = getattr(node_model, "node_label_to_index_", None)
+            if model_node_to_index is not None:
+                self.node_label_to_index_ = dict(model_node_to_index)
+            elif getattr(self, "node_label_classes_", None) is not None:
+                self.node_label_to_index_ = {
+                    label: idx for idx, label in enumerate(self.node_label_classes_)
+                }
+
+        if getattr(self, "edge_label_classes_", None) is None:
+            model_edge_classes = getattr(node_model, "edge_label_classes_", None)
+            if model_edge_classes is not None:
+                self.edge_label_classes_ = np.asarray(model_edge_classes, dtype=object)
+        if getattr(self, "edge_label_to_index_", None) is None:
+            model_edge_to_index = getattr(node_model, "edge_label_to_index_", None)
+            if model_edge_to_index is not None:
+                self.edge_label_to_index_ = dict(model_edge_to_index)
+            elif getattr(self, "edge_label_classes_", None) is not None:
+                self.edge_label_to_index_ = {
+                    label: idx for idx, label in enumerate(self.edge_label_classes_)
+                }
+
+    def _get_node_label_names(self) -> Optional[np.ndarray]:
+        self._restore_label_vocab_metadata_from_node_model()
+        node_label_classes = getattr(self, "node_label_classes_", None)
+        if node_label_classes is None:
+            return None
+        return np.asarray(node_label_classes, dtype=object)
+
+    def _get_edge_label_names(self) -> Optional[np.ndarray]:
+        self._restore_label_vocab_metadata_from_node_model()
+        edge_label_classes = getattr(self, "edge_label_classes_", None)
+        if edge_label_classes is None:
+            return None
+        return np.asarray(edge_label_classes, dtype=object)
 
     def __setstate__(self, state: Dict[str, Any]) -> None:
         self.__dict__.update(state)
@@ -1613,7 +1690,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             edge_label_probabilities=edge_label_probabilities,
         )
 
-    def _oracle_candidate_score(
+    def _oracle_candidate_score_components(
         self,
         *,
         existence_mask: np.ndarray,
@@ -1623,7 +1700,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         edge_probability_matrix: np.ndarray,
         node_label_probabilities: Optional[np.ndarray],
         edge_label_probabilities: Optional[np.ndarray],
-    ) -> float:
+    ) -> Tuple[float, float, float, float]:
         existence_mask = np.asarray(existence_mask, dtype=bool)
         adj_mtx = np.asarray(adj_mtx, dtype=float)
         edge_probability_matrix = np.asarray(edge_probability_matrix, dtype=float)
@@ -1667,11 +1744,34 @@ class ConditionalNodeFieldGraphGenerator(object):
             if edge_label_terms:
                 edge_label_score = float(np.mean(edge_label_terms))
 
-        return (
+        total_score = (
             _ORACLE_EDGE_EXISTENCE_WEIGHT * edge_score
             + _ORACLE_NODE_LABEL_WEIGHT * node_score
             + _ORACLE_EDGE_LABEL_WEIGHT * edge_label_score
         )
+        return total_score, edge_score, node_score, edge_label_score
+
+    def _oracle_candidate_score(
+        self,
+        *,
+        existence_mask: np.ndarray,
+        adj_mtx: np.ndarray,
+        node_labels: np.ndarray,
+        edge_label_matrix: np.ndarray,
+        edge_probability_matrix: np.ndarray,
+        node_label_probabilities: Optional[np.ndarray],
+        edge_label_probabilities: Optional[np.ndarray],
+    ) -> float:
+        total_score, _, _, _ = self._oracle_candidate_score_components(
+            existence_mask=existence_mask,
+            adj_mtx=adj_mtx,
+            node_labels=node_labels,
+            edge_label_matrix=edge_label_matrix,
+            edge_probability_matrix=edge_probability_matrix,
+            node_label_probabilities=node_label_probabilities,
+            edge_label_probabilities=edge_label_probabilities,
+        )
+        return total_score
 
     def _get_oracle_node_violation_sets(
         self,
@@ -1726,7 +1826,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         node_label_probabilities: Optional[np.ndarray],
         forbidden_assignments: Sequence[ForbiddenNodeLabelAssignment],
     ) -> np.ndarray:
-        node_label_classes = getattr(self, "node_label_classes_", None)
+        node_label_classes = self._get_node_label_names()
         node_label_to_index = getattr(self, "node_label_to_index_", None)
         if (
             node_label_probabilities is None
@@ -1795,7 +1895,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         edge_label_probabilities: Optional[np.ndarray],
         forbidden_assignments: Sequence[ForbiddenEdgeLabelAssignment],
     ) -> np.ndarray:
-        edge_label_classes = getattr(self, "edge_label_classes_", None)
+        edge_label_classes = self._get_edge_label_names()
         edge_label_to_index = getattr(self, "edge_label_to_index_", None)
         if (
             edge_label_probabilities is None
@@ -1861,6 +1961,157 @@ class ConditionalNodeFieldGraphGenerator(object):
             repaired[edge[0], edge[1]] = selected_label
             repaired[edge[1], edge[0]] = selected_label
         return repaired
+
+    def _repair_labels_with_oracle(
+        self,
+        *,
+        existence_mask: np.ndarray,
+        adj_mtx: np.ndarray,
+        current_node_labels: np.ndarray,
+        current_edge_label_matrix: np.ndarray,
+        node_label_probabilities: Optional[np.ndarray],
+        edge_label_probabilities: Optional[np.ndarray],
+        forbidden_node_assignments: Sequence[ForbiddenNodeLabelAssignment],
+        forbidden_edge_assignments: Sequence[ForbiddenEdgeLabelAssignment],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        existence_mask = np.asarray(existence_mask, dtype=bool)
+        adj_mtx = np.asarray(adj_mtx, dtype=float)
+        repaired_node_labels = np.asarray(current_node_labels, dtype=object).copy()
+        repaired_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object).copy()
+
+        node_label_classes = self._get_node_label_names()
+        node_label_to_index = getattr(self, "node_label_to_index_", None)
+        edge_label_classes = self._get_edge_label_names()
+        edge_label_to_index = getattr(self, "edge_label_to_index_", None)
+
+        active_nodes = [
+            int(node_idx)
+            for node_idx in range(min(len(existence_mask), adj_mtx.shape[0]))
+            if bool(existence_mask[node_idx])
+        ]
+        active_edges = [
+            (i, j)
+            for idx_i, i in enumerate(active_nodes)
+            for j in active_nodes[idx_i + 1:]
+            if adj_mtx[i, j] != 0
+        ]
+
+        use_node_labels = (
+            node_label_probabilities is not None
+            and node_label_classes is not None
+            and node_label_to_index is not None
+            and len(node_label_classes) > 0
+        )
+        use_edge_labels = (
+            edge_label_probabilities is not None
+            and edge_label_classes is not None
+            and edge_label_to_index is not None
+            and len(edge_label_classes) > 0
+        )
+        if (not use_node_labels and not use_edge_labels) or (
+            not forbidden_node_assignments and not forbidden_edge_assignments
+        ):
+            return repaired_node_labels, repaired_edge_label_matrix
+
+        prob = pulp.LpProblem("OracleJointLabelRepair", pulp.LpMaximize)
+        y = {}
+        z = {}
+
+        node_normalizer = max(1, len(active_nodes))
+        edge_normalizer = max(1, len(active_edges))
+        objective_terms = []
+
+        if use_node_labels:
+            for node_idx in active_nodes:
+                for label_idx in range(len(node_label_classes)):
+                    y[(node_idx, label_idx)] = pulp.LpVariable(
+                        f"y_node_{node_idx}_{label_idx}",
+                        cat="Binary",
+                    )
+                    objective_terms.append(
+                        (_ORACLE_NODE_LABEL_WEIGHT / node_normalizer)
+                        * np.log(float(np.clip(node_label_probabilities[node_idx, label_idx], _ORACLE_PROBABILITY_EPS, 1.0)))
+                        * y[(node_idx, label_idx)]
+                    )
+            for node_idx in active_nodes:
+                prob += (
+                    pulp.lpSum(y[(node_idx, label_idx)] for label_idx in range(len(node_label_classes))) == 1
+                ), f"JointNodeLabelOneHot_{node_idx}"
+
+        if use_edge_labels:
+            for edge in active_edges:
+                for label_idx in range(len(edge_label_classes)):
+                    z[(edge, label_idx)] = pulp.LpVariable(
+                        f"z_edge_{edge[0]}_{edge[1]}_{label_idx}",
+                        cat="Binary",
+                    )
+                    objective_terms.append(
+                        (_ORACLE_EDGE_LABEL_WEIGHT / edge_normalizer)
+                        * np.log(float(np.clip(edge_label_probabilities[edge[0], edge[1], label_idx], _ORACLE_PROBABILITY_EPS, 1.0)))
+                        * z[(edge, label_idx)]
+                    )
+            for edge in active_edges:
+                prob += (
+                    pulp.lpSum(z[(edge, label_idx)] for label_idx in range(len(edge_label_classes))) == 1
+                ), f"JointEdgeLabelOneHot_{edge[0]}_{edge[1]}"
+
+        if not objective_terms:
+            return repaired_node_labels, repaired_edge_label_matrix
+        prob += pulp.lpSum(objective_terms)
+
+        if use_node_labels:
+            for cut_idx, (node_set, label_tuple) in enumerate(forbidden_node_assignments):
+                if any(node_idx not in active_nodes for node_idx in node_set):
+                    continue
+                label_indices = [node_label_to_index.get(label) for label in label_tuple]
+                if any(label_idx is None for label_idx in label_indices):
+                    continue
+                prob += (
+                    pulp.lpSum(
+                        y[(node_idx, int(label_idx))]
+                        for node_idx, label_idx in zip(node_set, label_indices)
+                    ) <= len(node_set) - 1
+                ), f"JointForbiddenNodeLabels_{cut_idx}"
+
+        if use_edge_labels:
+            active_edge_set = set(active_edges)
+            for cut_idx, (edge_set, label_tuple) in enumerate(forbidden_edge_assignments):
+                if any(edge not in active_edge_set for edge in edge_set):
+                    continue
+                label_indices = [edge_label_to_index.get(label) for label in label_tuple]
+                if any(label_idx is None for label_idx in label_indices):
+                    continue
+                prob += (
+                    pulp.lpSum(
+                        z[(edge, int(label_idx))]
+                        for edge, label_idx in zip(edge_set, label_indices)
+                    ) <= len(edge_set) - 1
+                ), f"JointForbiddenEdgeLabels_{cut_idx}"
+
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        if int(status) != pulp.LpStatusOptimal:
+            return repaired_node_labels, repaired_edge_label_matrix
+
+        if use_node_labels:
+            for node_idx in active_nodes:
+                for label_idx, label in enumerate(node_label_classes):
+                    value = pulp.value(y[(node_idx, label_idx)])
+                    if value is not None and int(round(float(value))) == 1:
+                        repaired_node_labels[node_idx] = label
+                        break
+
+        if use_edge_labels:
+            for edge in active_edges:
+                selected_label = None
+                for label_idx, label in enumerate(edge_label_classes):
+                    value = pulp.value(z[(edge, label_idx)])
+                    if value is not None and int(round(float(value))) == 1:
+                        selected_label = label
+                        break
+                repaired_edge_label_matrix[edge[0], edge[1]] = selected_label
+                repaired_edge_label_matrix[edge[1], edge[0]] = selected_label
+
+        return repaired_node_labels, repaired_edge_label_matrix
 
     def _sample_oracle_cuts_for_iteration(
         self,
@@ -1962,6 +2213,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             best_score = float("-inf")
             best_feasible_graph: Optional[nx.Graph] = None
             best_feasible_score = float("-inf")
+            current_total_log_score = float("nan")
+            current_edge_log_score = float("nan")
+            current_node_log_score = float("nan")
+            current_edge_label_log_score = float("nan")
             
             def plot_oracle_phase(
                 phase_name: str,
@@ -1972,6 +2227,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                 edge_violation_sets: Sequence[FrozenSet[Edge]],
                 new_node_cut_count: int = 0,
                 new_edge_label_cut_count: int = 0,
+                joint_label_changed: bool = False,
                 new_structural_cut_count: int = 0,
                 detail: Optional[str] = None,
             ) -> None:
@@ -1990,6 +2246,13 @@ class ConditionalNodeFieldGraphGenerator(object):
                         f"| violating_edge_sets={len(edge_violation_sets)} "
                         f"| new_node_cuts={int(new_node_cut_count)} "
                         f"| new_edge_label_cuts={int(new_edge_label_cut_count)} "
+                        f"| joint_label_changed={int(bool(joint_label_changed))} "
+                        f"| log_total={current_total_log_score:.3f} "
+                        f"| log_edge={current_edge_log_score:.3f} "
+                        f"| log_node={current_node_log_score:.3f} "
+                        f"| log_edge_label={current_edge_label_log_score:.3f} "
+                        f"| best_log_total={best_score:.3f} "
+                        f"| best_feasible_log_total={best_feasible_score:.3f} "
                         f"| new_structural_cuts={int(new_structural_cut_count)} "
                         f"| accepted_structural_cuts={len(accumulated_structural_cuts) + int(new_structural_cut_count)}"
                     ),
@@ -2000,21 +2263,22 @@ class ConditionalNodeFieldGraphGenerator(object):
                         node_label_probabilities[graph_idx],
                         dtype=float,
                     ),
-                    node_label_names=getattr(self, "node_label_classes_", None),
+                    node_label_names=self._get_node_label_names(),
                     node_labels=np.asarray(current_node_labels, dtype=object),
                     existence_mask=existence_mask,
                 )
             for _iteration_idx in range(self.max_oracle_iterations):
-                if predicted_edge_label_matrices is None:
-                    edge_labels = self.graph_decoder.decode_edge_labels(
-                        single_generated_nodes,
-                        [single_adj_mtx],
-                        predicted_edge_labels_list=None if predicted_edge_labels_list is None else [
-                            predicted_edge_labels_list[graph_idx]
-                        ],
-                        predicted_edge_label_matrices=None,
-                    )[0]
-                    current_edge_label_matrix = _edge_label_list_to_matrix(single_adj_mtx, edge_labels)
+                edge_labels = self.graph_decoder.decode_edge_labels(
+                    single_generated_nodes,
+                    [single_adj_mtx],
+                    predicted_edge_labels_list=None if predicted_edge_labels_list is None else [
+                        predicted_edge_labels_list[graph_idx]
+                    ],
+                    predicted_edge_label_matrices=None if predicted_edge_label_matrices is None else [
+                        current_edge_label_matrix
+                    ],
+                )[0]
+                current_edge_label_matrix = _edge_label_list_to_matrix(single_adj_mtx, edge_labels)
                 edge_labels = _edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix)
                 graph = _assemble_graph_job(
                     existence_mask,
@@ -2033,46 +2297,6 @@ class ConditionalNodeFieldGraphGenerator(object):
                     )
                     if assignment not in accumulated_node_label_forbidden
                 ]
-                node_label_detail = "no violating node sets"
-                if new_node_forbidden:
-                    node_label_detail = "relabel attempted"
-                    accumulated_node_label_forbidden.extend(new_node_forbidden)
-                    repaired_node_labels = self._repair_node_labels_with_oracle(
-                        existence_mask=existence_mask,
-                        current_node_labels=current_node_labels,
-                        node_label_probabilities=None if node_label_probabilities is None else np.asarray(
-                            node_label_probabilities[graph_idx],
-                            dtype=float,
-                        ),
-                        forbidden_assignments=accumulated_node_label_forbidden,
-                    )
-                    if not np.array_equal(repaired_node_labels, current_node_labels):
-                        node_label_detail = "labels changed"
-                        current_node_labels = repaired_node_labels
-                        graph = _assemble_graph_job(
-                            existence_mask,
-                            current_node_labels,
-                            np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
-                            np.asarray(single_adj_mtx, dtype=float),
-                        )
-                        current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
-                        current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
-                    else:
-                        node_label_detail = "relabel attempted but unchanged"
-                elif node_label_probabilities is None:
-                    node_label_detail = "node-label probabilities unavailable"
-                elif getattr(self, "node_label_classes_", None) is None or getattr(self, "node_label_to_index_", None) is None:
-                    node_label_detail = "legacy model missing node-label vocabulary"
-                plot_oracle_phase(
-                    "Node-Label Phase",
-                    adj_mtx=single_adj_mtx,
-                    decoded_graph=graph,
-                    node_violation_sets=current_node_violation_sets,
-                    edge_violation_sets=current_edge_violation_sets,
-                    new_node_cut_count=len(new_node_forbidden),
-                    detail=node_label_detail,
-                )
-
                 new_edge_label_forbidden = [
                     assignment
                     for assignment in self._forbidden_edge_label_assignment_from_sets(
@@ -2081,48 +2305,61 @@ class ConditionalNodeFieldGraphGenerator(object):
                     )
                     if assignment not in accumulated_edge_label_forbidden
                 ]
-                edge_label_detail = "no violating edge-label sets"
+                if new_node_forbidden:
+                    accumulated_node_label_forbidden.extend(new_node_forbidden)
                 if new_edge_label_forbidden:
-                    edge_label_detail = "relabel attempted"
                     accumulated_edge_label_forbidden.extend(new_edge_label_forbidden)
-                    repaired_edge_label_matrix = self._repair_edge_labels_with_oracle(
+
+                joint_label_detail = "no new label cuts"
+                repaired_node_labels = np.asarray(current_node_labels, dtype=object)
+                repaired_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object)
+                if new_node_forbidden or new_edge_label_forbidden:
+                    repaired_node_labels, repaired_edge_label_matrix = self._repair_labels_with_oracle(
                         existence_mask=existence_mask,
                         adj_mtx=single_adj_mtx,
+                        current_node_labels=current_node_labels,
                         current_edge_label_matrix=current_edge_label_matrix,
+                        node_label_probabilities=None if node_label_probabilities is None else np.asarray(
+                            node_label_probabilities[graph_idx],
+                            dtype=float,
+                        ),
                         edge_label_probabilities=None if edge_label_probabilities is None else np.asarray(
                             edge_label_probabilities[graph_idx],
                             dtype=float,
                         ),
-                        forbidden_assignments=accumulated_edge_label_forbidden,
+                        forbidden_node_assignments=accumulated_node_label_forbidden,
+                        forbidden_edge_assignments=accumulated_edge_label_forbidden,
                     )
-                    if not np.array_equal(repaired_edge_label_matrix, current_edge_label_matrix):
-                        edge_label_detail = "labels changed"
+                    if (
+                        not np.array_equal(repaired_node_labels, current_node_labels)
+                        or not np.array_equal(repaired_edge_label_matrix, current_edge_label_matrix)
+                    ):
+                        joint_label_detail = "labels changed"
+                        current_node_labels = repaired_node_labels
                         current_edge_label_matrix = repaired_edge_label_matrix
-                        graph = _assemble_graph_job(
-                            existence_mask,
-                            current_node_labels,
-                            np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
-                            np.asarray(single_adj_mtx, dtype=float),
-                        )
-                        current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
-                        current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
                     else:
-                        edge_label_detail = "relabel attempted but unchanged"
-                elif edge_label_probabilities is None:
-                    edge_label_detail = "edge-label probabilities unavailable"
-                elif getattr(self, "edge_label_classes_", None) is None or getattr(self, "edge_label_to_index_", None) is None:
-                    edge_label_detail = "legacy model missing edge-label vocabulary"
-                plot_oracle_phase(
-                    "Edge-Label Phase",
-                    adj_mtx=single_adj_mtx,
-                    decoded_graph=graph,
-                    node_violation_sets=current_node_violation_sets,
-                    edge_violation_sets=current_edge_violation_sets,
-                    new_edge_label_cut_count=len(new_edge_label_forbidden),
-                    detail=edge_label_detail,
-                )
+                        joint_label_detail = "relabel attempted but unchanged"
+                elif node_label_probabilities is None and edge_label_probabilities is None:
+                    joint_label_detail = "label probabilities unavailable"
+                elif (
+                    node_label_probabilities is not None
+                    and (self._get_node_label_names() is None or getattr(self, "node_label_to_index_", None) is None)
+                ) or (
+                    edge_label_probabilities is not None
+                    and (self._get_edge_label_names() is None or getattr(self, "edge_label_to_index_", None) is None)
+                ):
+                    joint_label_detail = "legacy model missing label vocabulary"
 
-                score = self._oracle_candidate_score(
+                graph = _assemble_graph_job(
+                    existence_mask,
+                    current_node_labels,
+                    np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
+                    np.asarray(single_adj_mtx, dtype=float),
+                )
+                current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+
+                score, edge_score, node_score, edge_label_score = self._oracle_candidate_score_components(
                     existence_mask=existence_mask,
                     adj_mtx=single_adj_mtx,
                     node_labels=current_node_labels,
@@ -2141,6 +2378,23 @@ class ConditionalNodeFieldGraphGenerator(object):
                         edge_label_probabilities[graph_idx],
                         dtype=float,
                     ),
+                )
+                current_total_log_score = float(score)
+                current_edge_log_score = float(edge_score)
+                current_node_log_score = float(node_score)
+                current_edge_label_log_score = float(edge_label_score)
+                plot_oracle_phase(
+                    "Joint-Label Phase",
+                    adj_mtx=single_adj_mtx,
+                    decoded_graph=graph,
+                    node_violation_sets=current_node_violation_sets,
+                    edge_violation_sets=current_edge_violation_sets,
+                    new_node_cut_count=len(new_node_forbidden),
+                    new_edge_label_cut_count=len(new_edge_label_forbidden),
+                    joint_label_changed=(
+                        joint_label_detail == "labels changed"
+                    ),
+                    detail=joint_label_detail,
                 )
                 if score > best_score:
                     best_score = score
@@ -2161,6 +2415,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         decoded_graph=graph,
                         node_violation_sets=current_node_violation_sets,
                         edge_violation_sets=current_edge_violation_sets,
+                        joint_label_changed=(joint_label_detail == "labels changed"),
                     )
                     break
                 if not new_node_forbidden and not new_edge_label_forbidden and not persistent_structural_cuts:
@@ -2170,6 +2425,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         decoded_graph=graph,
                         node_violation_sets=current_node_violation_sets,
                         edge_violation_sets=current_edge_violation_sets,
+                        joint_label_changed=(joint_label_detail == "labels changed"),
                     )
                     break
                 accumulated_structural_cuts.extend(persistent_structural_cuts)
@@ -2180,6 +2436,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         decoded_graph=graph,
                         node_violation_sets=current_node_violation_sets,
                         edge_violation_sets=current_edge_violation_sets,
+                        joint_label_changed=(joint_label_detail == "labels changed"),
                         new_structural_cut_count=len(persistent_structural_cuts),
                     )
                     break
@@ -2189,6 +2446,26 @@ class ConditionalNodeFieldGraphGenerator(object):
                     accumulated_cuts=accumulated_structural_cuts,
                     start_iteration_idx=_iteration_idx + 1,
                 )
+                pre_structural_node_labels = np.asarray(current_node_labels, dtype=object).copy()
+                pre_structural_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object).copy()
+                relabeled_node_labels, relabeled_edge_label_matrix = self._repair_labels_with_oracle(
+                    existence_mask=existence_mask,
+                    adj_mtx=single_adj_mtx,
+                    current_node_labels=current_node_labels,
+                    current_edge_label_matrix=current_edge_label_matrix,
+                    node_label_probabilities=None if node_label_probabilities is None else np.asarray(
+                        node_label_probabilities[graph_idx],
+                        dtype=float,
+                    ),
+                    edge_label_probabilities=None if edge_label_probabilities is None else np.asarray(
+                        edge_label_probabilities[graph_idx],
+                        dtype=float,
+                    ),
+                    forbidden_node_assignments=accumulated_node_label_forbidden,
+                    forbidden_edge_assignments=accumulated_edge_label_forbidden,
+                )
+                current_node_labels = relabeled_node_labels
+                current_edge_label_matrix = relabeled_edge_label_matrix
                 structural_graph = _assemble_graph_job(
                     existence_mask,
                     current_node_labels,
@@ -2209,6 +2486,10 @@ class ConditionalNodeFieldGraphGenerator(object):
                     decoded_graph=structural_graph,
                     node_violation_sets=structural_node_violation_sets,
                     edge_violation_sets=structural_edge_violation_sets,
+                    joint_label_changed=(
+                        not np.array_equal(pre_structural_node_labels, relabeled_node_labels)
+                        or not np.array_equal(pre_structural_edge_label_matrix, relabeled_edge_label_matrix)
+                    ),
                     new_structural_cut_count=len(persistent_structural_cuts),
                 )
             final_graph = best_feasible_graph if best_feasible_graph is not None else best_graph
