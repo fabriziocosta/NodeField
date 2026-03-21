@@ -480,6 +480,230 @@ class ConditionalNodeFieldGraphDecoder(object):
         negative = int(len(targets) - positive)
         return positive, negative
 
+    def _sample_pair_indices(
+        self,
+        targets: List[int],
+        sample_count: int,
+        locality_sampling_strategy: str,
+        locality_target_positive_ratio: Optional[float],
+    ) -> np.ndarray:
+        num_pairs = len(targets)
+        if sample_count <= 0:
+            return np.asarray([], dtype=int)
+        if sample_count >= num_pairs:
+            return np.arange(num_pairs, dtype=int)
+
+        targets_array = np.asarray(targets, dtype=int)
+        if locality_sampling_strategy == "uniform":
+            return np.random.choice(num_pairs, sample_count, replace=False)
+
+        pos_indices = np.flatnonzero(targets_array == 1)
+        neg_indices = np.flatnonzero(targets_array == 0)
+        if len(pos_indices) == 0 or len(neg_indices) == 0:
+            return np.random.choice(num_pairs, sample_count, replace=False)
+
+        if locality_sampling_strategy == "stratified_target":
+            target_positive_ratio = locality_target_positive_ratio
+            if target_positive_ratio is None:
+                raise ValueError(
+                    "locality_sampling_strategy='stratified_target' requires locality_target_positive_ratio."
+                )
+        else:
+            target_positive_ratio = len(pos_indices) / float(num_pairs)
+
+        num_pos = int(round(sample_count * target_positive_ratio))
+        num_pos = max(0, min(num_pos, sample_count))
+        num_neg = sample_count - num_pos
+
+        num_pos = min(num_pos, len(pos_indices))
+        num_neg = min(num_neg, len(neg_indices))
+
+        remaining = sample_count - (num_pos + num_neg)
+        if remaining > 0:
+            extra_pos = min(remaining, len(pos_indices) - num_pos)
+            num_pos += extra_pos
+            remaining -= extra_pos
+        if remaining > 0:
+            extra_neg = min(remaining, len(neg_indices) - num_neg)
+            num_neg += extra_neg
+
+        sampled_pos = np.random.choice(pos_indices, num_pos, replace=False) if num_pos > 0 else np.asarray([], dtype=int)
+        sampled_neg = np.random.choice(neg_indices, num_neg, replace=False) if num_neg > 0 else np.asarray([], dtype=int)
+        sampled = np.concatenate([sampled_pos, sampled_neg])
+        np.random.shuffle(sampled)
+        return sampled
+
+    def adj_mtx_to_targets(
+        self,
+        adj_mtx_list: List[np.ndarray],
+        node_encodings_list: List[np.ndarray],
+        locality_sample_fraction: float,
+        negative_sample_factor: int = 1,
+        locality_sampling_strategy: str = "stratified_preserve",
+        locality_target_positive_ratio: Optional[float] = None,
+        force_bi_directional_edges: bool = True,
+        is_training: bool = False,
+        horizon: int = 1,
+        supervision_name: str = "locality",
+    ) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
+        if horizon < 1:
+            raise ValueError("horizon must be >= 1")
+        valid_sampling_strategies = {"uniform", "stratified_preserve", "stratified_target"}
+        if locality_sampling_strategy not in valid_sampling_strategies:
+            raise ValueError(
+                f"locality_sampling_strategy must be one of {sorted(valid_sampling_strategies)} "
+                f"(got {locality_sampling_strategy!r})."
+            )
+        if locality_target_positive_ratio is not None and not 0.0 < locality_target_positive_ratio < 1.0:
+            raise ValueError("locality_target_positive_ratio must be between 0 and 1 when provided.")
+
+        all_targets = []
+        all_pairs = []
+        for g_idx, (adj_mtx, encodings) in enumerate(zip(adj_mtx_list, node_encodings_list)):
+            n_nodes = adj_mtx.shape[0]
+            graph = nx.from_numpy_array(adj_mtx, create_using=nx.Graph)
+            for i in range(n_nodes):
+                lengths = nx.single_source_shortest_path_length(graph, i, cutoff=horizon)
+                pos_neighbors = [j for j, dist in lengths.items() if j != i and dist <= horizon]
+                for j in pos_neighbors:
+                    all_targets.append(1)
+                    all_pairs.append((g_idx, i, j))
+                    if force_bi_directional_edges:
+                        all_targets.append(1)
+                        all_pairs.append((g_idx, j, i))
+                num_pos = len(pos_neighbors) * (2 if force_bi_directional_edges else 1)
+                num_neg_samples = int(round(negative_sample_factor * num_pos))
+                if num_neg_samples <= 0:
+                    continue
+                candidate_indices = [k for k in range(n_nodes) if k != i and k not in lengths]
+                if not candidate_indices:
+                    continue
+                distances = np.array([np.linalg.norm(encodings[i] - encodings[k]) for k in candidate_indices])
+                sorted_candidate_indices = np.argsort(distances)
+                selected_negatives = [candidate_indices[idx] for idx in sorted_candidate_indices[:num_neg_samples]]
+                for k in selected_negatives:
+                    all_targets.append(0)
+                    all_pairs.append((g_idx, i, k))
+                    if force_bi_directional_edges:
+                        all_targets.append(0)
+                        all_pairs.append((g_idx, k, i))
+
+        pos_before, neg_before = self._target_stats(all_targets)
+        if is_training and locality_sample_fraction < 1.0:
+            num_pairs = len(all_pairs)
+            num_pairs_to_use = int(round(num_pairs * locality_sample_fraction))
+            if self.verbose and num_pairs > 0:
+                print(
+                    f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
+                    f"sampling {num_pairs_to_use} pairs ({locality_sample_fraction:.2%}) "
+                    f"from {num_pairs} total pairs "
+                    f"(pos={pos_before}, neg={neg_before}, "
+                    f"negative_sample_factor={negative_sample_factor}, "
+                    f"sampling_strategy={locality_sampling_strategy}"
+                    f"{'' if locality_target_positive_ratio is None else f', target_positive_ratio={locality_target_positive_ratio:.3f}'})."
+                )
+            if 0 < num_pairs_to_use < num_pairs:
+                indices = self._sample_pair_indices(
+                    all_targets,
+                    num_pairs_to_use,
+                    locality_sampling_strategy=locality_sampling_strategy,
+                    locality_target_positive_ratio=locality_target_positive_ratio,
+                )
+                all_targets = [all_targets[i] for i in indices]
+                all_pairs = [all_pairs[i] for i in indices]
+            elif num_pairs_to_use == 0 and num_pairs > 0:
+                if self.verbose:
+                    print(
+                        f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
+                        f"warning - num_pairs_to_use is 0 with locality_sample_fraction="
+                        f"{locality_sample_fraction} and num_pairs={num_pairs}. No pairs will be used."
+                    )
+                return np.array([]), []
+            elif num_pairs_to_use == 0 and num_pairs == 0:
+                return np.array([]), []
+
+        if self.verbose and len(all_targets) > 0:
+            pos_after, neg_after = self._target_stats(all_targets)
+            ratio_after = pos_after / float(pos_after + neg_after)
+            print(
+                f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
+                f"using pos={pos_after}, neg={neg_after}, positive_ratio={ratio_after:.3f}."
+            )
+
+        return np.array(all_targets), all_pairs
+
+    def compute_edge_supervision(
+        self,
+        graphs: List[nx.Graph],
+        node_encodings_list: List[np.ndarray],
+        locality_sample_fraction: float,
+        negative_sample_factor: int = 1,
+        locality_sampling_strategy: str = "stratified_preserve",
+        locality_target_positive_ratio: Optional[float] = None,
+        horizon: int = 1,
+        supervision_name: str = "locality",
+    ) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
+        adj = self.graphs_to_adjacency_matrices(graphs)
+        return self.adj_mtx_to_targets(
+            adj,
+            node_encodings_list,
+            locality_sample_fraction=locality_sample_fraction,
+            negative_sample_factor=negative_sample_factor,
+            locality_sampling_strategy=locality_sampling_strategy,
+            locality_target_positive_ratio=locality_target_positive_ratio,
+            is_training=True,
+            horizon=horizon,
+            supervision_name=supervision_name,
+        )
+
+    def encodings_and_adj_mtx_to_dataset(
+        self,
+        node_encodings_list: List[np.ndarray],
+        adj_mtx_list: List[np.ndarray],
+        locality_sample_fraction: float,
+        horizon: int = 1,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        y, pair_indices = self.adj_mtx_to_targets(
+            adj_mtx_list,
+            node_encodings_list,
+            locality_sample_fraction=locality_sample_fraction,
+            is_training=True,
+            horizon=horizon,
+        )
+        X = self.encodings_to_instances(node_encodings_list, pair_indices)
+        return X, y
+
+    def encodings_to_instances(
+        self,
+        node_encodings_list: List[np.ndarray],
+        pair_indices: Optional[List[Tuple[int, int, int]]] = None,
+        use_graph_encoding: bool = False,
+    ) -> np.ndarray:
+        instances = []
+        if pair_indices is not None:
+            for g_idx, i, j in pair_indices:
+                encodings = node_encodings_list[g_idx]
+                if use_graph_encoding:
+                    graph_encoding = np.sum(encodings, axis=0)
+                    instance = np.hstack([graph_encoding, encodings[i], encodings[j]])
+                else:
+                    instance = np.hstack([encodings[i], encodings[j]])
+                instances.append(instance)
+        else:
+            for _, encodings in enumerate(node_encodings_list):
+                if use_graph_encoding:
+                    graph_encoding = np.sum(encodings, axis=0)
+                n_nodes = encodings.shape[0]
+                for i in range(n_nodes):
+                    for j in range(n_nodes):
+                        if i != j:
+                            if use_graph_encoding:
+                                instance = np.hstack([graph_encoding, encodings[i], encodings[j]])
+                            else:
+                                instance = np.hstack([encodings[i], encodings[j]])
+                            instances.append(instance)
+        return np.vstack(instances)
+
     def get_degrees(self, node_degree_predictions: np.ndarray, node_presence_mask: np.ndarray) -> List[int]:
         degrees = np.rint(np.asarray(node_degree_predictions, dtype=float)).astype(np.int64)
         mask = np.asarray(node_presence_mask, dtype=bool)
