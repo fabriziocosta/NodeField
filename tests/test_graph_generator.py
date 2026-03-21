@@ -536,6 +536,28 @@ class _OracleOnceEstimator:
         return [[]]
 
 
+class _LabelAwareOracleEstimator:
+    def __init__(self, edge_sets_per_call=None, node_sets_per_call=None):
+        self.edge_sets_per_call = list(edge_sets_per_call or [])
+        self.node_sets_per_call = list(node_sets_per_call or [])
+        self.edge_calls = 0
+        self.node_calls = 0
+
+    def violating_edge_sets(self, graphs):
+        del graphs
+        self.edge_calls += 1
+        if self.edge_sets_per_call:
+            return [self.edge_sets_per_call.pop(0)]
+        return [[]]
+
+    def violating_node_labels_sets(self, graphs):
+        del graphs
+        self.node_calls += 1
+        if self.node_sets_per_call:
+            return [self.node_sets_per_call.pop(0)]
+        return [[]]
+
+
 def _oracle_generated_batch():
     return GeneratedNodeBatch(
         node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
@@ -563,6 +585,45 @@ def _oracle_generated_batch():
                 dtype=object,
             )
         ],
+    )
+
+
+def _oracle_label_generated_batch(
+    *,
+    node_labels,
+    edge_label_matrix,
+    node_label_probabilities=None,
+    edge_label_probabilities=None,
+):
+    return GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[1.0, 1.0]], dtype=float),
+        node_labels=[np.asarray(node_labels, dtype=object)],
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.95],
+                    [0.95, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+        edge_existence_probabilities=[
+            np.asarray(
+                [
+                    [0.0, 0.95],
+                    [0.95, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+        edge_label_matrices=[np.asarray(edge_label_matrix, dtype=object)],
+        node_label_probabilities=None
+        if node_label_probabilities is None
+        else [np.asarray(node_label_probabilities, dtype=float)],
+        edge_label_probabilities=None
+        if edge_label_probabilities is None
+        else [np.asarray(edge_label_probabilities, dtype=float)],
     )
 
 
@@ -1156,6 +1217,134 @@ def test_decode_generated_nodes_relaxes_oracle_cuts_to_zero_on_last_attempt(monk
 
     assert len(decoded) == 1
     assert active_cut_counts[-2:] == [1, 0]
+
+
+def test_decode_generated_nodes_repairs_node_labels_before_structural_cuts():
+    estimator = _LabelAwareOracleEstimator(
+        edge_sets_per_call=[[], []],
+        node_sets_per_call=[[[0]], []],
+    )
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.feasibility_estimator = estimator
+    generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
+    generator.node_label_to_index_ = {"C": 0, "O": 1}
+    generator.edge_label_classes_ = np.asarray(["-"], dtype=object)
+    generator.edge_label_to_index_ = {"-": 0}
+
+    decoded = generator._decode_generated_nodes(
+        _oracle_label_generated_batch(
+            node_labels=["C", "C"],
+            edge_label_matrix=[[None, "-"], ["-", None]],
+            node_label_probabilities=[
+                [0.05, 0.95],
+                [0.90, 0.10],
+            ],
+            edge_label_probabilities=[
+                [[1.0], [1.0]],
+                [[1.0], [1.0]],
+            ],
+        )
+    )
+
+    assert len(decoded) == 1
+    assert decoded[0].nodes[0]["label"] == "O"
+    assert sorted(decoded[0].edges()) == [(0, 1)]
+    assert estimator.node_calls >= 2
+
+
+def test_decode_generated_nodes_repairs_edge_labels_before_structural_cuts():
+    estimator = _LabelAwareOracleEstimator(
+        edge_sets_per_call=[[[(0, 1)]], []],
+        node_sets_per_call=[[], []],
+    )
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.feasibility_estimator = estimator
+    generator.node_label_classes_ = np.asarray(["C"], dtype=object)
+    generator.node_label_to_index_ = {"C": 0}
+    generator.edge_label_classes_ = np.asarray(["-", "="], dtype=object)
+    generator.edge_label_to_index_ = {"-": 0, "=": 1}
+
+    decoded = generator._decode_generated_nodes(
+        _oracle_label_generated_batch(
+            node_labels=["C", "C"],
+            edge_label_matrix=[[None, "-"], ["-", None]],
+            node_label_probabilities=[
+                [1.0],
+                [1.0],
+            ],
+            edge_label_probabilities=[
+                [[1.0, 0.0], [0.05, 0.95]],
+                [[0.05, 0.95], [1.0, 0.0]],
+            ],
+        )
+    )
+
+    assert len(decoded) == 1
+    assert decoded[0].edges[(0, 1)]["label"] == "="
+    assert sorted(decoded[0].edges()) == [(0, 1)]
+    assert estimator.edge_calls >= 2
+
+
+def test_decode_generated_nodes_skips_node_label_repair_without_probabilities():
+    estimator = _LabelAwareOracleEstimator(
+        edge_sets_per_call=[[], []],
+        node_sets_per_call=[[[0]], [[0]]],
+    )
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False, max_oracle_iterations=2)
+    generator.feasibility_estimator = estimator
+    generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
+    generator.node_label_to_index_ = {"C": 0, "O": 1}
+
+    decoded = generator._decode_generated_nodes(
+        _oracle_label_generated_batch(
+            node_labels=["C", "C"],
+            edge_label_matrix=[[None, "-"], ["-", None]],
+            node_label_probabilities=None,
+            edge_label_probabilities=None,
+        )
+    )
+
+    assert len(decoded) == 1
+    assert decoded[0].nodes[0]["label"] == "C"
+
+
+def test_oracle_candidate_score_prefers_higher_probability_feasible_labels():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.node_label_to_index_ = {"C": 0, "O": 1}
+    generator.edge_label_to_index_ = {"-": 0, "=": 1}
+
+    existence_mask = np.asarray([True, True], dtype=bool)
+    adj_mtx = np.asarray([[0, 1], [1, 0]], dtype=float)
+    edge_probs = np.asarray([[0.0, 0.9], [0.9, 0.0]], dtype=float)
+    node_label_probs = np.asarray([[0.1, 0.9], [0.8, 0.2]], dtype=float)
+    edge_label_probs = np.asarray(
+        [
+            [[1.0, 0.0], [0.8, 0.2]],
+            [[0.8, 0.2], [1.0, 0.0]],
+        ],
+        dtype=float,
+    )
+
+    score_high = generator._oracle_candidate_score(
+        existence_mask=existence_mask,
+        adj_mtx=adj_mtx,
+        node_labels=np.asarray(["O", "C"], dtype=object),
+        edge_label_matrix=np.asarray([[None, "-"], ["-", None]], dtype=object),
+        edge_probability_matrix=edge_probs,
+        node_label_probabilities=node_label_probs,
+        edge_label_probabilities=edge_label_probs,
+    )
+    score_low = generator._oracle_candidate_score(
+        existence_mask=existence_mask,
+        adj_mtx=adj_mtx,
+        node_labels=np.asarray(["C", "C"], dtype=object),
+        edge_label_matrix=np.asarray([[None, "="], ["=", None]], dtype=object),
+        edge_probability_matrix=edge_probs,
+        node_label_probabilities=node_label_probs,
+        edge_label_probabilities=edge_label_probs,
+    )
+
+    assert score_high > score_low
 
 
 def test_decode_generated_nodes_falls_back_when_oracle_method_missing():

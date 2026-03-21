@@ -13,10 +13,6 @@ import networkx as nx
 import random
 import pulp
 import dill as pickle
-try:
-    import matplotlib.pyplot as plt
-except Exception:  # pragma: no cover
-    plt = None
 from .runtime_utils import get_runtime_logger, timeit, verbose_log
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union, FrozenSet, Iterable, Callable
 from .conditional_node_field_generator import (
@@ -29,6 +25,13 @@ from .conditional_node_field_generator import (
 DEFAULT_DUMMY_NODE_LABEL = "__dummy_node_label__"
 logger = get_runtime_logger(__name__)
 Edge = Tuple[int, int]
+NodeSet = Tuple[int, ...]
+ForbiddenNodeLabelAssignment = Tuple[NodeSet, Tuple[Any, ...]]
+ForbiddenEdgeLabelAssignment = Tuple[Tuple[Edge, ...], Tuple[Any, ...]]
+_ORACLE_PROBABILITY_EPS = 1e-6
+_ORACLE_EDGE_EXISTENCE_WEIGHT = 1.0
+_ORACLE_NODE_LABEL_WEIGHT = 1.0
+_ORACLE_EDGE_LABEL_WEIGHT = 1.0
 
 
 def _format_elapsed_seconds(seconds: float) -> str:
@@ -112,6 +115,56 @@ def _normalize_violating_edge_sets(
         seen.add(frozen)
         normalized.append(frozen)
     return normalized
+
+
+def _normalize_violating_node_sets(
+    node_sets: Iterable[Iterable[Any]],
+    *,
+    n_nodes: Optional[int] = None,
+) -> List[NodeSet]:
+    normalized: List[NodeSet] = []
+    seen: set[NodeSet] = set()
+    for node_set in node_sets:
+        canonical_nodes = []
+        for node in node_set:
+            try:
+                node_idx = int(node)
+            except (TypeError, ValueError):
+                continue
+            if n_nodes is not None and (node_idx < 0 or node_idx >= int(n_nodes)):
+                continue
+            canonical_nodes.append(node_idx)
+        canonical = tuple(sorted(set(canonical_nodes)))
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        normalized.append(canonical)
+    return normalized
+
+
+def _edge_label_matrix_to_list(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
+    edge_labels = []
+    for i in range(adj_mtx.shape[0]):
+        for j in range(i + 1, adj_mtx.shape[1]):
+            if adj_mtx[i, j] != 0:
+                edge_labels.append(edge_label_matrix[i, j])
+    return np.asarray(edge_labels, dtype=object)
+
+
+def _edge_label_list_to_matrix(
+    adj_mtx: np.ndarray,
+    edge_labels: Sequence[Any],
+) -> np.ndarray:
+    edge_label_matrix = np.full(adj_mtx.shape, None, dtype=object)
+    edge_idx = 0
+    for i in range(adj_mtx.shape[0]):
+        for j in range(i + 1, adj_mtx.shape[1]):
+            if adj_mtx[i, j] != 0:
+                edge_label = edge_labels[edge_idx] if edge_idx < len(edge_labels) else None
+                edge_label_matrix[i, j] = edge_label
+                edge_label_matrix[j, i] = edge_label
+                edge_idx += 1
+    return edge_label_matrix
 
 
 @dataclass(frozen=True)
@@ -348,10 +401,7 @@ def _plot_decoder_diagnostics(
         axes[3].set_title("Decoded graph")
     axes[3].set_axis_off()
 
-    suffix = ""
-    if normalized_violations:
-        suffix = f" | violating_sets={len(normalized_violations)}"
-    fig.suptitle(f"{title}{suffix}")
+    fig.suptitle(title)
     plt.tight_layout()
     plt.show()
     plt.close(fig)
@@ -606,9 +656,16 @@ class ConditionalNodeFieldGraphDecoder(object):
         u = {i: pulp.LpVariable(f"u_{i}", lowBound=0, cat="Integer") for i in range(n)}
         v = {i: pulp.LpVariable(f"v_{i}", lowBound=0, cat="Integer") for i in range(n)}
 
-        # Objective
+        # Objective: maximize binary log-likelihood of edge existence plus degree slack penalty.
+        edge_log_likelihood_terms = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                edge_prob = float(np.clip(prob_matrix[i, j], _ORACLE_PROBABILITY_EPS, 1.0 - _ORACLE_PROBABILITY_EPS))
+                edge_log_likelihood_terms.append(
+                    (np.log(edge_prob) - np.log(1.0 - edge_prob)) * x[(i, j)]
+                )
         prob += (
-            pulp.lpSum(prob_matrix[i, j] * x[(i, j)] for i in range(n) for j in range(i+1, n))
+            pulp.lpSum(edge_log_likelihood_terms)
             - self.degree_slack_penalty * pulp.lpSum(u[i] + v[i] for i in range(n))
         )
 
@@ -1450,6 +1507,21 @@ class ConditionalNodeFieldGraphGenerator(object):
         edge_label_matrices = None if generated_nodes.edge_label_matrices is None else [
             np.asarray(generated_nodes.edge_label_matrices[graph_idx], dtype=object)
         ]
+        node_label_logits = None if generated_nodes.node_label_logits is None else [
+            np.asarray(generated_nodes.node_label_logits[graph_idx], dtype=float)
+        ]
+        node_label_probabilities = None if generated_nodes.node_label_probabilities is None else [
+            np.asarray(generated_nodes.node_label_probabilities[graph_idx], dtype=float)
+        ]
+        edge_existence_probabilities = None if generated_nodes.edge_existence_probabilities is None else [
+            np.asarray(generated_nodes.edge_existence_probabilities[graph_idx], dtype=float)
+        ]
+        edge_label_logits = None if generated_nodes.edge_label_logits is None else [
+            np.asarray(generated_nodes.edge_label_logits[graph_idx], dtype=float)
+        ]
+        edge_label_probabilities = None if generated_nodes.edge_label_probabilities is None else [
+            np.asarray(generated_nodes.edge_label_probabilities[graph_idx], dtype=float)
+        ]
         return GeneratedNodeBatch(
             node_embeddings_list=node_embeddings_list,
             node_presence_mask=node_presence_mask,
@@ -1457,7 +1529,255 @@ class ConditionalNodeFieldGraphGenerator(object):
             node_labels=node_labels,
             edge_probability_matrices=edge_probability_matrices,
             edge_label_matrices=edge_label_matrices,
+            node_label_logits=node_label_logits,
+            node_label_probabilities=node_label_probabilities,
+            edge_existence_probabilities=edge_existence_probabilities,
+            edge_label_logits=edge_label_logits,
+            edge_label_probabilities=edge_label_probabilities,
         )
+
+    def _oracle_candidate_score(
+        self,
+        *,
+        existence_mask: np.ndarray,
+        adj_mtx: np.ndarray,
+        node_labels: np.ndarray,
+        edge_label_matrix: np.ndarray,
+        edge_probability_matrix: np.ndarray,
+        node_label_probabilities: Optional[np.ndarray],
+        edge_label_probabilities: Optional[np.ndarray],
+    ) -> float:
+        existence_mask = np.asarray(existence_mask, dtype=bool)
+        adj_mtx = np.asarray(adj_mtx, dtype=float)
+        edge_probability_matrix = np.asarray(edge_probability_matrix, dtype=float)
+        active_indices = np.where(existence_mask[: adj_mtx.shape[0]])[0]
+
+        edge_terms = []
+        for idx_i, i in enumerate(active_indices):
+            for j in active_indices[idx_i + 1:]:
+                edge_prob = float(np.clip(edge_probability_matrix[i, j], _ORACLE_PROBABILITY_EPS, 1.0 - _ORACLE_PROBABILITY_EPS))
+                edge_terms.append(np.log(edge_prob) if adj_mtx[i, j] != 0 else np.log(1.0 - edge_prob))
+        edge_score = float(np.mean(edge_terms)) if edge_terms else 0.0
+
+        node_score = 0.0
+        if node_label_probabilities is not None and self.node_label_to_index_ is not None:
+            node_terms = []
+            for node_idx in active_indices:
+                label = node_labels[node_idx]
+                label_idx = self.node_label_to_index_.get(label)
+                if label_idx is None:
+                    continue
+                label_prob = float(np.clip(node_label_probabilities[node_idx, label_idx], _ORACLE_PROBABILITY_EPS, 1.0))
+                node_terms.append(np.log(label_prob))
+            if node_terms:
+                node_score = float(np.mean(node_terms))
+
+        edge_label_score = 0.0
+        if edge_label_probabilities is not None and self.edge_label_to_index_ is not None:
+            edge_label_terms = []
+            for idx_i, i in enumerate(active_indices):
+                for j in active_indices[idx_i + 1:]:
+                    if adj_mtx[i, j] == 0:
+                        continue
+                    label = edge_label_matrix[i, j]
+                    label_idx = self.edge_label_to_index_.get(label)
+                    if label_idx is None:
+                        continue
+                    label_prob = float(np.clip(edge_label_probabilities[i, j, label_idx], _ORACLE_PROBABILITY_EPS, 1.0))
+                    edge_label_terms.append(np.log(label_prob))
+            if edge_label_terms:
+                edge_label_score = float(np.mean(edge_label_terms))
+
+        return (
+            _ORACLE_EDGE_EXISTENCE_WEIGHT * edge_score
+            + _ORACLE_NODE_LABEL_WEIGHT * node_score
+            + _ORACLE_EDGE_LABEL_WEIGHT * edge_label_score
+        )
+
+    def _get_oracle_node_violation_sets(
+        self,
+        graph: nx.Graph,
+        *,
+        n_nodes: int,
+    ) -> List[NodeSet]:
+        if self.feasibility_estimator is None or not hasattr(self.feasibility_estimator, "violating_node_labels_sets"):
+            return []
+        violating_sets_raw = self.feasibility_estimator.violating_node_labels_sets([graph])[0]
+        return _normalize_violating_node_sets(violating_sets_raw, n_nodes=n_nodes)
+
+    def _get_oracle_edge_violation_sets(
+        self,
+        graph: nx.Graph,
+        *,
+        n_nodes: int,
+    ) -> List[FrozenSet[Edge]]:
+        if self.feasibility_estimator is None or not hasattr(self.feasibility_estimator, "violating_edge_sets"):
+            return []
+        violating_sets_raw = self.feasibility_estimator.violating_edge_sets([graph])[0]
+        return _normalize_violating_edge_sets(violating_sets_raw, n_nodes=n_nodes)
+
+    @staticmethod
+    def _forbidden_node_label_assignment_from_sets(
+        node_violation_sets: Sequence[NodeSet],
+        node_labels: np.ndarray,
+    ) -> List[ForbiddenNodeLabelAssignment]:
+        forbidden_assignments: List[ForbiddenNodeLabelAssignment] = []
+        for node_set in node_violation_sets:
+            labels = tuple(node_labels[node_idx] for node_idx in node_set)
+            forbidden_assignments.append((tuple(node_set), labels))
+        return forbidden_assignments
+
+    @staticmethod
+    def _forbidden_edge_label_assignment_from_sets(
+        edge_violation_sets: Sequence[FrozenSet[Edge]],
+        edge_label_matrix: np.ndarray,
+    ) -> List[ForbiddenEdgeLabelAssignment]:
+        forbidden_assignments: List[ForbiddenEdgeLabelAssignment] = []
+        for edge_set in edge_violation_sets:
+            edges = tuple(sorted(edge_set))
+            labels = tuple(edge_label_matrix[i, j] for i, j in edges)
+            forbidden_assignments.append((edges, labels))
+        return forbidden_assignments
+
+    def _repair_node_labels_with_oracle(
+        self,
+        *,
+        existence_mask: np.ndarray,
+        current_node_labels: np.ndarray,
+        node_label_probabilities: Optional[np.ndarray],
+        forbidden_assignments: Sequence[ForbiddenNodeLabelAssignment],
+    ) -> np.ndarray:
+        if (
+            node_label_probabilities is None
+            or self.node_label_classes_ is None
+            or self.node_label_to_index_ is None
+            or len(self.node_label_classes_) == 0
+            or not forbidden_assignments
+        ):
+            return np.asarray(current_node_labels, dtype=object)
+
+        affected_nodes = sorted({
+            int(node_idx)
+            for node_set, _ in forbidden_assignments
+            for node_idx in node_set
+            if int(node_idx) < len(existence_mask) and bool(existence_mask[int(node_idx)])
+        })
+        if not affected_nodes:
+            return np.asarray(current_node_labels, dtype=object)
+
+        prob = pulp.LpProblem("OracleNodeLabelRepair", pulp.LpMaximize)
+        y = {
+            (node_idx, label_idx): pulp.LpVariable(f"y_node_{node_idx}_{label_idx}", cat="Binary")
+            for node_idx in affected_nodes
+            for label_idx in range(len(self.node_label_classes_))
+        }
+        prob += pulp.lpSum(
+            np.log(float(np.clip(node_label_probabilities[node_idx, label_idx], _ORACLE_PROBABILITY_EPS, 1.0)))
+            * y[(node_idx, label_idx)]
+            for node_idx in affected_nodes
+            for label_idx in range(len(self.node_label_classes_))
+        )
+        for node_idx in affected_nodes:
+            prob += (
+                pulp.lpSum(y[(node_idx, label_idx)] for label_idx in range(len(self.node_label_classes_))) == 1
+            ), f"NodeLabelOneHot_{node_idx}"
+        for cut_idx, (node_set, label_tuple) in enumerate(forbidden_assignments):
+            if any(node_idx not in affected_nodes for node_idx in node_set):
+                continue
+            label_indices = [self.node_label_to_index_.get(label) for label in label_tuple]
+            if any(label_idx is None for label_idx in label_indices):
+                continue
+            prob += (
+                pulp.lpSum(
+                    y[(node_idx, int(label_idx))]
+                    for node_idx, label_idx in zip(node_set, label_indices)
+                ) <= len(node_set) - 1
+            ), f"ForbiddenNodeLabels_{cut_idx}"
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        if int(status) != pulp.LpStatusOptimal:
+            return np.asarray(current_node_labels, dtype=object)
+        repaired = np.asarray(current_node_labels, dtype=object).copy()
+        for node_idx in affected_nodes:
+            for label_idx, label in enumerate(self.node_label_classes_):
+                value = pulp.value(y[(node_idx, label_idx)])
+                if value is not None and int(round(float(value))) == 1:
+                    repaired[node_idx] = label
+                    break
+        return repaired
+
+    def _repair_edge_labels_with_oracle(
+        self,
+        *,
+        existence_mask: np.ndarray,
+        adj_mtx: np.ndarray,
+        current_edge_label_matrix: np.ndarray,
+        edge_label_probabilities: Optional[np.ndarray],
+        forbidden_assignments: Sequence[ForbiddenEdgeLabelAssignment],
+    ) -> np.ndarray:
+        if (
+            edge_label_probabilities is None
+            or self.edge_label_classes_ is None
+            or self.edge_label_to_index_ is None
+            or len(self.edge_label_classes_) == 0
+            or not forbidden_assignments
+        ):
+            return np.asarray(current_edge_label_matrix, dtype=object)
+
+        active_edges = sorted({
+            edge
+            for edge_set, _ in forbidden_assignments
+            for edge in edge_set
+            if edge[0] < len(existence_mask)
+            and edge[1] < len(existence_mask)
+            and bool(existence_mask[edge[0]])
+            and bool(existence_mask[edge[1]])
+            and adj_mtx[edge[0], edge[1]] != 0
+        })
+        if not active_edges:
+            return np.asarray(current_edge_label_matrix, dtype=object)
+
+        prob = pulp.LpProblem("OracleEdgeLabelRepair", pulp.LpMaximize)
+        z = {
+            (edge, label_idx): pulp.LpVariable(f"z_edge_{edge[0]}_{edge[1]}_{label_idx}", cat="Binary")
+            for edge in active_edges
+            for label_idx in range(len(self.edge_label_classes_))
+        }
+        prob += pulp.lpSum(
+            np.log(float(np.clip(edge_label_probabilities[edge[0], edge[1], label_idx], _ORACLE_PROBABILITY_EPS, 1.0)))
+            * z[(edge, label_idx)]
+            for edge in active_edges
+            for label_idx in range(len(self.edge_label_classes_))
+        )
+        for edge in active_edges:
+            prob += (
+                pulp.lpSum(z[(edge, label_idx)] for label_idx in range(len(self.edge_label_classes_))) == 1
+            ), f"EdgeLabelOneHot_{edge[0]}_{edge[1]}"
+        for cut_idx, (edge_set, label_tuple) in enumerate(forbidden_assignments):
+            if any(edge not in active_edges for edge in edge_set):
+                continue
+            label_indices = [self.edge_label_to_index_.get(label) for label in label_tuple]
+            if any(label_idx is None for label_idx in label_indices):
+                continue
+            prob += (
+                pulp.lpSum(
+                    z[(edge, int(label_idx))]
+                    for edge, label_idx in zip(edge_set, label_indices)
+                ) <= len(edge_set) - 1
+            ), f"ForbiddenEdgeLabels_{cut_idx}"
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        if int(status) != pulp.LpStatusOptimal:
+            return np.asarray(current_edge_label_matrix, dtype=object)
+        repaired = np.asarray(current_edge_label_matrix, dtype=object).copy()
+        for edge in active_edges:
+            selected_label = None
+            for label_idx, label in enumerate(self.edge_label_classes_):
+                value = pulp.value(z[(edge, label_idx)])
+                if value is not None and int(round(float(value))) == 1:
+                    selected_label = label
+                    break
+            repaired[edge[0], edge[1]] = selected_label
+            repaired[edge[1], edge[0]] = selected_label
+        return repaired
 
     def _sample_oracle_cuts_for_iteration(
         self,
@@ -1516,6 +1836,9 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise RuntimeError(
                 "Graph decoding requires explicit edge-probability matrices from the conditional node generator."
             )
+        edge_existence_probabilities = generated_nodes.edge_existence_probabilities
+        node_label_probabilities = generated_nodes.node_label_probabilities
+        edge_label_probabilities = generated_nodes.edge_label_probabilities
         predicted_node_labels_list = self._resolve_predicted_node_labels(generated_nodes)
         predicted_edge_labels_list, predicted_edge_label_matrices = self._resolve_predicted_edge_labels(
             generated_nodes,
@@ -1525,34 +1848,145 @@ class ConditionalNodeFieldGraphGenerator(object):
         decoded_graphs: List[nx.Graph] = []
         for graph_idx in range(len(predicted_edge_probability_matrices)):
             single_generated_nodes = self._build_single_generated_node_batch(generated_nodes, graph_idx)
+            existence_mask = np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool)
+            degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
+            current_node_labels = np.asarray(predicted_node_labels_list[graph_idx], dtype=object).copy()
+            current_edge_label_matrix = (
+                np.asarray(predicted_edge_label_matrices[graph_idx], dtype=object).copy()
+                if predicted_edge_label_matrices is not None
+                else _edge_label_list_to_matrix(
+                    np.asarray(predicted_edge_probability_matrices[graph_idx] > 0, dtype=int),
+                    np.asarray(predicted_edge_labels_list[graph_idx], dtype=object)
+                    if predicted_edge_labels_list is not None
+                    else np.asarray([], dtype=object),
+                )
+            )
             single_adj_mtx = self.graph_decoder.decode_adjacency_matrix(
                 single_generated_nodes,
                 predicted_edge_probability_matrices=[predicted_edge_probability_matrices[graph_idx]],
             )[0]
-            accumulated_cuts: List[FrozenSet[Edge]] = []
-            graph = None
+            accumulated_structural_cuts: List[FrozenSet[Edge]] = []
+            accumulated_node_label_forbidden: List[ForbiddenNodeLabelAssignment] = []
+            accumulated_edge_label_forbidden: List[ForbiddenEdgeLabelAssignment] = []
+            best_graph: Optional[nx.Graph] = None
+            best_score = float("-inf")
+            best_feasible_graph: Optional[nx.Graph] = None
+            best_feasible_score = float("-inf")
             for _iteration_idx in range(self.max_oracle_iterations):
-                edge_labels = self.graph_decoder.decode_edge_labels(
-                    single_generated_nodes,
-                    [single_adj_mtx],
-                    predicted_edge_labels_list=None if predicted_edge_labels_list is None else [
-                        predicted_edge_labels_list[graph_idx]
-                    ],
-                    predicted_edge_label_matrices=None if predicted_edge_label_matrices is None else [
-                        predicted_edge_label_matrices[graph_idx]
-                    ],
-                )[0]
+                if predicted_edge_label_matrices is None:
+                    edge_labels = self.graph_decoder.decode_edge_labels(
+                        single_generated_nodes,
+                        [single_adj_mtx],
+                        predicted_edge_labels_list=None if predicted_edge_labels_list is None else [
+                            predicted_edge_labels_list[graph_idx]
+                        ],
+                        predicted_edge_label_matrices=None,
+                    )[0]
+                    current_edge_label_matrix = _edge_label_list_to_matrix(single_adj_mtx, edge_labels)
+                edge_labels = _edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix)
                 graph = _assemble_graph_job(
-                    np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool),
-                    np.asarray(predicted_node_labels_list[graph_idx], dtype=object),
+                    existence_mask,
+                    current_node_labels,
                     np.asarray(edge_labels, dtype=object),
                     np.asarray(single_adj_mtx, dtype=float),
                 )
-                violating_sets_raw = self.feasibility_estimator.violating_edge_sets([graph])[0]
-                violating_sets = _normalize_violating_edge_sets(violating_sets_raw, n_nodes=single_adj_mtx.shape[0])
+                current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+
+                new_node_forbidden = [
+                    assignment
+                    for assignment in self._forbidden_node_label_assignment_from_sets(
+                        current_node_violation_sets,
+                        current_node_labels,
+                    )
+                    if assignment not in accumulated_node_label_forbidden
+                ]
+                if new_node_forbidden:
+                    accumulated_node_label_forbidden.extend(new_node_forbidden)
+                    repaired_node_labels = self._repair_node_labels_with_oracle(
+                        existence_mask=existence_mask,
+                        current_node_labels=current_node_labels,
+                        node_label_probabilities=None if node_label_probabilities is None else np.asarray(
+                            node_label_probabilities[graph_idx],
+                            dtype=float,
+                        ),
+                        forbidden_assignments=accumulated_node_label_forbidden,
+                    )
+                    if not np.array_equal(repaired_node_labels, current_node_labels):
+                        current_node_labels = repaired_node_labels
+                        graph = _assemble_graph_job(
+                            existence_mask,
+                            current_node_labels,
+                            np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
+                            np.asarray(single_adj_mtx, dtype=float),
+                        )
+                        current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                        current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+
+                new_edge_label_forbidden = [
+                    assignment
+                    for assignment in self._forbidden_edge_label_assignment_from_sets(
+                        current_edge_violation_sets,
+                        current_edge_label_matrix,
+                    )
+                    if assignment not in accumulated_edge_label_forbidden
+                ]
+                if new_edge_label_forbidden:
+                    accumulated_edge_label_forbidden.extend(new_edge_label_forbidden)
+                    repaired_edge_label_matrix = self._repair_edge_labels_with_oracle(
+                        existence_mask=existence_mask,
+                        adj_mtx=single_adj_mtx,
+                        current_edge_label_matrix=current_edge_label_matrix,
+                        edge_label_probabilities=None if edge_label_probabilities is None else np.asarray(
+                            edge_label_probabilities[graph_idx],
+                            dtype=float,
+                        ),
+                        forbidden_assignments=accumulated_edge_label_forbidden,
+                    )
+                    if not np.array_equal(repaired_edge_label_matrix, current_edge_label_matrix):
+                        current_edge_label_matrix = repaired_edge_label_matrix
+                        graph = _assemble_graph_job(
+                            existence_mask,
+                            current_node_labels,
+                            np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
+                            np.asarray(single_adj_mtx, dtype=float),
+                        )
+                        current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                        current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+
+                score = self._oracle_candidate_score(
+                    existence_mask=existence_mask,
+                    adj_mtx=single_adj_mtx,
+                    node_labels=current_node_labels,
+                    edge_label_matrix=current_edge_label_matrix,
+                    edge_probability_matrix=np.asarray(
+                        edge_existence_probabilities[graph_idx]
+                        if edge_existence_probabilities is not None
+                        else predicted_edge_probability_matrices[graph_idx],
+                        dtype=float,
+                    ),
+                    node_label_probabilities=None if node_label_probabilities is None else np.asarray(
+                        node_label_probabilities[graph_idx],
+                        dtype=float,
+                    ),
+                    edge_label_probabilities=None if edge_label_probabilities is None else np.asarray(
+                        edge_label_probabilities[graph_idx],
+                        dtype=float,
+                    ),
+                )
+                if score > best_score:
+                    best_score = score
+                    best_graph = graph
+
+                is_feasible = not current_node_violation_sets and not current_edge_violation_sets
+                if is_feasible and score > best_feasible_score:
+                    best_feasible_score = score
+                    best_feasible_graph = graph
+
+                persistent_structural_cuts = [
+                    edge_set for edge_set in current_edge_violation_sets if edge_set not in accumulated_structural_cuts
+                ]
                 if int(self.verbose) >= 4:
-                    existence_mask = np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool)
-                    degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
                     prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
                     masked_prob_matrix = _build_masked_prob_matrix(
                         existence_mask=existence_mask,
@@ -1564,19 +1998,26 @@ class ConditionalNodeFieldGraphGenerator(object):
                         prob_matrix=masked_prob_matrix,
                         adj_mtx=single_adj_mtx,
                         target_degrees=target_degrees,
-                        title=f"Oracle decode graph={graph_idx} iteration={_iteration_idx + 1}",
-                        violating_edge_sets=violating_sets,
+                        title=(
+                            f"Oracle decode graph={graph_idx} iteration={_iteration_idx + 1} "
+                            f"| violating_node_sets={len(current_node_violation_sets)} "
+                            f"| violating_edge_sets={len(current_edge_violation_sets)} "
+                            f"| new_node_cuts={len(new_node_forbidden)} "
+                            f"| new_edge_label_cuts={len(new_edge_label_forbidden)} "
+                            f"| new_structural_cuts={len(persistent_structural_cuts)} "
+                            f"| accepted_structural_cuts={len(accumulated_structural_cuts) + len(persistent_structural_cuts)}"
+                        ),
+                        violating_edge_sets=current_edge_violation_sets,
                         decoded_graph=graph,
                         graph_renderer=self.graph_decoder.diagnostic_graph_renderer,
                     )
-                new_cuts = [edge_set for edge_set in violating_sets if edge_set not in accumulated_cuts]
-                if not new_cuts:
+                if is_feasible:
                     break
-                accumulated_cuts.extend(new_cuts)
+                if not new_node_forbidden and not new_edge_label_forbidden and not persistent_structural_cuts:
+                    break
+                accumulated_structural_cuts.extend(persistent_structural_cuts)
                 if _iteration_idx + 1 >= self.max_oracle_iterations:
                     break
-                existence_mask = np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool)
-                degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
                 prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
                 masked_prob_matrix = _build_masked_prob_matrix(
                     existence_mask=existence_mask,
@@ -1587,12 +2028,13 @@ class ConditionalNodeFieldGraphGenerator(object):
                 single_adj_mtx = self._solve_oracle_relaxed_adjacency(
                     masked_prob_matrix=masked_prob_matrix,
                     target_degrees=target_degrees,
-                    accumulated_cuts=accumulated_cuts,
+                    accumulated_cuts=accumulated_structural_cuts,
                     start_iteration_idx=_iteration_idx + 1,
                 )
-            if graph is None:
+            final_graph = best_feasible_graph if best_feasible_graph is not None else best_graph
+            if final_graph is None:
                 raise RuntimeError("Oracle-guided decoding failed to assemble a graph.")
-            decoded_graphs.append(graph)
+            decoded_graphs.append(final_graph)
         return decoded_graphs
 
     def _build_supervision_plan(
