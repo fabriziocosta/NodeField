@@ -281,7 +281,7 @@ def _plot_decoder_diagnostics(
     axes[0].set_ylabel("node i")
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
-    axes[1].imshow(adj_mtx, vmin=0.0, vmax=1.0, cmap="Greys")
+    axes[1].imshow(adj_mtx, vmin=0.0, vmax=1.0, cmap="gray")
     axes[1].set_title("Decoded adjacency")
     axes[1].set_xlabel("node j")
     axes[1].set_ylabel("node i")
@@ -305,7 +305,14 @@ def _plot_decoder_diagnostics(
         for edge_set in normalized_violations
         for i, j in edge_set
     }
-    if graph_renderer is None or decoded_graph is None:
+    rendered_inline = False
+    if decoded_graph is not None:
+        rendered_inline = _try_render_molecular_graph_inline(
+            axes[3],
+            decoded_graph=decoded_graph,
+            title=title,
+        )
+    if not rendered_inline and (graph_renderer is None or decoded_graph is None):
         layout = nx.circular_layout(graph)
         edge_colors = [
             "tab:red" if (min(u, v), max(u, v)) in violating_edges else "black"
@@ -328,7 +335,7 @@ def _plot_decoder_diagnostics(
             linewidths=1.5,
         )
         axes[3].set_title("Decoded graph")
-    else:
+    elif not rendered_inline:
         axes[3].text(
             0.5,
             0.5,
@@ -347,11 +354,50 @@ def _plot_decoder_diagnostics(
     plt.tight_layout()
     plt.show()
     plt.close(fig)
-    if graph_renderer is not None and decoded_graph is not None:
+    if graph_renderer is not None and decoded_graph is not None and not rendered_inline:
         try:
             graph_renderer([decoded_graph], legends=[title])
         except TypeError:
             graph_renderer([decoded_graph])
+
+
+def _is_molecule_like_graph(graph: nx.Graph) -> bool:
+    atom_symbols = {
+        "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
+        "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
+        "Br", "I",
+    }
+    graph_meta = getattr(graph, "graph", {})
+    if any(key in graph_meta for key in ("smiles", "mol", "molecule", "inchi")):
+        return True
+    for _, attrs in graph.nodes(data=True):
+        if "symbol" in attrs or "atomic_num" in attrs or "atom" in attrs:
+            return True
+        label = attrs.get("label")
+        if isinstance(label, str) and label in atom_symbols:
+            return True
+    return False
+
+
+def _try_render_molecular_graph_inline(ax: Any, *, decoded_graph: nx.Graph, title: str) -> bool:
+    if not _is_molecule_like_graph(decoded_graph):
+        return False
+    try:
+        from .extensions.molecular import molecule_graphs_to_grid_image
+    except Exception:
+        return False
+    image = molecule_graphs_to_grid_image(
+        [decoded_graph],
+        legends=[title],
+        mols_per_row=1,
+        sub_img_size=(500, 350),
+    )
+    if image is None:
+        return False
+    ax.imshow(np.asarray(image))
+    ax.set_title("Decoded graph")
+    ax.set_axis_off()
+    return True
 
 
 def _build_masked_prob_matrix(

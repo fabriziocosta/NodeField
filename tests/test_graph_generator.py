@@ -744,6 +744,48 @@ def test_decode_forwards_diagnostic_graph_renderer_with_decoded_graph(monkeypatc
     assert decoded_graphs[0].edges[(0, 1)]["label"] == "-"
 
 
+def test_try_render_molecular_graph_inline_renders_image(monkeypatch):
+    rendered = {}
+
+    class _Axis:
+        def imshow(self, image):
+            rendered["image"] = image
+
+        def set_title(self, value):
+            rendered["title"] = value
+
+        def set_axis_off(self):
+            rendered["axis_off"] = True
+
+    def fake_molecule_graphs_to_grid_image(graphs, legends, mols_per_row, sub_img_size):
+        rendered["graphs"] = graphs
+        rendered["legends"] = legends
+        rendered["mols_per_row"] = mols_per_row
+        rendered["sub_img_size"] = sub_img_size
+        return np.ones((4, 4, 3), dtype=np.uint8) * 255
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.molecular.molecule_graphs_to_grid_image",
+        fake_molecule_graphs_to_grid_image,
+    )
+
+    graph = nx.Graph()
+    graph.add_node(0, label="C")
+    graph.add_node(1, label="O")
+    graph.add_edge(0, 1, label="-")
+
+    result = cngg_module._try_render_molecular_graph_inline(
+        _Axis(),
+        decoded_graph=graph,
+        title="Decoder solve graph=0",
+    )
+
+    assert result is True
+    assert rendered["legends"] == ["Decoder solve graph=0"]
+    assert rendered["title"] == "Decoded graph"
+    assert rendered["axis_off"] is True
+
+
 def test_parallel_decode_matches_serial_decode():
     generated_nodes = GeneratedNodeBatch(
         node_presence_mask=np.asarray([[True, True], [True, True]], dtype=bool),
