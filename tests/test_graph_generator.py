@@ -236,6 +236,8 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(locality_target_positive_ratio=1.1)
     with pytest.raises(ValueError, match="max_feasibility_attempts"):
         ConditionalNodeFieldGraphGenerator(max_feasibility_attempts=0)
+    with pytest.raises(ValueError, match="feasibility_oracle_candidates_per_attempt"):
+        ConditionalNodeFieldGraphGenerator(feasibility_oracle_candidates_per_attempt=-1)
     with pytest.raises(ValueError, match="feasibility_candidates_per_attempt"):
         ConditionalNodeFieldGraphGenerator(feasibility_candidates_per_attempt=0)
     with pytest.raises(ValueError, match="max_oracle_iterations"):
@@ -1171,6 +1173,23 @@ def test_decode_generated_nodes_falls_back_when_oracle_method_missing():
 
     assert len(decoded) == 1
     assert decoded[0].graph["feasible"] is True
+
+
+def test_can_use_feasibility_oracle_respects_attempt_budget():
+    generator = ConditionalNodeFieldGraphGenerator(
+        feasibility_oracle_candidates_per_attempt=2,
+        verbose=False,
+    )
+    generator.feasibility_estimator = _OracleOnceEstimator([[]])
+
+    assert generator._can_use_feasibility_oracle() is True
+    assert generator._can_use_feasibility_oracle(attempt_idx=0) is True
+    assert generator._can_use_feasibility_oracle(attempt_idx=1) is True
+    assert generator._can_use_feasibility_oracle(attempt_idx=2) is False
+    assert generator._can_use_feasibility_oracle(
+        feasibility_oracle_candidates_per_attempt=0,
+        attempt_idx=0,
+    ) is False
 
 
 def test_edge_importance_parameters_are_exposed_on_model():

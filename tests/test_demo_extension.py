@@ -252,7 +252,7 @@ def test_build_graph_generator_propagates_model_name_to_inner_generator():
     assert generator.conditional_node_generator_model.model_dir == "/tmp/models"
 
 
-def test_build_graph_generator_enables_feasibility_oracle_by_default_and_forwards_overrides():
+def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
     if any(
         dependency is None
         for dependency in (
@@ -270,12 +270,12 @@ def test_build_graph_generator_enables_feasibility_oracle_by_default_and_forward
 
     default_generator = build_graph_generator()
     overridden_generator = build_graph_generator(
-        use_feasibility_oracle=False,
+        feasibility_oracle_candidates_per_attempt=0,
         max_oracle_iterations=3,
     )
 
-    assert default_generator.use_feasibility_oracle is True
-    assert overridden_generator.use_feasibility_oracle is False
+    assert default_generator.feasibility_oracle_candidates_per_attempt == 2
+    assert overridden_generator.feasibility_oracle_candidates_per_attempt == 0
     assert overridden_generator.max_oracle_iterations == 3
 
 
@@ -304,7 +304,7 @@ def test_build_graph_generator_disables_feasibility_when_optional_dependencies_a
     generator = build_graph_generator()
 
     assert generator.feasibility_estimator is None
-    assert generator.use_feasibility_oracle is False
+    assert generator.feasibility_oracle_candidates_per_attempt == 0
     assert generator.use_feasibility_filtering is False
 
 
@@ -356,6 +356,7 @@ def test_score_graph_generator_feasible_rate_forwards_to_member_function():
         n_samples=2,
         max_feasibility_attempts=4,
         feasibility_candidates_per_attempt=3,
+        feasibility_oracle_candidates_per_attempt=1,
         verbose=True,
     )
 
@@ -364,6 +365,7 @@ def test_score_graph_generator_feasible_rate_forwards_to_member_function():
         "n_samples": 2,
         "max_feasibility_attempts": 4,
         "feasibility_candidates_per_attempt": 3,
+        "feasibility_oracle_candidates_per_attempt": 1,
         "interpolate_between_n_samples": None,
         "desired_target": None,
         "guidance_scale": 1.0,

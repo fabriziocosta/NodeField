@@ -182,6 +182,7 @@ def score_graph_generator_feasible_rate(
     n_samples=32,
     max_feasibility_attempts=None,
     feasibility_candidates_per_attempt=None,
+    feasibility_oracle_candidates_per_attempt=None,
     interpolate_between_n_samples=None,
     desired_target=None,
     guidance_scale=1.0,
@@ -192,6 +193,7 @@ def score_graph_generator_feasible_rate(
         n_samples=n_samples,
         max_feasibility_attempts=max_feasibility_attempts,
         feasibility_candidates_per_attempt=feasibility_candidates_per_attempt,
+        feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         interpolate_between_n_samples=interpolate_between_n_samples,
         desired_target=desired_target,
         guidance_scale=guidance_scale,
@@ -486,7 +488,7 @@ def build_graph_generator(
     negative_sample_factor=1,
     locality_sampling_strategy="stratified_preserve",
     locality_target_positive_ratio=0.5,
-    use_feasibility_oracle=True,
+    feasibility_oracle_candidates_per_attempt=2,
     max_oracle_iterations=8,
     use_feasibility_filtering=True,
     max_feasibility_attempts=20,
@@ -575,14 +577,14 @@ def build_graph_generator(
             ]
         )
     else:
-        if use_feasibility_oracle or use_feasibility_filtering:
+        if feasibility_oracle_candidates_per_attempt or use_feasibility_filtering:
             warnings.warn(
                 "Optional dependencies 'abstractgraph' and 'abstractgraph_ml' are not installed; "
                 "disabling feasibility oracle and feasibility filtering.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        use_feasibility_oracle = False
+        feasibility_oracle_candidates_per_attempt = 0
         use_feasibility_filtering = False
 
     conditional_node_generator_model = ConditionalNodeFieldGenerator(
@@ -641,7 +643,7 @@ def build_graph_generator(
         conditional_node_generator_model=conditional_node_generator_model,
         graph_decoder=graph_decoder,
         feasibility_estimator=feasibility_estimator,
-        use_feasibility_oracle=use_feasibility_oracle,
+        feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         max_oracle_iterations=max_oracle_iterations,
         locality_sample_fraction=locality_sample_fraction,
         locality_horizon=locality_horizon,

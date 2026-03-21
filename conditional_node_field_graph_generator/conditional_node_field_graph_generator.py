@@ -1290,7 +1290,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             locality_sampling_strategy: str = "stratified_preserve",
             locality_target_positive_ratio: Optional[float] = None,
             feasibility_estimator: Any = None,
-            use_feasibility_oracle: bool = True,
+            feasibility_oracle_candidates_per_attempt: int = 2,
             use_feasibility_filtering: bool = True,
             max_oracle_iterations: int = 8,
             max_feasibility_attempts: int = 10,
@@ -1313,7 +1313,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             locality_sampling_strategy (str): Optional input value.
             locality_target_positive_ratio (Optional[float]): Optional input value.
             feasibility_estimator (Any): Optional input value.
-            use_feasibility_oracle (bool): Optional input value.
+            feasibility_oracle_candidates_per_attempt (int): Optional input value.
             use_feasibility_filtering (bool): Optional input value.
             max_oracle_iterations (int): Optional input value.
             max_feasibility_attempts (int): Optional input value.
@@ -1340,7 +1340,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.locality_sampling_strategy = locality_sampling_strategy
         self.locality_target_positive_ratio = locality_target_positive_ratio
         self.feasibility_estimator = feasibility_estimator
-        self.use_feasibility_oracle = bool(use_feasibility_oracle)
+        self.feasibility_oracle_candidates_per_attempt = int(feasibility_oracle_candidates_per_attempt)
         self.use_feasibility_filtering = bool(use_feasibility_filtering)
         self.max_oracle_iterations = int(max_oracle_iterations)
         self.max_feasibility_attempts = int(max_feasibility_attempts)
@@ -1361,6 +1361,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             )
         if self.locality_target_positive_ratio is not None and not 0.0 < self.locality_target_positive_ratio < 1.0:
             raise ValueError("locality_target_positive_ratio must be between 0 and 1 when provided.")
+        if self.feasibility_oracle_candidates_per_attempt < 0:
+            raise ValueError("feasibility_oracle_candidates_per_attempt must be >= 0")
         if self.max_oracle_iterations < 1:
             raise ValueError("max_oracle_iterations must be >= 1")
         if self.max_feasibility_attempts < 1:
@@ -1382,11 +1384,28 @@ class ConditionalNodeFieldGraphGenerator(object):
         """
         self.use_feasibility_filtering = bool(enabled)
 
-    def _resolve_use_feasibility_oracle(self, use_feasibility_oracle: Optional[bool]) -> bool:
-        return self.use_feasibility_oracle if use_feasibility_oracle is None else bool(use_feasibility_oracle)
+    def _resolve_feasibility_oracle_candidates_per_attempt(
+        self,
+        feasibility_oracle_candidates_per_attempt: Optional[int],
+    ) -> int:
+        if feasibility_oracle_candidates_per_attempt is None:
+            return int(self.feasibility_oracle_candidates_per_attempt)
+        value = int(feasibility_oracle_candidates_per_attempt)
+        if value < 0:
+            raise ValueError("feasibility_oracle_candidates_per_attempt must be >= 0")
+        return value
 
-    def _can_use_feasibility_oracle(self, use_feasibility_oracle: Optional[bool]) -> bool:
-        if not self._resolve_use_feasibility_oracle(use_feasibility_oracle):
+    def _can_use_feasibility_oracle(
+        self,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        attempt_idx: int = 0,
+    ) -> bool:
+        budget = self._resolve_feasibility_oracle_candidates_per_attempt(
+            feasibility_oracle_candidates_per_attempt
+        )
+        if attempt_idx < 0:
+            raise ValueError("attempt_idx must be >= 0")
+        if budget <= attempt_idx:
             return False
         if self.feasibility_estimator is None:
             return False
@@ -2473,9 +2492,13 @@ class ConditionalNodeFieldGraphGenerator(object):
     def _decode_generated_nodes(
         self,
         generated_nodes: GeneratedNodeBatch,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        attempt_idx: int = 0,
     ) -> List[nx.Graph]:
-        if self._can_use_feasibility_oracle(use_feasibility_oracle):
+        if self._can_use_feasibility_oracle(
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            attempt_idx=attempt_idx,
+        ):
             return self._decode_generated_nodes_with_oracle(generated_nodes)
         predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
         if predicted_edge_probability_matrices is None:
@@ -2925,7 +2948,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: GraphConditioningBatch,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        attempt_idx: int = 0,
     ) -> List[nx.Graph]:
         """Run a single generator pass and decode graphs without feasibility retries.
 
@@ -2946,7 +2970,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         )
         return self._decode_generated_nodes(
             generated_nodes,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            attempt_idx=attempt_idx,
         )
 
     def _decode_with_feasibility_slots(
@@ -2955,7 +2980,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[Optional[nx.Graph]]:
         """Decode graphs and optionally reject infeasible outputs until the batch is filled.
 
@@ -2979,7 +3004,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     graph_conditioning,
                     desired_target=desired_target,
                     guidance_scale=guidance_scale,
-                    use_feasibility_oracle=use_feasibility_oracle,
+                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
                 )
             )
 
@@ -3006,7 +3031,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                 candidate_conditioning,
                 desired_target=desired_target,
                 guidance_scale=guidance_scale,
-                use_feasibility_oracle=use_feasibility_oracle,
+                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                attempt_idx=attempt - 1,
             )
             total_generated += len(decoded_graphs)
             feasibility_mask = np.asarray(
@@ -3076,7 +3102,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
         """Decode graphs and optionally reject infeasible outputs until the batch is filled.
 
@@ -3094,7 +3120,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if accepted_count != len(graph_conditioning):
@@ -3117,7 +3143,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
         """Decode conditioning vectors into reconstructed graphs.
 
@@ -3140,7 +3166,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
 
     def _decode_conditioning_batch_classifier_guided(
@@ -3148,7 +3174,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: GraphConditioningBatch,
         desired_class: Union[int, Sequence[Any]],
         classifier_scale: float = 1.0,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        attempt_idx: int = 0,
     ) -> List[nx.Graph]:
         if int(self.verbose) >= 3:
             print(f"Predicting classifier-guided node matrices for {len(graph_conditioning)} graphs...")
@@ -3160,7 +3187,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         self._log_generated_batch_info(graph_conditioning, generated_nodes)
         return self._decode_generated_nodes(
             generated_nodes,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            attempt_idx=attempt_idx,
         )
 
     def _decode_with_feasibility_slots_classifier_guided(
@@ -3169,7 +3197,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_class: Union[int, Sequence[Any]],
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[Optional[nx.Graph]]:
         use_filtering = (
             self.use_feasibility_filtering
@@ -3182,7 +3210,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     graph_conditioning,
                     desired_class=desired_class,
                     classifier_scale=classifier_scale,
-                    use_feasibility_oracle=use_feasibility_oracle,
+                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
                 )
             )
 
@@ -3209,7 +3237,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                 candidate_conditioning,
                 desired_class=desired_class,
                 classifier_scale=classifier_scale,
-                use_feasibility_oracle=use_feasibility_oracle,
+                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                attempt_idx=attempt - 1,
             )
             total_generated += len(decoded_graphs)
             feasibility_mask = np.asarray(
@@ -3279,7 +3308,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_class: Union[int, Sequence[Any]],
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3290,7 +3319,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_class=desired_class,
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if accepted_count != len(graph_conditioning):
@@ -3312,7 +3341,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: GraphConditioningBatch,
         desired_target: Union[float, Sequence[Any]],
         predictor_scale: float = 1.0,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        attempt_idx: int = 0,
     ) -> List[nx.Graph]:
         if int(self.verbose) >= 3:
             print(f"Predicting regression-guided node matrices for {len(graph_conditioning)} graphs...")
@@ -3324,7 +3354,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         )
         return self._decode_generated_nodes(
             generated_nodes,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            attempt_idx=attempt_idx,
         )
 
     def _decode_with_feasibility_slots_regression_guided(
@@ -3333,7 +3364,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Union[float, Sequence[Any]],
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[Optional[nx.Graph]]:
         use_filtering = (
             self.use_feasibility_filtering
@@ -3346,7 +3377,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     graph_conditioning,
                     desired_target=desired_target,
                     predictor_scale=predictor_scale,
-                    use_feasibility_oracle=use_feasibility_oracle,
+                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
                 )
             )
 
@@ -3373,7 +3404,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                 candidate_conditioning,
                 desired_target=desired_target,
                 predictor_scale=predictor_scale,
-                use_feasibility_oracle=use_feasibility_oracle,
+                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                attempt_idx=attempt - 1,
             )
             total_generated += len(decoded_graphs)
             feasibility_mask = np.asarray(
@@ -3443,7 +3475,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Union[float, Sequence[Any]],
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3454,7 +3486,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if accepted_count != len(graph_conditioning):
@@ -3479,7 +3511,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
         """Generate random graphs by sampling conditioning vectors from the prior.
 
@@ -3512,7 +3544,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
 
     def score_feasible_rate(
@@ -3520,6 +3552,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         n_samples: int = 32,
         max_feasibility_attempts: Optional[int] = None,
         feasibility_candidates_per_attempt: Optional[int] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         interpolate_between_n_samples: Optional[int] = None,
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
@@ -3533,12 +3566,15 @@ class ConditionalNodeFieldGraphGenerator(object):
 
         original_attempts = self.max_feasibility_attempts
         original_candidates = self.feasibility_candidates_per_attempt
+        original_oracle_candidates = self.feasibility_oracle_candidates_per_attempt
         original_verbose = self.verbose
 
         if max_feasibility_attempts is not None:
             self.max_feasibility_attempts = int(max_feasibility_attempts)
         if feasibility_candidates_per_attempt is not None:
             self.feasibility_candidates_per_attempt = int(feasibility_candidates_per_attempt)
+        if feasibility_oracle_candidates_per_attempt is not None:
+            self.feasibility_oracle_candidates_per_attempt = int(feasibility_oracle_candidates_per_attempt)
         self.verbose = original_verbose if verbose else 0
 
         try:
@@ -3594,6 +3630,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         candidate_conditioning,
                         desired_target=desired_target,
                         guidance_scale=guidance_scale,
+                        attempt_idx=attempt - 1,
                     )
                     feasibility_mask = np.asarray(self.feasibility_estimator.predict(decoded_graphs), dtype=bool)
                     if feasibility_mask.shape[0] != len(decoded_graphs):
@@ -3631,10 +3668,12 @@ class ConditionalNodeFieldGraphGenerator(object):
                 "feasible_candidates": total_feasible,
                 "max_feasibility_attempts": int(self.max_feasibility_attempts),
                 "feasibility_candidates_per_attempt": int(self.feasibility_candidates_per_attempt),
+                "feasibility_oracle_candidates_per_attempt": int(self.feasibility_oracle_candidates_per_attempt),
             }
         finally:
             self.max_feasibility_attempts = original_attempts
             self.feasibility_candidates_per_attempt = original_candidates
+            self.feasibility_oracle_candidates_per_attempt = original_oracle_candidates
             self.verbose = original_verbose
 
     @timeit
@@ -3645,7 +3684,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[List[nx.Graph]]:
         """Sample multiple graphs per input by conditioning on each graph's encoding.
 
@@ -3670,7 +3709,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         return [
             [
@@ -3689,7 +3728,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         interpolate_between_n_samples: Optional[int] = None,
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3709,7 +3748,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_class=desired_class,
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
 
     @timeit
@@ -3720,7 +3759,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         n_samples: int = 1,
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[List[nx.Graph]]:
         self._require_fitted_for_generation()
         _, graph_conditioning = self.encode(graphs)
@@ -3733,7 +3772,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_class=desired_class,
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         return [
             [
@@ -3752,7 +3791,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         interpolate_between_n_samples: Optional[int] = None,
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3772,7 +3811,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
 
     @timeit
@@ -3783,7 +3822,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         n_samples: int = 1,
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[List[nx.Graph]]:
         self._require_fitted_for_generation()
         _, graph_conditioning = self.encode(graphs)
@@ -3796,7 +3835,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         return [
             [
@@ -3814,7 +3853,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ):
         self._require_fitted_for_generation()
         sampled_seed_graphs = random.choices(graphs, k=n_samples)
@@ -3824,7 +3863,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]
         return sampled_graphs
@@ -3836,7 +3875,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         n_samples=1,
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ):
         self._require_fitted_for_generation()
         sampled_seed_graphs = random.choices(graphs, k=n_samples)
@@ -3846,7 +3885,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             n_samples=1,
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]
         return sampled_graphs
@@ -3858,7 +3897,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         n_samples=1,
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ):
         self._require_fitted_for_generation()
         sampled_seed_graphs = random.choices(graphs, k=n_samples)
@@ -3868,7 +3907,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             n_samples=1,
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]
         return sampled_graphs
@@ -3879,9 +3918,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         G2: nx.Graph,
         k: int = 7,
         apply_feasibility_filtering: Optional[bool] = None,
-        apply_feasibility_oracle: Optional[bool] = True,
         interpolation_mode: str = "slerp",
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Interpolate between two graph condition vectors and decode intermediate graphs.
 
@@ -3890,16 +3928,13 @@ class ConditionalNodeFieldGraphGenerator(object):
             G2 (nx.Graph): Input value.
             k (int): Optional input value.
             apply_feasibility_filtering (Optional[bool]): Optional input value.
-            apply_feasibility_oracle (Optional[bool]): Optional input value.
             interpolation_mode (str): Optional input value.
+            feasibility_oracle_candidates_per_attempt (Optional[int]): Optional input value.
 
         Returns:
             Dict[str, Any]: Computed result.
         """
         self._require_fitted_for_generation()
-        if use_feasibility_oracle is None:
-            use_feasibility_oracle = apply_feasibility_oracle
-
         cond_a = self.graph_encode([G1])
         cond_b = self.graph_encode([G2])
         ts = np.linspace(0.0, 1.0, k + 2)[1:-1]
@@ -3940,7 +3975,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         decoded_slots = self._decode_with_feasibility_slots(
             interpolated_conditioning,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         step_summary = pd.DataFrame(
             {
@@ -3963,7 +3998,7 @@ class ConditionalNodeFieldGraphGenerator(object):
     def mean(
         self,
         graphs: List[nx.Graph],
-        use_feasibility_oracle: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> nx.Graph:
         """Compute a geometric mean graph via the SLERP barycentre of encodings.
 
@@ -3985,5 +4020,5 @@ class ConditionalNodeFieldGraphGenerator(object):
                 node_counts=np.asarray([mean_node_count], dtype=np.int64),
                 edge_counts=np.asarray([mean_edge_count], dtype=np.int64),
             ),
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )[0]

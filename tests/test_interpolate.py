@@ -27,9 +27,13 @@ class _FakeGraphGenerator:
         self,
         conditioning,
         apply_feasibility_filtering=True,
-        use_feasibility_oracle=None,
+        feasibility_oracle_candidates_per_attempt=None,
     ):
-        self.last_decode_args = (conditioning, apply_feasibility_filtering, use_feasibility_oracle)
+        self.last_decode_args = (
+            conditioning,
+            apply_feasibility_filtering,
+            feasibility_oracle_candidates_per_attempt,
+        )
         out = []
         for idx in range(len(conditioning)):
             out.append(None if idx % 2 else {"decoded_index": idx})
@@ -41,11 +45,8 @@ class _FakeGraphGenerator:
         graph_b,
         k=7,
         apply_feasibility_filtering=True,
-        apply_feasibility_oracle=True,
-        use_feasibility_oracle=None,
+        feasibility_oracle_candidates_per_attempt=None,
     ):
-        if use_feasibility_oracle is None:
-            use_feasibility_oracle = apply_feasibility_oracle
         cond_a = self.graph_encode([graph_a])
         cond_b = self.graph_encode([graph_b])
         ts = np.linspace(0.0, 1.0, k + 2)[1:-1]
@@ -74,7 +75,7 @@ class _FakeGraphGenerator:
         decoded_slots = self._decode_with_feasibility_slots(
             interpolated_conditioning,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            use_feasibility_oracle=use_feasibility_oracle,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
         step_summary = pd.DataFrame(
             {
@@ -144,10 +145,10 @@ def test_interpolate_returns_conditioning_and_summary():
     assert result["summary"]["decoded"].tolist() == [True, False, True]
     assert len(result["generated_graphs"]) == 2
     assert gen.last_decode_args[1] is False
-    assert gen.last_decode_args[2] is True
+    assert gen.last_decode_args[2] is None
 
 
-def test_interpolate_forwards_apply_feasibility_oracle():
+def test_interpolate_forwards_oracle_candidate_budget():
     graph_a = {
         "embedding": np.array([1.0, 0.0, 2.0]),
         "node_count": 3,
@@ -165,8 +166,8 @@ def test_interpolate_forwards_apply_feasibility_oracle():
         graph_b,
         k=2,
         apply_feasibility_filtering=True,
-        apply_feasibility_oracle=False,
+        feasibility_oracle_candidates_per_attempt=0,
     )
 
     assert gen.last_decode_args[1] is True
-    assert gen.last_decode_args[2] is False
+    assert gen.last_decode_args[2] == 0
