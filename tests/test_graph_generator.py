@@ -1,3 +1,4 @@
+import io
 import types
 
 import numpy as np
@@ -784,6 +785,21 @@ def test_try_render_molecular_graph_inline_renders_image(monkeypatch):
     assert rendered["legends"] == ["Decoder solve graph=0"]
     assert rendered["title"] == "Decoded graph"
     assert rendered["axis_off"] is True
+
+
+def test_coerce_inline_image_array_reads_display_wrapper_bytes():
+    from PIL import Image
+
+    class _DisplayImage:
+        def __init__(self, data):
+            self.data = data
+
+    buffer = io.BytesIO()
+    Image.fromarray(np.ones((3, 4, 3), dtype=np.uint8) * 255).save(buffer, format="PNG")
+    image_array = cngg_module._coerce_inline_image_array(_DisplayImage(buffer.getvalue()))
+
+    assert image_array is not None
+    assert image_array.shape == (3, 4, 3)
 
 
 def test_parallel_decode_matches_serial_decode():

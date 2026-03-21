@@ -2,6 +2,7 @@
 
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
+import io
 import inspect
 import logging
 import os
@@ -394,10 +395,39 @@ def _try_render_molecular_graph_inline(ax: Any, *, decoded_graph: nx.Graph, titl
     )
     if image is None:
         return False
-    ax.imshow(np.asarray(image))
+    image_array = _coerce_inline_image_array(image)
+    if image_array is None:
+        return False
+    ax.imshow(image_array)
     ax.set_title("Decoded graph")
     ax.set_axis_off()
     return True
+
+
+def _coerce_inline_image_array(image: Any) -> Optional[np.ndarray]:
+    try:
+        image_array = np.asarray(image)
+        if image_array.dtype != object:
+            return image_array
+    except Exception:
+        image_array = None
+
+    image_bytes = getattr(image, "data", None)
+    if image_bytes is None:
+        return None
+    if isinstance(image_bytes, memoryview):
+        image_bytes = image_bytes.tobytes()
+    if isinstance(image_bytes, str):
+        image_bytes = image_bytes.encode("utf-8")
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as pil_image:
+            return np.asarray(pil_image)
+    except Exception:
+        return None
 
 
 def _build_masked_prob_matrix(
