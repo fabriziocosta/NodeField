@@ -411,12 +411,19 @@ There is now a second integration path as well:
   `violating_edge_sets(graphs)`,
 - the generator uses the estimator during structural decode itself,
 - returned violating edge sets are converted into no-good cuts and the adjacency
-  ILP is re-solved for a bounded number of rounds.
+  ILP is re-solved for a bounded number of rounds,
+- within one graph's oracle trace, edges that repeatedly appear inside violating
+  sets also accumulate a temporary soft penalty before the next ILP solve.
 
 So the same feasibility estimator can contribute in two ways:
 
 - as a separation oracle during adjacency reconstruction,
 - as a post-hoc rejection filter after decode.
+
+That temporary edge memory is deliberately local to one graph decode. It is not
+shared across graphs, batches, or future calls. Hard cuts still forbid exact
+previously observed violating edge sets, while the soft memory simply lowers the
+logit of edges that keep participating in bad motifs during the current trace.
 
 ## Control Flow By Public API
 

@@ -146,6 +146,52 @@ def _normalize_violating_node_sets(
     return normalized
 
 
+def _apply_oracle_edge_memory_penalty(
+    prob_matrix: np.ndarray,
+    edge_violation_prior: np.ndarray,
+    penalty_weight: float,
+) -> np.ndarray:
+    """Penalize repeatedly violating edges in logit space for one decode trace."""
+    base_prob = np.clip(
+        np.asarray(prob_matrix, dtype=float),
+        _ORACLE_PROBABILITY_EPS,
+        1.0 - _ORACLE_PROBABILITY_EPS,
+    )
+    prior = np.maximum(np.asarray(edge_violation_prior, dtype=float), 0.0)
+    adjusted_logit = np.log(base_prob) - np.log1p(-base_prob) - float(penalty_weight) * prior
+    adjusted_prob = 1.0 / (1.0 + np.exp(-adjusted_logit))
+    adjusted_prob = np.asarray(adjusted_prob, dtype=float)
+    np.fill_diagonal(adjusted_prob, 0.0)
+    return np.clip(adjusted_prob, 0.0, 1.0)
+
+
+def _update_oracle_edge_memory(
+    edge_violation_prior: np.ndarray,
+    violating_edge_sets: Sequence[FrozenSet[Edge]],
+    *,
+    update_weight: float,
+    decay: float,
+    clip_value: float,
+) -> np.ndarray:
+    """Update one graph's temporary violation memory from newly observed bad edges."""
+    updated_prior = np.asarray(edge_violation_prior, dtype=float).copy()
+    updated_prior *= float(decay)
+    for edge_set in violating_edge_sets:
+        for edge in edge_set:
+            canonical_edge = _canonicalize_edge(edge)
+            if canonical_edge is None:
+                continue
+            i, j = canonical_edge
+            if i >= updated_prior.shape[0] or j >= updated_prior.shape[1]:
+                continue
+            updated_prior[i, j] += float(update_weight)
+            updated_prior[j, i] += float(update_weight)
+    np.fill_diagonal(updated_prior, 0.0)
+    if np.isfinite(float(clip_value)):
+        np.clip(updated_prior, 0.0, float(clip_value), out=updated_prior)
+    return updated_prior
+
+
 def _edge_label_matrix_to_list(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
     edge_labels = []
     for i in range(adj_mtx.shape[0]):
@@ -1644,6 +1690,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_oracle_candidates_per_attempt: int = _DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT,
             use_feasibility_filtering: bool = True,
             max_oracle_iterations: int = 8,
+            oracle_edge_memory_penalty: float = 0.5,
+            oracle_edge_memory_update: float = 1.0,
+            oracle_edge_memory_decay: float = 1.0,
+            oracle_edge_memory_clip: float = 5.0,
             max_feasibility_attempts: int = 10,
             feasibility_candidates_per_attempt: int = 4,
             feasibility_failure_mode: str = "return_partial",
@@ -1667,6 +1717,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_oracle_candidates_per_attempt (int): Optional input value.
             use_feasibility_filtering (bool): Optional input value.
             max_oracle_iterations (int): Optional input value.
+            oracle_edge_memory_penalty (float): Optional input value.
+            oracle_edge_memory_update (float): Optional input value.
+            oracle_edge_memory_decay (float): Optional input value.
+            oracle_edge_memory_clip (float): Optional input value.
             max_feasibility_attempts (int): Optional input value.
             feasibility_candidates_per_attempt (int): Optional input value.
             feasibility_failure_mode (str): Optional input value.
@@ -1694,6 +1748,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.feasibility_oracle_candidates_per_attempt = int(feasibility_oracle_candidates_per_attempt)
         self.use_feasibility_filtering = bool(use_feasibility_filtering)
         self.max_oracle_iterations = int(max_oracle_iterations)
+        self.oracle_edge_memory_penalty = float(oracle_edge_memory_penalty)
+        self.oracle_edge_memory_update = float(oracle_edge_memory_update)
+        self.oracle_edge_memory_decay = float(oracle_edge_memory_decay)
+        self.oracle_edge_memory_clip = float(oracle_edge_memory_clip)
         self.max_feasibility_attempts = int(max_feasibility_attempts)
         self.feasibility_candidates_per_attempt = int(feasibility_candidates_per_attempt)
         self.feasibility_failure_mode = str(feasibility_failure_mode)
@@ -1716,6 +1774,14 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise ValueError("feasibility_oracle_candidates_per_attempt must be >= 0")
         if self.max_oracle_iterations < 1:
             raise ValueError("max_oracle_iterations must be >= 1")
+        if self.oracle_edge_memory_penalty < 0.0:
+            raise ValueError("oracle_edge_memory_penalty must be >= 0")
+        if self.oracle_edge_memory_update < 0.0:
+            raise ValueError("oracle_edge_memory_update must be >= 0")
+        if not 0.0 <= self.oracle_edge_memory_decay <= 1.0:
+            raise ValueError("oracle_edge_memory_decay must be between 0 and 1")
+        if self.oracle_edge_memory_clip < 0.0:
+            raise ValueError("oracle_edge_memory_clip must be >= 0")
         if self.max_feasibility_attempts < 1:
             raise ValueError("max_feasibility_attempts must be >= 1")
         if self.feasibility_candidates_per_attempt < 1:
@@ -1740,6 +1806,14 @@ class ConditionalNodeFieldGraphGenerator(object):
         )
         if self.feasibility_oracle_candidates_per_attempt < 0:
             self.feasibility_oracle_candidates_per_attempt = 0
+        if not hasattr(self, "oracle_edge_memory_penalty"):
+            self.oracle_edge_memory_penalty = 0.5
+        if not hasattr(self, "oracle_edge_memory_update"):
+            self.oracle_edge_memory_update = 1.0
+        if not hasattr(self, "oracle_edge_memory_decay"):
+            self.oracle_edge_memory_decay = 1.0
+        if not hasattr(self, "oracle_edge_memory_clip"):
+            self.oracle_edge_memory_clip = 5.0
         if not hasattr(self, "node_label_classes_"):
             self.node_label_classes_ = None
         if not hasattr(self, "node_label_to_index_"):
@@ -2338,13 +2412,21 @@ class ConditionalNodeFieldGraphGenerator(object):
         target_degrees: List[int],
         accumulated_cuts: Sequence[FrozenSet[Edge]],
         start_iteration_idx: int,
+        edge_violation_prior: Optional[np.ndarray] = None,
     ) -> np.ndarray:
+        solve_prob_matrix = np.asarray(masked_prob_matrix, dtype=float)
+        if edge_violation_prior is not None and self.oracle_edge_memory_penalty > 0.0:
+            solve_prob_matrix = _apply_oracle_edge_memory_penalty(
+                solve_prob_matrix,
+                edge_violation_prior,
+                self.oracle_edge_memory_penalty,
+            )
         last_error: Optional[Exception] = None
         for solve_iteration_idx in range(start_iteration_idx, self.max_oracle_iterations):
             active_cuts = self._sample_oracle_cuts_for_iteration(accumulated_cuts, solve_iteration_idx)
             try:
                 return self.graph_decoder.optimize_adjacency_matrix(
-                    masked_prob_matrix,
+                    solve_prob_matrix,
                     target_degrees,
                     forbidden_edge_sets=active_cuts,
                 )
@@ -2427,6 +2509,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             accumulated_structural_cuts: List[FrozenSet[Edge]] = []
             accumulated_node_label_forbidden: List[ForbiddenNodeLabelAssignment] = []
             accumulated_edge_label_forbidden: List[ForbiddenEdgeLabelAssignment] = []
+            local_edge_violation_prior = np.zeros_like(masked_prob_matrix, dtype=float)
             best_graph: Optional[nx.Graph] = None
             best_score = float("-inf")
             best_feasible_graph: Optional[nx.Graph] = None
@@ -2646,6 +2729,13 @@ class ConditionalNodeFieldGraphGenerator(object):
                         joint_label_changed=(joint_label_detail == "labels changed"),
                     )
                     break
+                local_edge_violation_prior = _update_oracle_edge_memory(
+                    local_edge_violation_prior,
+                    current_edge_violation_sets,
+                    update_weight=self.oracle_edge_memory_update,
+                    decay=self.oracle_edge_memory_decay,
+                    clip_value=self.oracle_edge_memory_clip,
+                )
                 accumulated_structural_cuts.extend(persistent_structural_cuts)
                 if _iteration_idx + 1 >= self.max_oracle_iterations:
                     plot_oracle_phase(
@@ -2663,6 +2753,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     target_degrees=target_degrees,
                     accumulated_cuts=accumulated_structural_cuts,
                     start_iteration_idx=_iteration_idx + 1,
+                    edge_violation_prior=local_edge_violation_prior,
                 )
                 pre_structural_node_labels = np.asarray(current_node_labels, dtype=object).copy()
                 pre_structural_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object).copy()

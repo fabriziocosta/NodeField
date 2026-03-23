@@ -248,6 +248,14 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_candidates_per_attempt=0)
     with pytest.raises(ValueError, match="max_oracle_iterations"):
         ConditionalNodeFieldGraphGenerator(max_oracle_iterations=0)
+    with pytest.raises(ValueError, match="oracle_edge_memory_penalty"):
+        ConditionalNodeFieldGraphGenerator(oracle_edge_memory_penalty=-0.1)
+    with pytest.raises(ValueError, match="oracle_edge_memory_update"):
+        ConditionalNodeFieldGraphGenerator(oracle_edge_memory_update=-0.1)
+    with pytest.raises(ValueError, match="oracle_edge_memory_decay"):
+        ConditionalNodeFieldGraphGenerator(oracle_edge_memory_decay=1.1)
+    with pytest.raises(ValueError, match="oracle_edge_memory_clip"):
+        ConditionalNodeFieldGraphGenerator(oracle_edge_memory_clip=-0.1)
     with pytest.raises(ValueError, match="feasibility_failure_mode"):
         ConditionalNodeFieldGraphGenerator(feasibility_failure_mode="drop")
 
@@ -1136,7 +1144,7 @@ def test_try_render_molecular_graph_inline_renders_image(monkeypatch):
     )
 
     assert result is True
-    assert rendered["legends"] == ["Decoder solve graph=0"]
+    assert rendered["legends"] is None
     assert rendered["title"] == "Decoded graph"
     assert rendered["axis_off"] is True
 
@@ -1278,6 +1286,42 @@ def test_decode_generated_nodes_relaxes_oracle_cuts_to_zero_on_last_attempt(monk
 
     assert len(decoded) == 1
     assert active_cut_counts[-2:] == [1, 0]
+
+
+def test_oracle_edge_memory_helpers_are_symmetric_and_reduce_edge_probabilities():
+    prior = np.zeros((4, 4), dtype=float)
+    updated = cngg_module._update_oracle_edge_memory(
+        prior,
+        [frozenset({(0, 1), (2, 3)})],
+        update_weight=1.5,
+        decay=1.0,
+        clip_value=5.0,
+    )
+
+    assert updated[0, 1] == pytest.approx(1.5)
+    assert updated[1, 0] == pytest.approx(1.5)
+    assert updated[2, 3] == pytest.approx(1.5)
+    assert updated[3, 2] == pytest.approx(1.5)
+    assert np.allclose(np.diag(updated), 0.0)
+
+    prob_matrix = np.asarray(
+        [
+            [0.0, 0.9, 0.2, 0.2],
+            [0.9, 0.0, 0.2, 0.2],
+            [0.2, 0.2, 0.0, 0.9],
+            [0.2, 0.2, 0.9, 0.0],
+        ],
+        dtype=float,
+    )
+    penalized = cngg_module._apply_oracle_edge_memory_penalty(
+        prob_matrix,
+        updated,
+        penalty_weight=0.75,
+    )
+
+    assert penalized[0, 1] < prob_matrix[0, 1]
+    assert penalized[2, 3] < prob_matrix[2, 3]
+    assert penalized[0, 2] == pytest.approx(prob_matrix[0, 2])
 
 
 def test_decode_generated_nodes_repairs_node_labels_before_structural_cuts():

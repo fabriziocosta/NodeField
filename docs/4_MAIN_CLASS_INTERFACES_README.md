@@ -815,9 +815,13 @@ ConditionalNodeFieldGraphGenerator(
     locality_sampling_strategy: str = "stratified_preserve",
     locality_target_positive_ratio: Optional[float] = None,
     feasibility_estimator: Any = None,
-    use_feasibility_oracle: bool = True,
+    feasibility_oracle_candidates_per_attempt: int = 2,
     use_feasibility_filtering: bool = True,
     max_oracle_iterations: int = 8,
+    oracle_edge_memory_penalty: float = 0.5,
+    oracle_edge_memory_update: float = 1.0,
+    oracle_edge_memory_decay: float = 1.0,
+    oracle_edge_memory_clip: float = 5.0,
     max_feasibility_attempts: int = 10,
     feasibility_candidates_per_attempt: int = 4,
     feasibility_failure_mode: str = "return_partial",
@@ -877,12 +881,12 @@ ConditionalNodeFieldGraphGenerator(
   Optional predictor that judges whether a decoded graph is acceptable.
   Better estimator quality improves rejection filtering quality.
 
-- `use_feasibility_oracle`
-  Whether to use `feasibility_estimator.violating_edge_sets(...)` as a bounded
-  separation oracle during adjacency decode when that method is available.
-  Enable: stronger structural correction before filtering, but potentially more
-  ILP solves.
-  Disable: use the previous single-solve structural decode path.
+- `feasibility_oracle_candidates_per_attempt`
+  Maximum number of oracle-guided structural candidates explored per decode
+  attempt when `violating_edge_sets(...)` is available on the feasibility
+  estimator.
+  Increase: broader search under oracle guidance, but more ILP work.
+  Decrease toward `0`: fall back to the older one-shot structural decode path.
 
 - `use_feasibility_filtering`
   Whether to apply feasibility filtering during generation.
@@ -894,6 +898,29 @@ ConditionalNodeFieldGraphGenerator(
   oracle is active.
   Increase: more chances to remove violating motifs, but slower decode.
   Decrease: faster decode, but more residual violations may reach filtering.
+
+- `oracle_edge_memory_penalty`
+  Weight of the temporary per-graph penalty applied in logit space to edges
+  that repeatedly appear in violating edge sets during one oracle trace.
+  Increase: stronger avoidance of recurring bad edges, but more distortion away
+  from the base edge probabilities.
+  Decrease toward `0`: rely only on hard no-good cuts.
+
+- `oracle_edge_memory_update`
+  Additive increment applied to each edge that appears in a violating edge set.
+  Increase: one violation has more effect on later oracle iterations.
+  Decrease toward `0`: the local memory matters less.
+
+- `oracle_edge_memory_decay`
+  Multiplicative decay applied to the temporary per-graph edge-memory matrix
+  before adding newly observed violating edges.
+  `1.0`: keep the full trace history for that graph.
+  Smaller values: emphasize recent oracle iterations more strongly.
+
+- `oracle_edge_memory_clip`
+  Upper bound on the temporary per-graph edge-memory values.
+  Increase: allow stronger cumulative suppression of repeated offenders.
+  Decrease: keep the penalty softer and prevent runaway edge suppression.
 
 - `max_feasibility_attempts`
   Maximum rejection-sampling rounds per batch slot.
