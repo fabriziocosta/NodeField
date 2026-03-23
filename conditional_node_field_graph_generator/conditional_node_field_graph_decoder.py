@@ -168,6 +168,34 @@ def _plot_decoder_diagnostics(
 ) -> None:
     if plt is None:
         return
+    def _format_plot_title(value: str) -> str:
+        if " | " not in value or not value.startswith("Oracle "):
+            return value
+        parts = value.split(" | ")
+        head = parts[0]
+        groups = [[], [], []]
+        for metric in parts[1:]:
+            key = metric.split("=", 1)[0].strip()
+            if key in {
+                "violating_node_sets",
+                "violating_edge_sets",
+                "new_node_cuts",
+                "new_edge_label_cuts",
+                "joint_label_changed",
+            }:
+                groups[0].append(metric)
+            elif key in {
+                "log_total",
+                "log_edge",
+                "log_node",
+                "log_edge_label",
+            }:
+                groups[1].append(metric)
+            else:
+                groups[2].append(metric)
+        return "\n".join([head] + [" | ".join(group) for group in groups if group])
+
+    formatted_title = _format_plot_title(title)
     prob_matrix = np.asarray(prob_matrix, dtype=float)
     adj_mtx = np.asarray(adj_mtx, dtype=float)
     target_degrees = np.asarray(target_degrees, dtype=float)
@@ -219,7 +247,7 @@ def _plot_decoder_diagnostics(
         rendered_inline = _try_render_molecular_graph_inline(
             axes[3],
             decoded_graph=decoded_graph,
-            title=title,
+            title=formatted_title,
         )
     if not rendered_inline and (graph_renderer is None or decoded_graph is None):
         layout = nx.circular_layout(graph)
@@ -256,13 +284,13 @@ def _plot_decoder_diagnostics(
         axes[3].set_title("Decoded graph")
     axes[3].set_axis_off()
 
-    fig.suptitle(title)
-    plt.tight_layout()
+    fig.suptitle(formatted_title, fontsize=10)
+    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     plt.show()
     plt.close(fig)
     if graph_renderer is not None and decoded_graph is not None and not rendered_inline:
         try:
-            graph_renderer([decoded_graph], legends=[title])
+            graph_renderer([decoded_graph], legends=[formatted_title])
         except TypeError:
             graph_renderer([decoded_graph])
 

@@ -326,6 +326,34 @@ def _plot_decoder_diagnostics(
 ) -> None:
     if plt is None:
         return
+    def _format_plot_title(value: str) -> str:
+        if " | " not in value or not value.startswith("Oracle "):
+            return value
+        parts = value.split(" | ")
+        head = parts[0]
+        groups = [[], [], []]
+        for metric in parts[1:]:
+            key = metric.split("=", 1)[0].strip()
+            if key in {
+                "violating_node_sets",
+                "violating_edge_sets",
+                "new_node_cuts",
+                "new_edge_label_cuts",
+                "joint_label_changed",
+            }:
+                groups[0].append(metric)
+            elif key in {
+                "log_total",
+                "log_edge",
+                "log_node",
+                "log_edge_label",
+            }:
+                groups[1].append(metric)
+            else:
+                groups[2].append(metric)
+        return "\n".join([head] + [" | ".join(group) for group in groups if group])
+
+    formatted_title = _format_plot_title(title)
     prob_matrix = np.asarray(prob_matrix, dtype=float)
     adj_mtx = np.asarray(adj_mtx, dtype=float)
     target_degrees = np.asarray(target_degrees, dtype=float)
@@ -375,7 +403,7 @@ def _plot_decoder_diagnostics(
         rendered_inline = _try_render_molecular_graph_inline(
             graph_axis,
             decoded_graph=decoded_graph,
-            title=title,
+            title=formatted_title,
         )
     if not rendered_inline and (graph_renderer is None or decoded_graph is None):
         layout = nx.circular_layout(graph)
@@ -491,13 +519,13 @@ def _plot_decoder_diagnostics(
         heatmap_axis.tick_params(which="minor", bottom=False, left=False)
         fig.colorbar(im3, ax=heatmap_axis, fraction=0.046, pad=0.04)
 
-    fig.suptitle(title)
-    plt.tight_layout()
+    fig.suptitle(formatted_title, fontsize=10)
+    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     plt.show()
     plt.close(fig)
     if graph_renderer is not None and decoded_graph is not None and not rendered_inline:
         try:
-            graph_renderer([decoded_graph], legends=[title])
+            graph_renderer([decoded_graph], legends=[formatted_title])
         except TypeError:
             graph_renderer([decoded_graph])
 
@@ -3462,19 +3490,35 @@ class ConditionalNodeFieldGraphGenerator(object):
                 if generated_nodes.node_presence_mask is not None
                 else int(generated_nodes.node_degree_predictions.shape[1])
             )
-            predicted_node_count = (
+            raw_predicted_node_count = (
                 int(np.sum(generated_nodes.node_presence_mask[graph_idx][:node_row_count]))
                 if generated_nodes.node_presence_mask is not None
                 else node_row_count
             )
             conditioning_node_count = int(graph_conditioning.node_counts[graph_idx])
             conditioning_edge_count = int(graph_conditioning.edge_counts[graph_idx])
+            decoded_support_node_count = None
+            if (
+                self.graph_decoder is not None
+                and generated_nodes.node_presence_mask is not None
+            ):
+                decoded_support_mask = self.graph_decoder.resolve_node_presence_mask(
+                    np.asarray(generated_nodes.node_presence_mask[graph_idx][:node_row_count], dtype=bool),
+                    desired_node_count=conditioning_node_count,
+                    node_existence_scores=None if generated_nodes.node_existence_probabilities is None else np.asarray(
+                        generated_nodes.node_existence_probabilities[graph_idx][:node_row_count],
+                        dtype=float,
+                    ),
+                )
+                decoded_support_node_count = int(np.sum(decoded_support_mask))
             message = (
                 f"Generated graph {graph_idx + 1}/{total_graphs}: "
                 f"conditioning_nodes={conditioning_node_count}, "
                 f"conditioning_edges={conditioning_edge_count}, "
-                f"predicted_nodes={predicted_node_count}"
+                f"raw_predicted_nodes={raw_predicted_node_count}"
             )
+            if decoded_support_node_count is not None:
+                message += f", decoded_support_nodes={decoded_support_node_count}"
             if generated_nodes.node_degree_predictions is not None:
                 valid_deg = np.asarray(
                     generated_nodes.node_degree_predictions[graph_idx][:node_row_count],
