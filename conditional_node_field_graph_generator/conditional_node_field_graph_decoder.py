@@ -141,7 +141,7 @@ def _try_render_molecular_graph_inline(ax: Any, *, decoded_graph: nx.Graph, titl
         return False
     image = molecule_graphs_to_grid_image(
         [decoded_graph],
-        legends=[title],
+        legends=None,
         mols_per_row=1,
         sub_img_size=(500, 350),
     )
@@ -165,6 +165,7 @@ def _plot_decoder_diagnostics(
     violating_edge_sets: Optional[Iterable[Iterable[Sequence[Any]]]] = None,
     decoded_graph: Optional[nx.Graph] = None,
     graph_renderer: Optional[Callable[..., Any]] = None,
+    existence_mask: Optional[Sequence[bool]] = None,
 ) -> None:
     if plt is None:
         return
@@ -199,7 +200,15 @@ def _plot_decoder_diagnostics(
     prob_matrix = np.asarray(prob_matrix, dtype=float)
     adj_mtx = np.asarray(adj_mtx, dtype=float)
     target_degrees = np.asarray(target_degrees, dtype=float)
-    realized_degrees = adj_mtx.sum(axis=1)
+    active_mask = None if existence_mask is None else np.asarray(existence_mask, dtype=bool)
+    if active_mask is not None and len(active_mask) == adj_mtx.shape[0]:
+        active_indices = np.flatnonzero(active_mask)
+    else:
+        active_mask = None
+        active_indices = np.arange(adj_mtx.shape[0], dtype=int)
+    adj_display = adj_mtx[np.ix_(active_indices, active_indices)]
+    target_degrees_display = target_degrees[active_indices]
+    realized_degrees = adj_display.sum(axis=1)
     normalized_violations = _normalize_violating_edge_sets(
         [] if violating_edge_sets is None else violating_edge_sets,
         n_nodes=adj_mtx.shape[0],
@@ -218,29 +227,45 @@ def _plot_decoder_diagnostics(
     axes[0].set_ylabel("node i")
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
-    axes[1].imshow(adj_mtx, vmin=0.0, vmax=1.0, cmap="gray")
+    axes[1].imshow(adj_display, vmin=0.0, vmax=1.0, cmap="gray")
     axes[1].set_title("Decoded adjacency")
     axes[1].set_xlabel("node j")
     axes[1].set_ylabel("node i")
+    if active_indices.size > 0:
+        axes[1].set_xticks(np.arange(len(active_indices)))
+        axes[1].set_xticklabels(active_indices.astype(int).tolist())
+        axes[1].set_yticks(np.arange(len(active_indices)))
+        axes[1].set_yticklabels(active_indices.astype(int).tolist())
+    active_index_lookup = {int(node_idx): pos for pos, node_idx in enumerate(active_indices.tolist())}
     if normalized_violations:
         for edge_set in normalized_violations:
             for i, j in edge_set:
-                axes[1].plot([j, i], [i, j], marker="s", color="tab:red", markersize=6, linewidth=1.5)
-                axes[1].plot([i, j], [j, i], marker="s", color="tab:red", markersize=6, linewidth=1.5)
+                if i not in active_index_lookup or j not in active_index_lookup:
+                    continue
+                ii = active_index_lookup[i]
+                jj = active_index_lookup[j]
+                axes[1].plot([jj, ii], [ii, jj], marker="s", color="tab:red", markersize=6, linewidth=1.5)
+                axes[1].plot([ii, jj], [jj, ii], marker="s", color="tab:red", markersize=6, linewidth=1.5)
 
-    node_idx = np.arange(len(target_degrees))
-    axes[2].bar(node_idx - 0.18, target_degrees, width=0.36, label="target")
+    node_idx = active_indices.astype(int)
+    axes[2].bar(node_idx - 0.18, target_degrees_display, width=0.36, label="target")
     axes[2].bar(node_idx + 0.18, realized_degrees, width=0.36, label="realized")
     axes[2].set_title("Degree targets vs realized")
     axes[2].set_xlabel("node")
     axes[2].set_ylabel("degree")
+    if node_idx.size > 0:
+        axes[2].set_xticks(node_idx)
+        y_max = int(max(np.max(target_degrees_display), np.max(realized_degrees)))
+        axes[2].set_yticks(np.arange(0, y_max + 1, 1))
+    axes[2].grid(axis="y", alpha=0.3)
     axes[2].legend()
 
-    graph = nx.from_numpy_array(adj_mtx.astype(int))
+    graph = nx.from_numpy_array(adj_display.astype(int))
     violating_edges = {
-        (min(i, j), max(i, j))
+        (min(active_index_lookup[i], active_index_lookup[j]), max(active_index_lookup[i], active_index_lookup[j]))
         for edge_set in normalized_violations
         for i, j in edge_set
+        if i in active_index_lookup and j in active_index_lookup
     }
     rendered_inline = False
     if decoded_graph is not None:
@@ -396,6 +421,7 @@ def _decode_single_adjacency_job(
             target_degrees=target_degrees,
             title="Decoder solve",
             graph_renderer=decoder.diagnostic_graph_renderer,
+            existence_mask=existent,
         )
     return adj_mtx
 
@@ -1047,6 +1073,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                     title=f"Decoder solve graph={graph_idx}",
                     decoded_graph=decoded_graph,
                     graph_renderer=self.diagnostic_graph_renderer,
+                    existence_mask=existence_mask,
                 )
         return decoded_graphs
 
