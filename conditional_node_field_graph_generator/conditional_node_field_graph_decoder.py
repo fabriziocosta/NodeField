@@ -316,7 +316,10 @@ def _assemble_graph_job_star(args) -> nx.Graph:
 def _decode_single_adjacency_job(
     prob_list: np.ndarray,
     existence_mask: np.ndarray,
+    existence_scores: Optional[np.ndarray],
     degree_prediction: np.ndarray,
+    desired_node_count: Optional[int],
+    desired_edge_count: Optional[int],
     degree_slack_penalty: float,
     enforce_connectivity: bool,
     warm_start_mst: bool,
@@ -338,17 +341,26 @@ def _decode_single_adjacency_job(
             if i != j:
                 prob_matrix[i, j] = prob_list[idx]
                 idx += 1
-    existent = np.asarray(existence_mask[:n_nodes], dtype=bool)
+    existent = decoder.resolve_node_presence_mask(
+        np.asarray(existence_mask[:n_nodes], dtype=bool),
+        desired_node_count=desired_node_count,
+        node_existence_scores=None if existence_scores is None else np.asarray(existence_scores[:n_nodes], dtype=float),
+    )
     for i in range(n_nodes):
         for j in range(n_nodes):
             if not (existent[i] and existent[j]):
                 prob_matrix[i, j] = 0
     prob_matrix = (prob_matrix + prob_matrix.T) / 2
-    target_degrees = decoder.get_degrees(
+    target_degrees = decoder.get_degree_targets(
         np.asarray(degree_prediction[:n_nodes], dtype=float),
         existent,
+        desired_edge_count=desired_edge_count,
     )
-    adj_mtx = decoder.optimize_adjacency_matrix(prob_matrix, target_degrees)
+    adj_mtx = decoder.optimize_adjacency_matrix(
+        prob_matrix,
+        target_degrees,
+        target_edge_count=desired_edge_count,
+    )
     if int(verbose) >= 4 and diagnostic_graph_renderer is None:
         _plot_decoder_diagnostics(
             prob_matrix=prob_matrix,
@@ -389,6 +401,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         self,
         prob_matrix: np.ndarray,
         target_degrees: List[int],
+        target_edge_count: Optional[int] = None,
         timeLimit: int = 60,
         verbose: bool = False,
         alpha: float = 0.7,
@@ -419,6 +432,13 @@ class ConditionalNodeFieldGraphDecoder(object):
         for i in range(n):
             incident = [x[(i, j)] for j in range(i + 1, n)] + [x[(j, i)] for j in range(i) if (j, i) in x]
             prob += (pulp.lpSum(incident) + u[i] - v[i] == target_degrees[i]), f"Degree_{i}"
+        if target_edge_count is not None:
+            resolved_edge_count = self._resolve_target_edge_count(
+                n,
+                target_edge_count,
+                connectivity=connectivity,
+            )
+            prob += (pulp.lpSum(var for var in x.values()) == resolved_edge_count), "EdgeCount"
 
         if connectivity:
             directed_edges = [(i, j) for (i, j) in x] + [(j, i) for (i, j) in x]
@@ -704,15 +724,120 @@ class ConditionalNodeFieldGraphDecoder(object):
                             instances.append(instance)
         return np.vstack(instances)
 
-    def get_degrees(self, node_degree_predictions: np.ndarray, node_presence_mask: np.ndarray) -> List[int]:
-        degrees = np.rint(np.asarray(node_degree_predictions, dtype=float)).astype(np.int64)
+    def _resolve_target_edge_count(
+        self,
+        n_nodes: int,
+        desired_edge_count: Optional[int],
+        *,
+        connectivity: Optional[bool] = None,
+    ) -> Optional[int]:
+        if desired_edge_count is None:
+            return None
+        if connectivity is None:
+            connectivity = self.enforce_connectivity
+        n_nodes = int(max(0, n_nodes))
+        max_edges = (n_nodes * (n_nodes - 1)) // 2
+        min_edges = (n_nodes - 1) if connectivity and n_nodes >= 2 else 0
+        return int(np.clip(int(np.rint(desired_edge_count)), min_edges, max_edges))
+
+    def resolve_node_presence_mask(
+        self,
+        node_presence_mask: np.ndarray,
+        *,
+        desired_node_count: Optional[int] = None,
+        node_existence_scores: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         mask = np.asarray(node_presence_mask, dtype=bool)
-        return [int(degrees[idx]) if mask[idx] else 0 for idx in range(len(mask))]
+        if desired_node_count is None:
+            return mask
+        n_slots = int(mask.shape[0])
+        desired_node_count = int(np.clip(int(np.rint(desired_node_count)), 0, n_slots))
+        resolved = np.zeros(n_slots, dtype=bool)
+        if desired_node_count == 0:
+            return resolved
+        if node_existence_scores is None:
+            scores = mask.astype(float)
+        else:
+            scores = np.asarray(node_existence_scores, dtype=float)
+            if scores.shape[0] != n_slots:
+                raise ValueError(
+                    "node_existence_scores must align with node_presence_mask "
+                    f"(got {scores.shape[0]} scores for {n_slots} slots)."
+                )
+        top_indices = np.argsort(scores, kind="stable")[-desired_node_count:]
+        resolved[top_indices] = True
+        return resolved
+
+    def _project_degrees_to_edge_budget(
+        self,
+        active_degree_predictions: np.ndarray,
+        desired_edge_count: Optional[int],
+        *,
+        connectivity: Optional[bool] = None,
+    ) -> np.ndarray:
+        active_degree_predictions = np.asarray(active_degree_predictions, dtype=float)
+        n_active = int(active_degree_predictions.shape[0])
+        if n_active == 0:
+            return np.zeros((0,), dtype=np.int64)
+        max_degree = max(0, n_active - 1)
+        degrees = np.clip(np.rint(active_degree_predictions), 0, max_degree).astype(np.int64)
+        target_edge_count = self._resolve_target_edge_count(
+            n_active,
+            desired_edge_count,
+            connectivity=connectivity,
+        )
+        if target_edge_count is None:
+            return degrees
+        target_total_degree = int(2 * target_edge_count)
+        current_total_degree = int(degrees.sum())
+        while current_total_degree < target_total_degree:
+            headroom = max_degree - degrees
+            candidate_indices = np.flatnonzero(headroom > 0)
+            if candidate_indices.size == 0:
+                break
+            candidate_scores = active_degree_predictions[candidate_indices] - degrees[candidate_indices]
+            best_local_idx = int(np.argmax(candidate_scores + 1e-6 * active_degree_predictions[candidate_indices]))
+            degrees[candidate_indices[best_local_idx]] += 1
+            current_total_degree += 1
+        while current_total_degree > target_total_degree:
+            candidate_indices = np.flatnonzero(degrees > 0)
+            if candidate_indices.size == 0:
+                break
+            candidate_scores = degrees[candidate_indices] - active_degree_predictions[candidate_indices]
+            best_local_idx = int(np.argmax(candidate_scores + 1e-6 * (max_degree - active_degree_predictions[candidate_indices])))
+            degrees[candidate_indices[best_local_idx]] -= 1
+            current_total_degree -= 1
+        return degrees
+
+    def get_degree_targets(
+        self,
+        node_degree_predictions: np.ndarray,
+        node_presence_mask: np.ndarray,
+        *,
+        desired_edge_count: Optional[int] = None,
+        connectivity: Optional[bool] = None,
+    ) -> List[int]:
+        predictions = np.asarray(node_degree_predictions, dtype=float)
+        mask = np.asarray(node_presence_mask, dtype=bool)
+        active_indices = np.flatnonzero(mask)
+        projected_active_degrees = self._project_degrees_to_edge_budget(
+            predictions[active_indices],
+            desired_edge_count,
+            connectivity=connectivity,
+        )
+        target_degrees = np.zeros(mask.shape[0], dtype=np.int64)
+        target_degrees[active_indices] = projected_active_degrees
+        return [int(value) for value in target_degrees]
+
+    def get_degrees(self, node_degree_predictions: np.ndarray, node_presence_mask: np.ndarray) -> List[int]:
+        return self.get_degree_targets(node_degree_predictions, node_presence_mask)
 
     def decode_adjacency_matrix(
         self,
         generated_nodes: GeneratedNodeBatch,
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
+        desired_node_counts: Optional[Sequence[int]] = None,
+        desired_edge_counts: Optional[Sequence[int]] = None,
     ) -> List[np.ndarray]:
         if generated_nodes.node_presence_mask is None:
             raise RuntimeError("decode_adjacency_matrix requires node presence predictions.")
@@ -722,7 +847,21 @@ class ConditionalNodeFieldGraphDecoder(object):
             raise RuntimeError("decode_adjacency_matrix requires explicit edge probability matrices.")
 
         existence_masks = np.asarray(generated_nodes.node_presence_mask, dtype=bool)
+        existence_scores = None if generated_nodes.node_existence_probabilities is None else np.asarray(
+            generated_nodes.node_existence_probabilities,
+            dtype=float,
+        )
         degree_predictions = np.asarray(generated_nodes.node_degree_predictions, dtype=float)
+        if desired_node_counts is not None and len(desired_node_counts) != len(existence_masks):
+            raise ValueError(
+                "desired_node_counts must align with generated_nodes "
+                f"(got {len(desired_node_counts)} counts for {len(existence_masks)} graphs)."
+            )
+        if desired_edge_counts is not None and len(desired_edge_counts) != len(existence_masks):
+            raise ValueError(
+                "desired_edge_counts must align with generated_nodes "
+                f"(got {len(desired_edge_counts)} counts for {len(existence_masks)} graphs)."
+            )
         predicted_probs_list = []
         for existence_mask, degree_prediction, prob_matrix in zip(
             existence_masks,
@@ -746,7 +885,10 @@ class ConditionalNodeFieldGraphDecoder(object):
             (
                 np.asarray(predicted_probs_list[graph_idx], dtype=float),
                 np.asarray(existence_masks[graph_idx], dtype=bool),
+                None if existence_scores is None else np.asarray(existence_scores[graph_idx], dtype=float),
                 np.asarray(degree_predictions[graph_idx], dtype=float),
+                None if desired_node_counts is None else int(desired_node_counts[graph_idx]),
+                None if desired_edge_counts is None else int(desired_edge_counts[graph_idx]),
                 float(self.degree_slack_penalty),
                 bool(self.enforce_connectivity),
                 bool(self.warm_start_mst),
@@ -805,10 +947,14 @@ class ConditionalNodeFieldGraphDecoder(object):
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
         predicted_edge_labels_list: Optional[List[np.ndarray]] = None,
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
+        desired_node_counts: Optional[Sequence[int]] = None,
+        desired_edge_counts: Optional[Sequence[int]] = None,
     ) -> List[nx.Graph]:
         adj_mtx_list = self.decode_adjacency_matrix(
             generated_nodes,
             predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+            desired_node_counts=desired_node_counts,
+            desired_edge_counts=desired_edge_counts,
         )
         predicted_node_labels_list = self.decode_node_labels(
             generated_nodes,
@@ -821,6 +967,17 @@ class ConditionalNodeFieldGraphDecoder(object):
             predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
 
+        resolved_presence_masks = [
+            self.resolve_node_presence_mask(
+                np.asarray(generated_nodes.node_presence_mask[graph_idx], dtype=bool),
+                desired_node_count=None if desired_node_counts is None else int(desired_node_counts[graph_idx]),
+                node_existence_scores=None if generated_nodes.node_existence_probabilities is None else np.asarray(
+                    generated_nodes.node_existence_probabilities[graph_idx],
+                    dtype=float,
+                ),
+            )
+            for graph_idx in range(len(adj_mtx_list))
+        ]
         jobs = [
             (
                 np.asarray(node_presence_mask, dtype=bool),
@@ -829,7 +986,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 np.asarray(adj_mtx, dtype=float),
             )
             for node_presence_mask, node_labels, edge_labels, adj_mtx in zip(
-                generated_nodes.node_presence_mask,
+                resolved_presence_masks,
                 predicted_node_labels_list,
                 predicted_edge_labels_list,
                 adj_mtx_list,
@@ -842,7 +999,7 @@ class ConditionalNodeFieldGraphDecoder(object):
 
         if int(self.verbose) >= 4:
             for graph_idx, (adj_mtx, decoded_graph) in enumerate(zip(adj_mtx_list, decoded_graphs)):
-                existence_mask = np.asarray(generated_nodes.node_presence_mask[graph_idx], dtype=bool)
+                existence_mask = np.asarray(resolved_presence_masks[graph_idx], dtype=bool)
                 degree_prediction = np.asarray(generated_nodes.node_degree_predictions[graph_idx], dtype=float)
                 prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
                 masked_prob_matrix = _build_masked_prob_matrix(
@@ -850,7 +1007,11 @@ class ConditionalNodeFieldGraphDecoder(object):
                     degree_prediction=degree_prediction,
                     prob_matrix=prob_matrix,
                 )
-                target_degrees = self.get_degrees(degree_prediction, existence_mask)
+                target_degrees = self.get_degree_targets(
+                    degree_prediction,
+                    existence_mask,
+                    desired_edge_count=None if desired_edge_counts is None else int(desired_edge_counts[graph_idx]),
+                )
                 _plot_decoder_diagnostics(
                     prob_matrix=masked_prob_matrix,
                     adj_mtx=np.asarray(adj_mtx, dtype=float),

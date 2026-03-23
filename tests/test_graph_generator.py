@@ -198,6 +198,10 @@ def _rich_cached_outputs():
             [[True, True, False], [False, False, False]],
             dtype=torch.bool,
         ),
+        "_last_node_existence_probabilities": torch.tensor(
+            [[0.9, 0.8, 0.1], [0.4, 0.3, 0.2]],
+            dtype=torch.float32,
+        ),
         "_last_deg_classes": torch.tensor([[1, 2, 0], [0, 1, 2]], dtype=torch.int64),
         "_last_node_label_classes": torch.argmax(node_label_logits, dim=-1),
         "_last_node_label_logits": node_label_logits,
@@ -213,11 +217,13 @@ def _rich_cached_outputs():
 def _assert_rich_generated_batch(batch):
     assert batch.node_label_logits is not None
     assert batch.node_label_probabilities is not None
+    assert batch.node_existence_probabilities is not None
     assert batch.edge_existence_probabilities is not None
     assert batch.edge_label_logits is not None
     assert batch.edge_label_probabilities is not None
     assert batch.node_label_logits[0].shape == (3, 3)
     assert batch.node_label_probabilities[0].shape == (3, 3)
+    assert batch.node_existence_probabilities.shape == (2, 3)
     assert batch.edge_existence_probabilities[0].shape == (3, 3)
     assert batch.edge_label_logits[0].shape == (3, 3, 2)
     assert batch.edge_label_probabilities[0].shape == (3, 3, 2)
@@ -998,6 +1004,61 @@ def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
 
     assert len(adj_mtx_list) == 1
     assert adj_mtx_list[0].shape == (2, 2)
+
+
+def test_decoder_resolve_node_presence_mask_uses_top_existence_scores_for_desired_count():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+
+    resolved = decoder.resolve_node_presence_mask(
+        np.asarray([False, False, False, False], dtype=bool),
+        desired_node_count=2,
+        node_existence_scores=np.asarray([0.1, 0.9, 0.3, 0.8], dtype=float),
+    )
+
+    np.testing.assert_array_equal(resolved, np.asarray([False, True, False, True], dtype=bool))
+
+
+def test_decoder_degree_targets_match_desired_edge_budget():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+
+    target_degrees = decoder.get_degree_targets(
+        np.asarray([3.9, 0.2, 0.2, 0.2], dtype=float),
+        np.asarray([True, True, True, True], dtype=bool),
+        desired_edge_count=1,
+    )
+
+    assert sum(target_degrees) == 2
+    assert max(target_degrees) <= 3
+
+
+def test_decode_adjacency_matrix_enforces_desired_edge_count():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
+        node_existence_probabilities=np.asarray([[0.2, 0.9, 0.8, 0.7]], dtype=float),
+        node_degree_predictions=np.asarray([[3, 3, 3, 3]], dtype=float),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.95, 0.90, 0.85],
+                    [0.95, 0.0, 0.80, 0.75],
+                    [0.90, 0.80, 0.0, 0.70],
+                    [0.85, 0.75, 0.70, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adj_mtx = decoder.decode_adjacency_matrix(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_node_counts=[3],
+        desired_edge_counts=[1],
+    )[0]
+
+    assert adj_mtx.shape == (4, 4)
+    assert int(np.sum(adj_mtx) // 2) == 1
 
 
 def test_decode_forwards_diagnostic_graph_renderer_with_decoded_graph(monkeypatch):

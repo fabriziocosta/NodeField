@@ -69,6 +69,7 @@ class GeneratedNodeBatch:
     node_presence_mask: Optional[np.ndarray] = None
     node_degree_predictions: Optional[np.ndarray] = None
     node_labels: Optional[List[np.ndarray]] = None
+    node_existence_probabilities: Optional[np.ndarray] = None
     edge_probability_matrices: Optional[List[np.ndarray]] = None
     edge_label_matrices: Optional[List[np.ndarray]] = None
     node_label_logits: Optional[List[np.ndarray]] = None
@@ -86,6 +87,8 @@ class GeneratedNodeBatch:
             return int(len(self.node_degree_predictions))
         if self.node_labels is not None:
             return int(len(self.node_labels))
+        if self.node_existence_probabilities is not None:
+            return int(self.node_existence_probabilities.shape[0])
         if self.edge_probability_matrices is not None:
             return int(len(self.edge_probability_matrices))
         if self.edge_label_matrices is not None:
@@ -1421,6 +1424,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         self._last_edge_label_logits = None
         self._last_edge_label_probabilities = None
         self._last_node_presence_mask = None
+        self._last_node_existence_probabilities = None
         self._last_deg_classes = None
         self._last_node_label_classes = None
         self._last_node_label_logits = None
@@ -1475,8 +1479,15 @@ class ConditionalNodeFieldModule(pl.LightningModule):
 
             if self.use_existence_head:
                 exist_probs = torch.sigmoid(logits_exist)
+                self._last_node_existence_probabilities = exist_probs.detach().cpu()
                 self._last_node_presence_mask = (exist_probs >= exist_threshold).detach().cpu()
             else:
+                self._last_node_existence_probabilities = torch.ones(
+                    batch_size,
+                    self.number_of_rows_per_example,
+                    dtype=torch.float32,
+                    device=x.device,
+                ).cpu()
                 self._last_node_presence_mask = torch.ones(
                     batch_size,
                     self.number_of_rows_per_example,
@@ -1622,6 +1633,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.last_predicted_node_label_classes_ = None
         self.last_predicted_node_label_logits_ = None
         self.last_predicted_node_label_probabilities_ = None
+        self.last_predicted_node_existence_probabilities_ = None
         self.last_predicted_edge_probability_matrices_ = None
         self.last_predicted_edge_existence_probabilities_ = None
         self.last_predicted_edge_label_matrices_ = None
@@ -2722,6 +2734,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
 
     def _build_generated_node_batch(self, gen_orig: np.ndarray) -> GeneratedNodeBatch:
         node_presence_mask = getattr(self.model, "_last_node_presence_mask", None)
+        node_existence_probabilities = getattr(self.model, "_last_node_existence_probabilities", None)
         if node_presence_mask is None:
             node_presence_mask = np.ones(
                 (len(gen_orig), gen_orig.shape[1]),
@@ -2729,6 +2742,10 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             )
         else:
             node_presence_mask = node_presence_mask.cpu().numpy()
+        if node_existence_probabilities is None:
+            node_existence_probabilities = node_presence_mask.astype(float, copy=True)
+        else:
+            node_existence_probabilities = node_existence_probabilities.cpu().numpy()
 
         deg_classes = getattr(self.model, "_last_deg_classes", None)
         node_degree_predictions = None if deg_classes is None else deg_classes.cpu().numpy()
@@ -2744,6 +2761,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.last_predicted_node_label_classes_ = None
         self.last_predicted_node_label_logits_ = node_label_logits
         self.last_predicted_node_label_probabilities_ = node_label_probabilities
+        self.last_predicted_node_existence_probabilities_ = node_existence_probabilities
         if label_classes is not None and self.node_label_classes_ is not None:
             label_classes = label_classes.cpu().numpy()
             predicted_node_labels = [
@@ -2790,6 +2808,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             node_presence_mask=node_presence_mask,
             node_degree_predictions=node_degree_predictions,
             node_labels=predicted_node_labels,
+            node_existence_probabilities=node_existence_probabilities,
             edge_probability_matrices=edge_probability_matrices,
             edge_label_matrices=predicted_edge_label_matrices,
             node_label_logits=node_label_logits,

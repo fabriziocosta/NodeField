@@ -588,7 +588,10 @@ def _build_masked_prob_matrix(
 def _decode_single_adjacency_job(
     prob_list: np.ndarray,
     existence_mask: np.ndarray,
+    existence_scores: Optional[np.ndarray],
     degree_prediction: np.ndarray,
+    desired_node_count: Optional[int],
+    desired_edge_count: Optional[int],
     degree_slack_penalty: float,
     enforce_connectivity: bool,
     warm_start_mst: bool,
@@ -610,17 +613,26 @@ def _decode_single_adjacency_job(
             if i != j:
                 prob_matrix[i, j] = prob_list[idx]
                 idx += 1
-    existent = np.asarray(existence_mask[:n_nodes], dtype=bool)
+    existent = decoder.resolve_node_presence_mask(
+        np.asarray(existence_mask[:n_nodes], dtype=bool),
+        desired_node_count=desired_node_count,
+        node_existence_scores=None if existence_scores is None else np.asarray(existence_scores[:n_nodes], dtype=float),
+    )
     for i in range(n_nodes):
         for j in range(n_nodes):
             if not (existent[i] and existent[j]):
                 prob_matrix[i, j] = 0
     prob_matrix = (prob_matrix + prob_matrix.T) / 2
-    target_degrees = decoder.get_degrees(
+    target_degrees = decoder.get_degree_targets(
         np.asarray(degree_prediction[:n_nodes], dtype=float),
         existent,
+        desired_edge_count=desired_edge_count,
     )
-    adj_mtx = decoder.optimize_adjacency_matrix(prob_matrix, target_degrees)
+    adj_mtx = decoder.optimize_adjacency_matrix(
+        prob_matrix,
+        target_degrees,
+        target_edge_count=desired_edge_count,
+    )
     if int(verbose) >= 4 and diagnostic_graph_renderer is None:
         _plot_decoder_diagnostics(
             prob_matrix=prob_matrix,
@@ -709,6 +721,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         self,
         prob_matrix: np.ndarray,
         target_degrees: List[int],
+        target_edge_count: Optional[int] = None,
         timeLimit: int = 60,
         verbose: bool = False,
         alpha: float = 0.7,
@@ -763,6 +776,13 @@ class ConditionalNodeFieldGraphDecoder(object):
         for i in range(n):
             incident = [x[(i,j)] for j in range(i+1, n)] + [x[(j,i)] for j in range(i) if (j,i) in x]
             prob += (pulp.lpSum(incident) + u[i] - v[i] == target_degrees[i]), f"Degree_{i}"
+        if target_edge_count is not None:
+            resolved_edge_count = self._resolve_target_edge_count(
+                n,
+                target_edge_count,
+                connectivity=connectivity,
+            )
+            prob += (pulp.lpSum(var for var in x.values()) == resolved_edge_count), "EdgeCount"
 
         # Connectivity via flow
         if connectivity:
@@ -1160,29 +1180,124 @@ class ConditionalNodeFieldGraphDecoder(object):
                             instances.append(instance)
         return np.vstack(instances)
         
+    def _resolve_target_edge_count(
+        self,
+        n_nodes: int,
+        desired_edge_count: Optional[int],
+        *,
+        connectivity: Optional[bool] = None,
+    ) -> Optional[int]:
+        if desired_edge_count is None:
+            return None
+        if connectivity is None:
+            connectivity = self.enforce_connectivity
+        n_nodes = int(max(0, n_nodes))
+        max_edges = (n_nodes * (n_nodes - 1)) // 2
+        min_edges = (n_nodes - 1) if connectivity and n_nodes >= 2 else 0
+        return int(np.clip(int(np.rint(desired_edge_count)), min_edges, max_edges))
+
+    def resolve_node_presence_mask(
+        self,
+        node_presence_mask: np.ndarray,
+        *,
+        desired_node_count: Optional[int] = None,
+        node_existence_scores: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        mask = np.asarray(node_presence_mask, dtype=bool)
+        if desired_node_count is None:
+            return mask
+        n_slots = int(mask.shape[0])
+        desired_node_count = int(np.clip(int(np.rint(desired_node_count)), 0, n_slots))
+        resolved = np.zeros(n_slots, dtype=bool)
+        if desired_node_count == 0:
+            return resolved
+        if node_existence_scores is None:
+            scores = mask.astype(float)
+        else:
+            scores = np.asarray(node_existence_scores, dtype=float)
+            if scores.shape[0] != n_slots:
+                raise ValueError(
+                    "node_existence_scores must align with node_presence_mask "
+                    f"(got {scores.shape[0]} scores for {n_slots} slots)."
+                )
+        top_indices = np.argsort(scores, kind="stable")[-desired_node_count:]
+        resolved[top_indices] = True
+        return resolved
+
+    def _project_degrees_to_edge_budget(
+        self,
+        active_degree_predictions: np.ndarray,
+        desired_edge_count: Optional[int],
+        *,
+        connectivity: Optional[bool] = None,
+    ) -> np.ndarray:
+        active_degree_predictions = np.asarray(active_degree_predictions, dtype=float)
+        n_active = int(active_degree_predictions.shape[0])
+        if n_active == 0:
+            return np.zeros((0,), dtype=np.int64)
+        max_degree = max(0, n_active - 1)
+        degrees = np.clip(np.rint(active_degree_predictions), 0, max_degree).astype(np.int64)
+        target_edge_count = self._resolve_target_edge_count(
+            n_active,
+            desired_edge_count,
+            connectivity=connectivity,
+        )
+        if target_edge_count is None:
+            return degrees
+        target_total_degree = int(2 * target_edge_count)
+        current_total_degree = int(degrees.sum())
+        while current_total_degree < target_total_degree:
+            headroom = max_degree - degrees
+            candidate_indices = np.flatnonzero(headroom > 0)
+            if candidate_indices.size == 0:
+                break
+            candidate_scores = active_degree_predictions[candidate_indices] - degrees[candidate_indices]
+            best_local_idx = int(np.argmax(candidate_scores + 1e-6 * active_degree_predictions[candidate_indices]))
+            degrees[candidate_indices[best_local_idx]] += 1
+            current_total_degree += 1
+        while current_total_degree > target_total_degree:
+            candidate_indices = np.flatnonzero(degrees > 0)
+            if candidate_indices.size == 0:
+                break
+            candidate_scores = degrees[candidate_indices] - active_degree_predictions[candidate_indices]
+            best_local_idx = int(np.argmax(candidate_scores + 1e-6 * (max_degree - active_degree_predictions[candidate_indices])))
+            degrees[candidate_indices[best_local_idx]] -= 1
+            current_total_degree -= 1
+        return degrees
+
+    def get_degree_targets(
+        self,
+        degree_predictions: np.ndarray,
+        existence_mask: np.ndarray,
+        *,
+        desired_edge_count: Optional[int] = None,
+        connectivity: Optional[bool] = None,
+    ) -> List[int]:
+        predictions = np.asarray(degree_predictions, dtype=float)
+        existent = np.asarray(existence_mask, dtype=bool)
+        active_indices = np.flatnonzero(existent)
+        projected_active_degrees = self._project_degrees_to_edge_budget(
+            predictions[active_indices],
+            desired_edge_count,
+            connectivity=connectivity,
+        )
+        degs = np.zeros(existent.shape[0], dtype=np.int64)
+        degs[active_indices] = projected_active_degrees
+        return degs.astype(int).tolist()
+
     def get_degrees(
         self,
         degree_predictions: np.ndarray,
         existence_mask: np.ndarray,
     ) -> List[int]:
-        """Derive integer degree targets from explicit degree and existence predictions.
-
-        Args:
-            degree_predictions (np.ndarray): Input value.
-            existence_mask (np.ndarray): Input value.
-
-        Returns:
-            List[int]: Computed result.
-        """
-        degs = np.rint(np.asarray(degree_predictions, dtype=float))
-        existent = np.asarray(existence_mask, dtype=bool)
-        degs = np.where(existent, np.maximum(degs, 1), 0)
-        return degs.astype(int).tolist()
+        return self.get_degree_targets(degree_predictions, existence_mask)
 
     def decode_adjacency_matrix(
         self,
         generated_nodes: GeneratedNodeBatch,
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
+        desired_node_counts: Optional[Sequence[int]] = None,
+        desired_edge_counts: Optional[Sequence[int]] = None,
     ) -> List[np.ndarray]:
         """Project predicted adjacency probabilities onto valid binary graphs.
 
@@ -1194,6 +1309,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             List[np.ndarray]: Computed result.
         """
         existence_masks = generated_nodes.node_presence_mask
+        existence_scores = generated_nodes.node_existence_probabilities
         degree_predictions = generated_nodes.node_degree_predictions
 
         if existence_masks is None:
@@ -1204,6 +1320,16 @@ class ConditionalNodeFieldGraphDecoder(object):
             raise ValueError(
                 "node_degree_predictions must align with node_presence_mask "
                 f"(got {len(degree_predictions)} degree rows for {len(existence_masks)} existence rows)."
+            )
+        if desired_node_counts is not None and len(desired_node_counts) != len(existence_masks):
+            raise ValueError(
+                "desired_node_counts must align with generated node batches "
+                f"(got {len(desired_node_counts)} counts for {len(existence_masks)} graphs)."
+            )
+        if desired_edge_counts is not None and len(desired_edge_counts) != len(existence_masks):
+            raise ValueError(
+                "desired_edge_counts must align with generated node batches "
+                f"(got {len(desired_edge_counts)} counts for {len(existence_masks)} graphs)."
             )
 
         if predicted_edge_probability_matrices is None:
@@ -1236,7 +1362,10 @@ class ConditionalNodeFieldGraphDecoder(object):
             (
                 np.asarray(predicted_probs_list[graph_idx], dtype=float),
                 np.asarray(existence_masks[graph_idx], dtype=bool),
+                None if existence_scores is None else np.asarray(existence_scores[graph_idx], dtype=float),
                 np.asarray(degree_predictions[graph_idx], dtype=float),
+                None if desired_node_counts is None else int(desired_node_counts[graph_idx]),
+                None if desired_edge_counts is None else int(desired_edge_counts[graph_idx]),
                 float(self.degree_slack_penalty),
                 bool(self.enforce_connectivity),
                 bool(self.warm_start_mst),
@@ -1326,6 +1455,8 @@ class ConditionalNodeFieldGraphDecoder(object):
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
         predicted_edge_labels_list: Optional[List[np.ndarray]] = None,
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
+        desired_node_counts: Optional[Sequence[int]] = None,
+        desired_edge_counts: Optional[Sequence[int]] = None,
     ) -> List[nx.Graph]:
         """Reconstruct labelled graphs from predicted structural and semantic channels.
 
@@ -1341,6 +1472,8 @@ class ConditionalNodeFieldGraphDecoder(object):
         adj_mtx_list = self.decode_adjacency_matrix(
             generated_nodes,
             predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+            desired_node_counts=desired_node_counts,
+            desired_edge_counts=desired_edge_counts,
         )
         
         predicted_node_labels_list = self.decode_node_labels(
@@ -1355,6 +1488,17 @@ class ConditionalNodeFieldGraphDecoder(object):
             predicted_edge_label_matrices=predicted_edge_label_matrices,
         )
         
+        resolved_presence_masks = [
+            self.resolve_node_presence_mask(
+                np.asarray(generated_nodes.node_presence_mask[graph_idx], dtype=bool),
+                desired_node_count=None if desired_node_counts is None else int(desired_node_counts[graph_idx]),
+                node_existence_scores=None if generated_nodes.node_existence_probabilities is None else np.asarray(
+                    generated_nodes.node_existence_probabilities[graph_idx],
+                    dtype=float,
+                ),
+            )
+            for graph_idx in range(len(adj_mtx_list))
+        ]
         jobs = [
             (
                 np.asarray(node_presence_mask, dtype=bool),
@@ -1363,7 +1507,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 np.asarray(adj_mtx, dtype=float),
             )
             for node_presence_mask, node_labels, edge_labels, adj_mtx in zip(
-                generated_nodes.node_presence_mask,
+                resolved_presence_masks,
                 predicted_node_labels_list,
                 predicted_edge_labels_list,
                 adj_mtx_list,
@@ -1376,7 +1520,7 @@ class ConditionalNodeFieldGraphDecoder(object):
 
         if int(self.verbose) >= 4:
             for graph_idx, (adj_mtx, decoded_graph) in enumerate(zip(adj_mtx_list, decoded_graphs)):
-                existence_mask = np.asarray(generated_nodes.node_presence_mask[graph_idx], dtype=bool)
+                existence_mask = np.asarray(resolved_presence_masks[graph_idx], dtype=bool)
                 degree_prediction = np.asarray(generated_nodes.node_degree_predictions[graph_idx], dtype=float)
                 prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
                 masked_prob_matrix = _build_masked_prob_matrix(
@@ -1384,7 +1528,11 @@ class ConditionalNodeFieldGraphDecoder(object):
                     degree_prediction=degree_prediction,
                     prob_matrix=prob_matrix,
                 )
-                target_degrees = self.get_degrees(degree_prediction, existence_mask)
+                target_degrees = self.get_degree_targets(
+                    degree_prediction,
+                    existence_mask,
+                    desired_edge_count=None if desired_edge_counts is None else int(desired_edge_counts[graph_idx]),
+                )
                 _plot_decoder_diagnostics(
                     prob_matrix=masked_prob_matrix,
                     adj_mtx=np.asarray(adj_mtx, dtype=float),
@@ -1396,7 +1544,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                         generated_nodes.node_label_probabilities[graph_idx],
                         dtype=float,
                     ),
-                    node_label_names=self._get_node_label_names(),
+                    node_label_names=None if not hasattr(self, "_get_node_label_names") else self._get_node_label_names(),
                     node_labels=None if predicted_node_labels_list is None else np.asarray(
                         predicted_node_labels_list[graph_idx],
                         dtype=object,
@@ -1649,6 +1797,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         node_presence_mask = None if generated_nodes.node_presence_mask is None else np.asarray(
             [generated_nodes.node_presence_mask[graph_idx]]
         )
+        node_existence_probabilities = None if generated_nodes.node_existence_probabilities is None else np.asarray(
+            [generated_nodes.node_existence_probabilities[graph_idx]],
+            dtype=float,
+        )
         node_degree_predictions = None if generated_nodes.node_degree_predictions is None else np.asarray(
             [generated_nodes.node_degree_predictions[graph_idx]]
         )
@@ -1681,6 +1833,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             node_presence_mask=node_presence_mask,
             node_degree_predictions=node_degree_predictions,
             node_labels=node_labels,
+            node_existence_probabilities=node_existence_probabilities,
             edge_probability_matrices=edge_probability_matrices,
             edge_label_matrices=edge_label_matrices,
             node_label_logits=node_label_logits,
@@ -2164,7 +2317,13 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise RuntimeError("Oracle-guided adjacency solve failed even after relaxing all oracle cuts.") from last_error
         raise RuntimeError("Oracle-guided adjacency solve could not be attempted.")
 
-    def _decode_generated_nodes_with_oracle(self, generated_nodes: GeneratedNodeBatch) -> List[nx.Graph]:
+    def _decode_generated_nodes_with_oracle(
+        self,
+        generated_nodes: GeneratedNodeBatch,
+        graph_conditioning: Optional[GraphConditioningBatch] = None,
+    ) -> List[nx.Graph]:
+        if self.graph_decoder is None:
+            self.graph_decoder = ConditionalNodeFieldGraphDecoder(verbose=bool(self.verbose))
         predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
         if predicted_edge_probability_matrices is None:
             raise RuntimeError(
@@ -2182,7 +2341,16 @@ class ConditionalNodeFieldGraphGenerator(object):
         decoded_graphs: List[nx.Graph] = []
         for graph_idx in range(len(predicted_edge_probability_matrices)):
             single_generated_nodes = self._build_single_generated_node_batch(generated_nodes, graph_idx)
-            existence_mask = np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool)
+            desired_node_count = None if graph_conditioning is None else int(np.asarray(graph_conditioning.node_counts)[graph_idx])
+            desired_edge_count = None if graph_conditioning is None else int(np.asarray(graph_conditioning.edge_counts)[graph_idx])
+            existence_mask = self.graph_decoder.resolve_node_presence_mask(
+                np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool),
+                desired_node_count=desired_node_count,
+                node_existence_scores=None if single_generated_nodes.node_existence_probabilities is None else np.asarray(
+                    single_generated_nodes.node_existence_probabilities[0],
+                    dtype=float,
+                ),
+            )
             degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
             prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
             masked_prob_matrix = _build_masked_prob_matrix(
@@ -2190,7 +2358,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                 degree_prediction=degree_predictions,
                 prob_matrix=prob_matrix,
             )
-            target_degrees = self.graph_decoder.get_degrees(degree_predictions, existence_mask)
+            target_degrees = self.graph_decoder.get_degree_targets(
+                degree_predictions,
+                existence_mask,
+                desired_edge_count=desired_edge_count,
+            )
             current_node_labels = np.asarray(predicted_node_labels_list[graph_idx], dtype=object).copy()
             current_edge_label_matrix = (
                 np.asarray(predicted_edge_label_matrices[graph_idx], dtype=object).copy()
@@ -2205,6 +2377,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             single_adj_mtx = self.graph_decoder.decode_adjacency_matrix(
                 single_generated_nodes,
                 predicted_edge_probability_matrices=[predicted_edge_probability_matrices[graph_idx]],
+                desired_node_counts=None if desired_node_count is None else [desired_node_count],
+                desired_edge_counts=None if desired_edge_count is None else [desired_edge_count],
             )[0]
             accumulated_structural_cuts: List[FrozenSet[Edge]] = []
             accumulated_node_label_forbidden: List[ForbiddenNodeLabelAssignment] = []
@@ -2289,7 +2463,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                 current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
                 current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
 
-                new_node_forbidden = [
+                new_node_forbidden = [] if node_label_probabilities is None else [
                     assignment
                     for assignment in self._forbidden_node_label_assignment_from_sets(
                         current_node_violation_sets,
@@ -2297,7 +2471,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     )
                     if assignment not in accumulated_node_label_forbidden
                 ]
-                new_edge_label_forbidden = [
+                new_edge_label_forbidden = [] if edge_label_probabilities is None else [
                     assignment
                     for assignment in self._forbidden_edge_label_assignment_from_sets(
                         current_edge_violation_sets,
@@ -2356,8 +2530,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                     np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
                     np.asarray(single_adj_mtx, dtype=float),
                 )
-                current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
-                current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                if joint_label_detail == "labels changed":
+                    current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
 
                 score, edge_score, node_score, edge_label_score = self._oracle_candidate_score_components(
                     existence_mask=existence_mask,
@@ -3415,6 +3589,7 @@ class ConditionalNodeFieldGraphGenerator(object):
     def _decode_generated_nodes(
         self,
         generated_nodes: GeneratedNodeBatch,
+        graph_conditioning: Optional[GraphConditioningBatch] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
     ) -> List[nx.Graph]:
@@ -3422,7 +3597,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
         ):
-            return self._decode_generated_nodes_with_oracle(generated_nodes)
+            return self._decode_generated_nodes_with_oracle(
+                generated_nodes,
+                graph_conditioning=graph_conditioning,
+            )
         predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
         if predicted_edge_probability_matrices is None:
             raise RuntimeError(
@@ -3439,6 +3617,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             predicted_edge_probability_matrices=predicted_edge_probability_matrices,
             predicted_edge_labels_list=predicted_edge_labels_list,
             predicted_edge_label_matrices=predicted_edge_label_matrices,
+            desired_node_counts=None if graph_conditioning is None else np.asarray(graph_conditioning.node_counts, dtype=int),
+            desired_edge_counts=None if graph_conditioning is None else np.asarray(graph_conditioning.edge_counts, dtype=int),
         )
 
     def _predict_generated_nodes(
@@ -3893,6 +4073,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         )
         return self._decode_generated_nodes(
             generated_nodes,
+            graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
         )
@@ -4110,6 +4291,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self._log_generated_batch_info(graph_conditioning, generated_nodes)
         return self._decode_generated_nodes(
             generated_nodes,
+            graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
         )
@@ -4277,6 +4459,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         )
         return self._decode_generated_nodes(
             generated_nodes,
+            graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
         )
@@ -4489,7 +4672,7 @@ class ConditionalNodeFieldGraphGenerator(object):
 
         original_attempts = self.max_feasibility_attempts
         original_candidates = self.feasibility_candidates_per_attempt
-        original_oracle_candidates = self.feasibility_oracle_candidates_per_attempt
+        original_oracle_candidates = getattr(self, "feasibility_oracle_candidates_per_attempt", 0)
         original_verbose = self.verbose
 
         if max_feasibility_attempts is not None:
@@ -4549,12 +4732,19 @@ class ConditionalNodeFieldGraphGenerator(object):
                         for slot_idx in pending_slot_indices
                         for _ in range(self.feasibility_candidates_per_attempt)
                     ]
-                    decoded_graphs = self._decode_conditioning_batch(
-                        candidate_conditioning,
-                        desired_target=desired_target,
-                        guidance_scale=guidance_scale,
-                        attempt_idx=attempt - 1,
-                    )
+                    try:
+                        decoded_graphs = self._decode_conditioning_batch(
+                            candidate_conditioning,
+                            desired_target=desired_target,
+                            guidance_scale=guidance_scale,
+                            attempt_idx=attempt - 1,
+                        )
+                    except TypeError:
+                        decoded_graphs = self._decode_conditioning_batch(
+                            candidate_conditioning,
+                            desired_target=desired_target,
+                            guidance_scale=guidance_scale,
+                        )
                     feasibility_mask = np.asarray(self.feasibility_estimator.predict(decoded_graphs), dtype=bool)
                     if feasibility_mask.shape[0] != len(decoded_graphs):
                         raise RuntimeError(
@@ -4591,7 +4781,9 @@ class ConditionalNodeFieldGraphGenerator(object):
                 "feasible_candidates": total_feasible,
                 "max_feasibility_attempts": int(self.max_feasibility_attempts),
                 "feasibility_candidates_per_attempt": int(self.feasibility_candidates_per_attempt),
-                "feasibility_oracle_candidates_per_attempt": int(self.feasibility_oracle_candidates_per_attempt),
+                "feasibility_oracle_candidates_per_attempt": int(
+                    getattr(self, "feasibility_oracle_candidates_per_attempt", original_oracle_candidates)
+                ),
             }
         finally:
             self.max_feasibility_attempts = original_attempts
