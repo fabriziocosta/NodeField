@@ -38,6 +38,21 @@ def import_nsppk():
     return module.NSPPK, node_nsppk
 
 
+def find_local_nsppk_repo(start: str | Path | None = None) -> Path | None:
+    """Return a likely local NSPPK checkout if one exists near the repo."""
+    repo_root = _ensure_repo_on_syspath(Path.cwd() if start is None else Path(start))
+    candidates = [
+        repo_root.parent / "NSPPK",
+        repo_root.parent / "nsppk",
+        repo_root.parent / "INACTIVE" / "NSPPK",
+        repo_root.parent / "INACTIVE" / "nsppk",
+    ]
+    for candidate in candidates:
+        if (candidate / "pyproject.toml").exists() or (candidate / "setup.py").exists():
+            return candidate.resolve()
+    return None
+
+
 def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True) -> dict[str, Path]:
     """Resolve local paths, silence noisy warnings, and optionally expose NSPPK."""
     warnings.filterwarnings("ignore", message=".*PossibleUserWarning.*")
@@ -49,8 +64,15 @@ def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True)
         try:
             import_nsppk()
         except ModuleNotFoundError as exc:
+            local_nsppk_repo = find_local_nsppk_repo(repo_root)
+            install_hint = "Install the 'nsppk' package in the current environment."
+            if local_nsppk_repo is not None:
+                install_hint = (
+                    "Install the local NSPPK checkout in the current environment, "
+                    f"for example: pip install -e '{local_nsppk_repo}'."
+                )
             raise ModuleNotFoundError(
-                "Could not import NSPPK. Install the 'nsppk' package in the current environment."
+                f"Could not import NSPPK. {install_hint}"
             ) from exc
 
     if print_torch:
@@ -74,5 +96,6 @@ __all__ = [
     "configure_notebook",
     "ensure_repo_on_syspath",
     "find_repo_root",
+    "find_local_nsppk_repo",
     "import_nsppk",
 ]

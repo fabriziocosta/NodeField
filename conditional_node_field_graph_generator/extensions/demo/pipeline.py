@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import math
+from pathlib import Path
 from typing import Any, Callable, Optional
 import warnings
 
@@ -15,9 +15,9 @@ from abstractgraph_graphicalizer.chem import (
     DEFAULT_ZINC_TARGET_COLUMNS,
     PubChemLoader,
     SupervisedDataSetLoader,
+    ZINCLoader,
     download_zinc_dataset,
     draw_molecules,
-    ZINCLoader,
 )
 from sklearn.model_selection import train_test_split
 
