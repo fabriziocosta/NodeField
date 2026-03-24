@@ -4,7 +4,6 @@ from conditional_node_field_graph_generator.runtime_paths import (
     resolve_artifact_root,
     resolve_checkpoint_root,
     resolve_notebook_data_root,
-    resolve_optional_checkout,
     resolve_pubchem_data_root,
     resolve_repo_root,
     resolve_saved_generator_dir,
@@ -28,15 +27,3 @@ def test_runtime_paths_resolve_repo_and_artifact_roots_from_nested_start():
 def test_runtime_paths_resolve_dataset_roots_with_explicit_overrides(tmp_path):
     assert resolve_pubchem_data_root(tmp_path / "PUBCHEM") == (tmp_path / "PUBCHEM").resolve()
     assert resolve_zinc_data_root(tmp_path / "zinc") == (tmp_path / "zinc").resolve()
-
-
-def test_runtime_paths_optional_checkout_uses_supplied_bases(tmp_path):
-    target = tmp_path / "repos" / "abstractgraph-graphicalizer" / "src"
-    target.mkdir(parents=True)
-
-    resolved = resolve_optional_checkout(
-        "repos/abstractgraph-graphicalizer/src",
-        candidate_bases=[tmp_path],
-    )
-
-    assert resolved == target.resolve()

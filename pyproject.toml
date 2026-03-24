@@ -35,17 +35,25 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "jupyterlab", "notebook"]
-chem = ["rdkit-pypi"]
-
-[tool.setuptools]
-py-modules = ["_external_imports"]
+ecosystem = [
+  "abstractgraph>=0.1.0",
+  "abstractgraph-ml>=0.1.0",
+  "abstractgraph-graphicalizer>=0.1.0"
+]
+chem = [
+  "abstractgraph-graphicalizer>=0.1.0",
+  "rdkit-pypi"
+]
+full = [
+  "abstractgraph>=0.1.0",
+  "abstractgraph-ml>=0.1.0",
+  "abstractgraph-graphicalizer>=0.1.0",
+  "rdkit-pypi"
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-  "conditional_node_field_graph_generator*",
-  "abstractgraph",
-  "abstractgraph_ml",
-  "abstractgraph_graphicalizer"
+  "conditional_node_field_graph_generator*"
 ]
 exclude = ["tests*", "docs*", "notebooks*", "*.egg-info"]

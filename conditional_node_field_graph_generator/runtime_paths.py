@@ -5,9 +5,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Iterable
-
-from _external_imports import resolve_source_checkout
 
 
 def _resolve_start_path(start: str | Path | None = None) -> Path:
@@ -124,10 +121,3 @@ def resolve_nsppk_root(
         if resolved.exists():
             return resolved
     return None
-
-
-def resolve_optional_checkout(
-    *relative_roots: str,
-    candidate_bases: Iterable[Path] | None = None,
-) -> Path | None:
-    return resolve_source_checkout(*relative_roots, candidate_bases=candidate_bases)

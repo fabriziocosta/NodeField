@@ -22,6 +22,10 @@ from abstractgraph_graphicalizer.chem import (
 )
 ```
 
+Install the supporting package normally:
+- `pip install abstractgraph-graphicalizer`
+- or `pip install -e /path/to/abstractgraph-graphicalizer`
+
 Canonical chemistry schema:
 - node label: atomic symbol in `node["label"]`
 - edge label: `"single"`, `"double"`, `"triple"`, or `"aromatic"`

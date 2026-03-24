@@ -137,12 +137,16 @@ pip install -e ".[dev]"
 ```
 
 Optional extras:
-- `pip install ".[chem]"` to enable the RDKit-based molecular helpers.
+- `pip install -e ".[ecosystem]"` to install the AbstractGraph ecosystem packages used by demo and chemistry workflows.
+- `pip install -e ".[chem]"` to enable the RDKit-based chemistry helpers through `abstractgraph-graphicalizer`.
+- `pip install -e ".[full]"` to install both the ecosystem and chemistry extras.
 
-Additional external packages used by some notebook/demo workflows are not bundled as install requirements here:
+Additional external packages used by some notebook/demo workflows are still not bundled here:
 - `NSPPK`
-- `abstractgraph`
-- `abstractgraph_ml`
+
+This repo no longer ships local import shims for `abstractgraph`, `abstractgraph-ml`, or
+`abstractgraph-graphicalizer`. Install those packages normally instead of relying on sibling
+source checkouts.
 
 ## Quick Start
 

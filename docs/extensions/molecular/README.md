@@ -12,6 +12,7 @@ All maintained chemistry support now lives in the abstractgraph ecosystem under
 
 Use:
 - `from abstractgraph_graphicalizer.chem import ...`
+- install `abstractgraph-graphicalizer` as a normal package; NodeField no longer ships a local import shim for it
 
 Reference:
 - [`docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md`](/home/fabrizio/code/NodeField/docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md)
