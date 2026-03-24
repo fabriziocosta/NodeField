@@ -11,6 +11,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import requests
+from abstractgraph_graphicalizer.chem import draw_molecules as abstractgraph_draw_molecules
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
 
@@ -282,7 +283,7 @@ def draw_molecules(
     mols_per_row: Optional[int] = None,
     sub_img_size: Optional[tuple[int, int]] = None,
 ):
-    """Display a grid image for a list of molecular graphs."""
+    """Display molecules through the abstractgraph chemistry drawer."""
     graph_list = list(graphs)
     if num is not None:
         graph_list = graph_list[:num]
@@ -297,20 +298,19 @@ def draw_molecules(
 
     if mols_per_row is None:
         mols_per_row = n_graphs_per_line
-    if sub_img_size is None:
-        pixel_size = max(150, int(size) * 35)
-        sub_img_size = (pixel_size, pixel_size)
-
-    for start in range(0, len(graph_list), 50):
-        image = molecule_graphs_to_grid_image(
-            graph_list[start : start + 50],
-            legends=None if legends is None else list(legends)[start : start + 50],
-            mols_per_row=mols_per_row,
-            sub_img_size=sub_img_size,
-        )
-        if image is not None:
-            display(image)
-    return None
+    resolved_titles = legends
+    if resolved_titles is None and titles is not None:
+        resolved_titles = list(titles)[: len(graph_list)]
+    elif resolved_titles is None:
+        resolved_titles = [str(index) for index in range(len(graph_list))]
+    subplot_size = (max(1.0, float(size)), max(1.0, float(size) * 0.6))
+    return abstractgraph_draw_molecules(
+        graph_list,
+        n_graphs_per_line=mols_per_row,
+        titles=resolved_titles,
+        size=subplot_size,
+        show=True,
+    )
 
 
 def resolve_pubchem_dir(pubchem_dir: Path | str | None = None) -> Path:

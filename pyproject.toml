@@ -45,6 +45,7 @@ where = ["."]
 include = [
   "conditional_node_field_graph_generator*",
   "abstractgraph",
-  "abstractgraph_ml"
+  "abstractgraph_ml",
+  "abstractgraph_graphicalizer"
 ]
 exclude = ["tests*", "docs*", "notebooks*", "*.egg-info"]
