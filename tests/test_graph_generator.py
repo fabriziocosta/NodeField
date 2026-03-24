@@ -1163,6 +1163,114 @@ def test_coerce_inline_image_array_reads_display_wrapper_bytes():
     assert image_array.shape == (3, 4, 3)
 
 
+def test_plot_decoder_diagnostics_uses_integer_node_ticks(monkeypatch):
+    calls = {"axes": None}
+
+    class _Axis:
+        def __init__(self):
+            self.xticks = None
+            self.yticks = None
+            self.yticklabels = None
+
+        def imshow(self, *args, **kwargs):
+            return object()
+
+        def set_title(self, *args, **kwargs):
+            return None
+
+        def set_xlabel(self, *args, **kwargs):
+            return None
+
+        def set_ylabel(self, *args, **kwargs):
+            return None
+
+        def set_xticks(self, values, *args, **kwargs):
+            self.xticks = list(values)
+
+        def set_xticklabels(self, *args, **kwargs):
+            return None
+
+        def set_yticks(self, values, *args, **kwargs):
+            self.yticks = list(values)
+
+        def set_yticklabels(self, values, *args, **kwargs):
+            self.yticklabels = list(values)
+
+        def plot(self, *args, **kwargs):
+            return None
+
+        def bar(self, *args, **kwargs):
+            return None
+
+        def grid(self, *args, **kwargs):
+            return None
+
+        def tick_params(self, *args, **kwargs):
+            return None
+
+        def legend(self, *args, **kwargs):
+            return None
+
+        def scatter(self, *args, **kwargs):
+            return None
+
+        def text(self, *args, **kwargs):
+            return None
+
+        def set_axis_off(self, *args, **kwargs):
+            return None
+
+    class _Figure:
+        def suptitle(self, *args, **kwargs):
+            return None
+
+        def colorbar(self, *args, **kwargs):
+            return None
+
+    def fake_subplots(*args, **kwargs):
+        axes = [_Axis() for _ in range(5)]
+        calls["axes"] = axes
+        return _Figure(), np.asarray(axes, dtype=object)
+
+    monkeypatch.setattr(cngg_module.plt, "subplots", fake_subplots)
+    monkeypatch.setattr(cngg_module.plt, "tight_layout", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cngg_module.plt, "show", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cngg_module.plt, "close", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cngg_module, "_try_render_molecular_graph_inline", lambda *args, **kwargs: True)
+
+    cngg_module._plot_decoder_diagnostics(
+        prob_matrix=np.asarray(
+            [
+                [0.0, 0.1, 0.2],
+                [0.1, 0.0, 0.3],
+                [0.2, 0.3, 0.0],
+            ],
+            dtype=float,
+        ),
+        adj_mtx=np.asarray(
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        target_degrees=[1, 2, 1],
+        title="Oracle demo",
+        decoded_graph=nx.path_graph(3),
+        existence_mask=[False, True, True],
+        node_label_probabilities=np.asarray([[0.8, 0.2], [0.1, 0.9], [0.7, 0.3]], dtype=float),
+        node_label_names=["C", "N"],
+        node_labels=["C", "N", "C"],
+    )
+
+    edge_axis = calls["axes"][0]
+    label_axis = calls["axes"][3]
+    assert edge_axis.xticks == [1, 2]
+    assert edge_axis.yticks == [1, 2]
+    assert label_axis.yticklabels == ["0", "1", "2"]
+
+
 def test_parallel_decode_matches_serial_decode():
     generated_nodes = GeneratedNodeBatch(
         node_presence_mask=np.asarray([[True, True], [True, True]], dtype=bool),

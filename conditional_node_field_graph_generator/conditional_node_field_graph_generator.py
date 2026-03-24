@@ -425,6 +425,9 @@ def _plot_decoder_diagnostics(
     axes[0].set_title("Edge probabilities")
     axes[0].set_xlabel("node j")
     axes[0].set_ylabel("node i")
+    if active_indices.size > 0:
+        axes[0].set_xticks(active_indices.astype(int).tolist())
+        axes[0].set_yticks(active_indices.astype(int).tolist())
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
     axes[1].imshow(adj_display, vmin=0.0, vmax=1.0, cmap="gray")
@@ -533,7 +536,7 @@ def _plot_decoder_diagnostics(
             heatmap_axis.set_xticklabels([str(idx) for idx in range(label_probs.shape[1])], rotation=45, ha="right")
         node_ids = np.arange(label_probs.shape[0])
         heatmap_axis.set_yticks(node_ids)
-        heatmap_axis.set_yticklabels([f"node {idx}" for idx in node_ids])
+        heatmap_axis.set_yticklabels([str(idx) for idx in node_ids])
         chosen_cols: List[Optional[int]] = [None] * label_probs.shape[0]
         if node_labels is not None and len(node_labels) == label_probs.shape[0]:
             label_to_col = None

@@ -221,6 +221,9 @@ def _plot_decoder_diagnostics(
     axes[0].set_title("Edge probabilities")
     axes[0].set_xlabel("node j")
     axes[0].set_ylabel("node i")
+    if active_indices.size > 0:
+        axes[0].set_xticks(active_indices.astype(int).tolist())
+        axes[0].set_yticks(active_indices.astype(int).tolist())
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
     axes[1].imshow(adj_display, vmin=0.0, vmax=1.0, cmap="gray")
