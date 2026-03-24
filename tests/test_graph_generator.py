@@ -9,7 +9,6 @@ import torch
 from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
-from conditional_node_field_graph_generator.persistence_migrations import apply_graph_generator_persistence_migrations
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
@@ -1169,10 +1168,14 @@ def test_plot_decoder_diagnostics_uses_integer_node_ticks(monkeypatch):
     class _Axis:
         def __init__(self):
             self.xticks = None
+            self.xticklabels = None
             self.yticks = None
             self.yticklabels = None
+            self.images = []
 
         def imshow(self, *args, **kwargs):
+            if args:
+                self.images.append(np.asarray(args[0]))
             return object()
 
         def set_title(self, *args, **kwargs):
@@ -1187,8 +1190,8 @@ def test_plot_decoder_diagnostics_uses_integer_node_ticks(monkeypatch):
         def set_xticks(self, values, *args, **kwargs):
             self.xticks = list(values)
 
-        def set_xticklabels(self, *args, **kwargs):
-            return None
+        def set_xticklabels(self, values, *args, **kwargs):
+            self.xticklabels = list(values)
 
         def set_yticks(self, values, *args, **kwargs):
             self.yticks = list(values)
@@ -1265,10 +1268,53 @@ def test_plot_decoder_diagnostics_uses_integer_node_ticks(monkeypatch):
     )
 
     edge_axis = calls["axes"][0]
+    adjacency_axis = calls["axes"][1]
     label_axis = calls["axes"][3]
-    assert edge_axis.xticks == [1, 2]
-    assert edge_axis.yticks == [1, 2]
+    assert edge_axis.images[0].tolist() == [[0.0, 0.3], [0.3, 0.0]]
+    assert edge_axis.xticks == [0, 1]
+    assert edge_axis.xticklabels == [1, 2]
+    assert edge_axis.yticks == [0, 1]
+    assert edge_axis.yticklabels == [1, 2]
+    assert adjacency_axis.xticks == [0, 1]
+    assert adjacency_axis.yticks == [0, 1]
+    assert adjacency_axis.yticklabels == [1, 2]
     assert label_axis.yticklabels == ["0", "1", "2"]
+
+
+def test_fill_unlabeled_active_edges_uses_edge_label_probabilities():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.edge_label_classes_ = np.asarray(["single", "double", "triple"], dtype=object)
+
+    repaired = generator._fill_unlabeled_active_edges(
+        adj_mtx=np.asarray(
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        edge_label_matrix=np.asarray(
+            [
+                [None, "single", None],
+                ["single", None, None],
+                [None, None, None],
+            ],
+            dtype=object,
+        ),
+        edge_label_probabilities=np.asarray(
+            [
+                [[0.0, 0.0, 0.0], [0.8, 0.1, 0.1], [0.0, 0.0, 0.0]],
+                [[0.8, 0.1, 0.1], [0.0, 0.0, 0.0], [0.1, 0.7, 0.2]],
+                [[0.0, 0.0, 0.0], [0.1, 0.7, 0.2], [0.0, 0.0, 0.0]],
+            ],
+            dtype=float,
+        ),
+    )
+
+    assert repaired[0, 1] == "single"
+    assert repaired[1, 2] == "double"
+    assert repaired[2, 1] == "double"
 
 
 def test_parallel_decode_matches_serial_decode():
@@ -1710,27 +1756,6 @@ def test_can_use_feasibility_oracle_respects_attempt_budget():
         feasibility_oracle_candidates_per_attempt=0,
         attempt_idx=0,
     ) is False
-
-
-def test_persistence_migration_maps_old_boolean_flag():
-    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
-    del generator.feasibility_oracle_candidates_per_attempt
-    generator.use_feasibility_oracle = False
-    if hasattr(generator, "_persistence_schema_version"):
-        del generator._persistence_schema_version
-
-    apply_graph_generator_persistence_migrations(generator)
-
-    assert generator.feasibility_oracle_candidates_per_attempt == 0
-
-    del generator.feasibility_oracle_candidates_per_attempt
-    generator.use_feasibility_oracle = True
-    if hasattr(generator, "_persistence_schema_version"):
-        del generator._persistence_schema_version
-
-    apply_graph_generator_persistence_migrations(generator)
-
-    assert generator.feasibility_oracle_candidates_per_attempt == 2
 
 
 def test_edge_importance_parameters_are_exposed_on_model():

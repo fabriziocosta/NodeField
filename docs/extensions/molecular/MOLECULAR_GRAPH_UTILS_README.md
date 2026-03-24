@@ -37,7 +37,7 @@ Ownership split:
 - `abstractgraph_graphicalizer.chem` owns chemistry data loading, conversion, cache helpers, and rendering
 
 Migration notes:
-- old numeric bond labels like `"1"`, `"2"`, `"3"`, and `"AROMATIC"` are normalized to the canonical schema at load time
+- old chemistry artifacts should be rebuilt or re-exported against the canonical schema; NodeField no longer carries persistence-time migration for old saved generators
 - maintained notebooks now import chemistry helpers from `abstractgraph_graphicalizer.chem`
 - old `conditional_node_field_graph_generator.extensions.molecular` imports have been removed
 

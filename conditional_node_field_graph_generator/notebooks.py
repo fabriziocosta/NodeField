@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import sys
 import warnings
 from pathlib import Path
@@ -12,7 +11,6 @@ from .runtime_paths import (
     resolve_artifact_root,
     resolve_checkpoint_root,
     resolve_notebook_data_root,
-    resolve_nsppk_root,
     resolve_saved_generator_dir,
 )
 
@@ -32,20 +30,10 @@ def ensure_repo_on_syspath() -> Path:
     return _ensure_repo_on_syspath(Path.cwd())
 
 
-def ensure_nsppk_on_syspath(repo_root: Path) -> Path | None:
-    """Add a local NSPPK checkout to sys.path when present."""
-    nsppk_root = resolve_nsppk_root(repo_root=repo_root, start=Path.cwd())
-    if nsppk_root is not None:
-        _add_to_syspath(nsppk_root)
-    return nsppk_root
-
-
 def import_nsppk():
-    """Import the preferred NSPPK entry points across legacy layouts."""
-    try:
-        module = importlib.import_module("NSPPPK.nsppk")
-    except ModuleNotFoundError:
-        module = importlib.import_module("nsppk")
+    """Import the installed NSPPK entry points."""
+    import nsppk as module
+
     node_nsppk = getattr(module, "NodeNSPPK", None)
     return module.NSPPK, node_nsppk
 
@@ -57,18 +45,13 @@ def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True)
     warnings.filterwarnings("ignore", message=".*to enable TensorBoard support.*")
 
     repo_root = ensure_repo_on_syspath()
-    nsppk_root = ensure_nsppk_on_syspath(repo_root)
     if require_nsppk:
         try:
             import_nsppk()
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
-                "Could not locate NSPPK. Set NSPPK_ROOT or clone NSPPK next to this repo."
+                "Could not import NSPPK. Install the 'nsppk' package in the current environment."
             ) from exc
-        if nsppk_root is None and "nsppk" not in sys.modules:
-            raise ModuleNotFoundError(
-                "Could not locate NSPPK. Set NSPPK_ROOT or clone NSPPK next to this repo."
-            )
 
     if print_torch:
         import torch
@@ -84,14 +67,11 @@ def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True)
         "CHECKPOINT_ROOT": resolve_checkpoint_root(repo_root=repo_root),
         "SAVED_GENERATOR_ROOT": resolve_saved_generator_dir(repo_root=repo_root),
     }
-    if nsppk_root is not None:
-        context["NSPPK_ROOT"] = nsppk_root
     return context
 
 
 __all__ = [
     "configure_notebook",
-    "ensure_nsppk_on_syspath",
     "ensure_repo_on_syspath",
     "find_repo_root",
     "import_nsppk",

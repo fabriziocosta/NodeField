@@ -96,28 +96,3 @@ def resolve_zinc_data_root(
         return Path(dataset_dir).expanduser().resolve()
     return resolve_notebook_data_root(repo_root=repo_root) / "zinc"
 
-
-def resolve_nsppk_root(
-    repo_root: str | Path | None = None,
-    *,
-    start: str | Path | None = None,
-) -> Path | None:
-    resolved_repo_root = resolve_repo_root(repo_root if repo_root is not None else start)
-    cwd = _resolve_start_path(start)
-    candidates: list[Path] = []
-    env_root = os.environ.get("NSPPK_ROOT")
-    if env_root:
-        candidates.append(Path(env_root).expanduser())
-    candidates.extend(
-        [
-            resolved_repo_root / "NSPPK",
-            resolved_repo_root.parent / "NSPPK",
-            cwd / "NSPPK",
-            cwd.parent / "NSPPK",
-        ]
-    )
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved.exists():
-            return resolved
-    return None

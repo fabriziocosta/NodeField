@@ -52,7 +52,7 @@ This extension document covers the synthetic-graph support layer. It points to t
 
 [`docs/extensions/demo/README.md`](docs/extensions/demo/README.md)
 
-This extension document covers the demo-oriented helper layer. It points to the reusable notebook pipeline helpers, visualization utilities, and checkpoint helpers used in the maintained example notebooks. Saved-generator serialization now lives in the core [`conditional_node_field_graph_generator/persistence.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/persistence.py) module.
+This extension document covers the demo-oriented helper layer. It points to the reusable notebook pipeline helpers, visualization utilities, and checkpoint helpers used in the maintained example notebooks. Saved-generator serialization now lives in the core [`conditional_node_field_graph_generator/persistence.py`](conditional_node_field_graph_generator/persistence.py) module.
 
 The repository includes:
 - A trainable conditional node generator.
@@ -149,6 +149,8 @@ Python 3.13 note:
 Additional external packages used by some notebook/demo workflows are still not bundled here:
 - `NSPPK`
 
+Notebook and demo helpers now expect `nsppk` to be installed in the active environment. NodeField no longer probes for sibling NSPPK checkouts or ships a top-level notebook bootstrap shim.
+
 This repo no longer ships local import shims for `abstractgraph`, `abstractgraph-ml`, or
 `abstractgraph-graphicalizer`. Install those packages normally instead of relying on sibling
 source checkouts.
@@ -171,7 +173,7 @@ Typical high-level workflow:
 5. Train with `.fit(...)`.
 6. Generate with `.sample(...)` or `.sample_conditioned_on_random(...)`.
 
-If training is interrupted, you can resume the training state by passing `ckpt_path=...` to `.fit(...)`, provided you point to one of the Lightning checkpoints written under the configured checkpoint root.
+If training is interrupted, you can resume the training state by passing `ckpt_path=...` to `.fit(...)`, provided you point to a compatible Lightning checkpoint written under the configured checkpoint root. Incompatible checkpoints now fail explicitly instead of silently restarting from scratch.
 
 By default, `.sample(...)` reuses cached graph-level conditioning rows from the training set. It can also be configured to stochastically interpolate between pairs of cached training embeddings in graph-conditioning space, with the same interpolation coefficient applied to graph embeddings, node counts, and edge counts.
 

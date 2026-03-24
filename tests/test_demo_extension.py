@@ -124,34 +124,29 @@ def test_build_zinc_dataset_uses_compact_size_interface(monkeypatch, tmp_path):
 
     def fake_download(dataset_dir):
         calls["download"] = Path(dataset_dir)
-        return Path(dataset_dir) / "zinc.csv"
+        return Path(dataset_dir) / "zinc_250k.csv"
 
-    def fake_build(dataset_dir, csv_path):
-        calls["build"] = {"dataset_dir": Path(dataset_dir), "csv_path": Path(csv_path)}
-        return {"node_counts": [10, 11], "total_graphs": 200_000}
+    class _FakeZINCLoader:
+        def __init__(self, root, *, on_error="raise"):
+            calls["loader"] = {"root": Path(root), "on_error": on_error}
 
-    def fake_load(dataset_dir, max_molecules, min_node_count, max_node_count):
-        calls["load"] = {
-            "dataset_dir": Path(dataset_dir),
-            "max_molecules": max_molecules,
-            "min_node_count": min_node_count,
-            "max_node_count": max_node_count,
-        }
-        graphs = [f"g{idx}" for idx in range(40)]
-        metadata = pd.DataFrame({"zinc_id": [f"z{idx}" for idx in range(40)]})
-        return graphs, metadata
+        def load(self, dataset_name, *, limit=None):
+            calls["load"] = {"dataset_name": dataset_name, "limit": limit}
+            graphs = []
+            for idx in range(40):
+                graph = nx.path_graph(10 + (idx % 2))
+                graph.graph["zinc_id"] = f"z{idx}"
+                graphs.append(graph)
+            metadata = pd.DataFrame({"zinc_id": [f"z{idx}" for idx in range(40)]})
+            return graphs, metadata
 
     monkeypatch.setattr(
         "conditional_node_field_graph_generator.extensions.demo.pipeline.download_zinc_dataset",
         fake_download,
     )
     monkeypatch.setattr(
-        "conditional_node_field_graph_generator.extensions.demo.pipeline.build_zinc_graph_corpus",
-        fake_build,
-    )
-    monkeypatch.setattr(
-        "conditional_node_field_graph_generator.extensions.demo.pipeline.load_zinc_graph_dataset",
-        fake_load,
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.ZINCLoader",
+        _FakeZINCLoader,
     )
 
     graphs, metadata, manifest = build_zinc_dataset(
@@ -164,20 +159,22 @@ def test_build_zinc_dataset_uses_compact_size_interface(monkeypatch, tmp_path):
 
     assert len(graphs) == 25
     assert len(metadata) == 25
-    assert manifest == {"node_counts": [10, 11], "total_graphs": 200_000}
-    assert calls["load"] == {
-        "dataset_dir": tmp_path.resolve(),
-        "max_molecules": 200000,
-        "min_node_count": 10,
-        "max_node_count": 12,
-    }
-    assert graphs == build_zinc_dataset(
+    assert manifest["dataset_name"] == "zinc_250k"
+    assert manifest["csv_path"] == str((tmp_path / "zinc_250k.csv").resolve())
+    assert manifest["node_counts"] == [10, 11]
+    assert manifest["total_graphs"] == 40
+    assert calls["loader"] == {"root": tmp_path.resolve(), "on_error": "raise"}
+    assert calls["load"] == {"dataset_name": "zinc_250k", "limit": None}
+    repeated_graphs = build_zinc_dataset(
         dataset_dir=tmp_path,
         num_examples=25,
         min_size=10,
         max_size=12,
         random_state=7,
     )[0]
+    assert [graph.graph["zinc_id"] for graph in graphs] == [
+        graph.graph["zinc_id"] for graph in repeated_graphs
+    ]
 
 
 def test_fit_graph_generator_rejects_conflicting_resume_arguments():
@@ -192,7 +189,7 @@ def test_fit_graph_generator_rejects_conflicting_resume_arguments():
         )
 
 
-def test_fit_graph_generator_falls_back_when_latest_checkpoint_is_incompatible(tmp_path, capsys):
+def test_fit_graph_generator_rejects_incompatible_latest_checkpoint(tmp_path):
     checkpoint_root = tmp_path / "checkpoints"
     run_dir = checkpoint_root / "run_a"
     run_dir.mkdir(parents=True)
@@ -218,21 +215,18 @@ def test_fit_graph_generator_falls_back_when_latest_checkpoint_is_incompatible(t
 
     recorder = _Recorder()
 
-    result = fit_graph_generator(
-        recorder,
-        train_graphs=["g1", "g2"],
-        targets=[1, 0],
-        resume_latest_checkpoint=True,
-        checkpoint_root=checkpoint_root,
-    )
+    with pytest.raises(RuntimeError, match="Checkpoint is incompatible with the current generator configuration"):
+        fit_graph_generator(
+            recorder,
+            train_graphs=["g1", "g2"],
+            targets=[1, 0],
+            resume_latest_checkpoint=True,
+            checkpoint_root=checkpoint_root,
+        )
 
-    assert result is recorder
     assert recorder.calls == [
         {"graphs": ["g1", "g2"], "targets": [1, 0], "ckpt_path": str(checkpoint_path.resolve())},
-        {"graphs": ["g1", "g2"], "targets": [1, 0], "ckpt_path": None},
     ]
-    output = capsys.readouterr().out
-    assert "Latest checkpoint is incompatible" in output
 
 
 def test_build_graph_generator_propagates_model_name_to_inner_generator():

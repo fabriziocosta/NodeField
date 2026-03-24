@@ -12,13 +12,19 @@ from conditional_node_field_graph_generator.conditional_node_field_generator imp
     MetricsLogger,
     NodeGenerationBatch,
 )
+from conditional_node_field_graph_generator.metrics_collection import (
+    GraphGeneratorEpochSnapshotCallback,
+)
 from conditional_node_field_graph_generator.extensions.demo.pipeline import fit_graph_generator
 from conditional_node_field_graph_generator.extensions.demo.storage import find_latest_checkpoint
 from conditional_node_field_graph_generator.metrics_visualization import (
     plot_metrics,
 )
-from conditional_node_field_graph_generator.persistence import save_graph_generator
-from conditional_node_field_graph_generator.persistence import load_graph_generator
+from conditional_node_field_graph_generator.persistence import (
+    GRAPH_GENERATOR_PERSISTENCE_VERSION,
+    load_graph_generator,
+    save_graph_generator,
+)
 from conditional_node_field_graph_generator.runtime_utils import run_trainer_fit
 from conditional_node_field_graph_generator.training_policy import (
     format_restored_checkpoint_summary,
@@ -208,26 +214,67 @@ def test_save_graph_generator_skips_when_model_name_is_none(tmp_path):
     assert not list(tmp_path.glob("*.pkl"))
 
 
-def test_load_graph_generator_applies_persistence_migrations(tmp_path):
+def test_load_graph_generator_rejects_incompatible_schema_version(tmp_path):
     import dill as pickle
 
     generator = _SaveableGenerator(model_name="demo-chem", model_dir=tmp_path)
-    generator.use_feasibility_oracle = False
     filename = save_graph_generator(generator)
     saved_path = tmp_path / filename
 
     with open(saved_path, "rb") as handle:
         restored = pickle.load(handle)
-    if hasattr(restored, "feasibility_oracle_candidates_per_attempt"):
-        del restored.feasibility_oracle_candidates_per_attempt
-    if hasattr(restored, "_persistence_schema_version"):
-        del restored._persistence_schema_version
+    restored._persistence_schema_version = GRAPH_GENERATOR_PERSISTENCE_VERSION - 1
     with open(saved_path, "wb") as handle:
         pickle.dump(restored, handle)
 
-    loaded = load_graph_generator(filename, model_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="Saved graph generator schema is incompatible"):
+        load_graph_generator(filename, model_dir=tmp_path)
 
-    assert loaded.feasibility_oracle_candidates_per_attempt == 0
+
+def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_save_graph_generator(graph_generator, model_name=None, model_dir=None):
+        calls.append(
+            {
+                "graph_generator": graph_generator,
+                "model_name": model_name,
+                "model_dir": model_dir,
+                "is_fitted": graph_generator.is_fitted_,
+            }
+        )
+        return "saved.pkl"
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.persistence.save_graph_generator",
+        fake_save_graph_generator,
+    )
+
+    class _Owner:
+        def __init__(self):
+            self.model_name = "demo-chem"
+            self.model_dir = tmp_path
+            self.is_fitted_ = False
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 2
+
+    owner = _Owner()
+    callback = GraphGeneratorEpochSnapshotCallback(owner)
+
+    callback.on_validation_epoch_end(_Trainer(), object())
+
+    assert owner.is_fitted_ is False
+    assert calls == [
+        {
+            "graph_generator": owner,
+            "model_name": "demo-chem-epoch003",
+            "model_dir": tmp_path,
+            "is_fitted": True,
+        }
+    ]
 
 
 def test_build_train_val_subsets_reuses_single_example_for_train_and_val():

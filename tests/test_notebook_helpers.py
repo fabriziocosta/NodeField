@@ -41,11 +41,5 @@ def test_maintained_notebooks_use_standardized_bootstrap_and_no_inline_path_prob
         assert "next(\n    candidate.resolve()" not in source
         assert "_repo_root = Path.cwd().resolve()" not in source
         assert "sys.path.insert(0" not in source
-        assert "from _notebook_bootstrap import configure_notebook" not in source
+        assert "_notebook_bootstrap" not in source
         assert "from conditional_node_field_graph_generator.notebooks import configure_notebook" in source
-
-
-def test_compatibility_notebook_bootstrap_reexports_package_helpers():
-    from _notebook_bootstrap import configure_notebook as shim_configure_notebook
-
-    assert shim_configure_notebook is configure_notebook

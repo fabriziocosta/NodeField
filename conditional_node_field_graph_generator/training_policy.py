@@ -55,9 +55,12 @@ def build_training_callbacks(
     early_stopping_patience: int,
     early_stopping_min_delta: float,
     metrics_logger: pl.callbacks.Callback,
+    epoch_snapshot_callback: pl.callbacks.Callback | None = None,
 ) -> Tuple[list, str, ModelCheckpoint]:
     """Build checkpoint and early-stopping callbacks for training."""
     callbacks = [metrics_logger]
+    if epoch_snapshot_callback is not None:
+        callbacks.append(epoch_snapshot_callback)
     checkpoint_dir = os.path.join(
         checkpoint_root_dir,
         f"{generator_name}_{uuid.uuid4().hex}",

@@ -10,11 +10,10 @@ import uuid
 import dill as pickle
 import pandas as pd
 
-from .persistence_migrations import (
-    GRAPH_GENERATOR_PERSISTENCE_VERSION,
-    apply_graph_generator_persistence_migrations,
-)
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
+
+
+GRAPH_GENERATOR_PERSISTENCE_VERSION = 3
 
 try:
     from IPython.display import display
@@ -100,7 +99,12 @@ def load_graph_generator(model_name, model_dir=None):
     path = candidates[0]
     with open(path, "rb") as handle:
         graph_generator = pickle.load(handle)
-    graph_generator = apply_graph_generator_persistence_migrations(graph_generator)
+    schema_version = int(getattr(graph_generator, "_persistence_schema_version", 0))
+    if schema_version != GRAPH_GENERATOR_PERSISTENCE_VERSION:
+        raise RuntimeError(
+            "Saved graph generator schema is incompatible with this NodeField version. "
+            f"Expected schema v{GRAPH_GENERATOR_PERSISTENCE_VERSION}, found v{schema_version}: {path}"
+        )
     print(f"Loaded graph generator: {path.name}")
     print(path)
     return graph_generator

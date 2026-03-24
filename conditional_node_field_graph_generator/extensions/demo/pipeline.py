@@ -13,10 +13,9 @@ import pandas as pd
 from abstractgraph_graphicalizer.chem import (
     PubChemLoader,
     SupervisedDataSetLoader,
-    build_zinc_graph_corpus,
     download_zinc_dataset,
     draw_molecules,
-    load_zinc_graph_dataset,
+    ZINCLoader,
 )
 from sklearn.model_selection import train_test_split
 
@@ -42,10 +41,7 @@ except ModuleNotFoundError:
     FeasibilityEstimatorFeatureCannotExist = None
     WithinRangeFeasibilityEstimatorFromNumericalFunction = None
 
-try:
-    from NSPPK.nsppk import NSPPK, NodeNSPPK
-except ModuleNotFoundError:
-    from nsppk import NSPPK, NodeNSPPK
+from nsppk import NSPPK, NodeNSPPK
 
 from ...conditional_node_field_generator import ConditionalNodeFieldGenerator
 from ...conditional_node_field_graph_decoder import ConditionalNodeFieldGraphDecoder
@@ -77,22 +73,10 @@ def _has_demo_feasibility_support():
 
 
 def _build_demo_operator(operator_fn, /, *args, **kwargs):
-    """Build a curried abstractgraph operator using keyword-first style when available.
-
-    This keeps the demo pipeline resilient to operator API drift between older and
-    newer abstractgraph checkouts.
-    """
+    """Build a curried abstractgraph operator."""
     if operator_fn is None:
         raise RuntimeError("Requested abstractgraph operator is unavailable.")
-    try:
-        return operator_fn(*args, **kwargs)
-    except Exception:
-        if kwargs and not args:
-            # Fallback for operators that still expect a single positional config
-            # argument rather than a named keyword.
-            if len(kwargs) == 1:
-                return operator_fn(next(iter(kwargs.values())))
-        raise
+    return operator_fn(*args, **kwargs)
 
 
 def _resolve_pubchem_dir() -> Path:
@@ -166,14 +150,20 @@ def build_zinc_dataset(
     dataset_dir = resolve_zinc_data_root(dataset_dir)
 
     csv_path = download_zinc_dataset(dataset_dir)
-    manifest = build_zinc_graph_corpus(dataset_dir, csv_path=csv_path)
-    max_molecules = int(manifest.get("total_graphs", int(num_examples)))
-    graphs, metadata = load_zinc_graph_dataset(
-        dataset_dir,
-        max_molecules=max_molecules,
-        min_node_count=int(min_size),
-        max_node_count=int(max_size),
-    )
+    loader = ZINCLoader(root=dataset_dir)
+    graphs, metadata = loader.load(csv_path.stem)
+    selected_indices = [
+        idx for idx, graph in enumerate(graphs)
+        if int(min_size) <= nx.number_of_nodes(graph) <= int(max_size)
+    ]
+    graphs = [graphs[idx] for idx in selected_indices]
+    metadata = metadata.iloc[selected_indices].reset_index(drop=True)
+    manifest = {
+        "dataset_name": csv_path.stem,
+        "csv_path": str(csv_path.resolve()),
+        "total_graphs": int(len(metadata)),
+        "node_counts": sorted({int(nx.number_of_nodes(graph)) for graph in graphs}),
+    }
     if len(graphs) > int(num_examples):
         rng = np.random.default_rng(random_state)
         selected_indices = np.sort(rng.choice(len(graphs), size=int(num_examples), replace=False))
@@ -710,14 +700,12 @@ def fit_graph_generator(
     try:
         graph_generator.fit(train_graphs, targets=targets, ckpt_path=resolved_ckpt_path)
     except RuntimeError as exc:
-        if not (resume_latest_checkpoint and resolved_ckpt_path is not None and _is_incompatible_resume_error(exc)):
+        if resolved_ckpt_path is None or not _is_incompatible_resume_error(exc):
             raise
-        print(
-            "Latest checkpoint is incompatible with the current generator configuration; "
-            "retrying from scratch."
-        )
-        print(Path(resolved_ckpt_path).expanduser().resolve())
-        graph_generator.fit(train_graphs, targets=targets, ckpt_path=None)
+        raise RuntimeError(
+            "Checkpoint is incompatible with the current generator configuration. "
+            f"Start a fresh run or migrate the checkpoint: {Path(resolved_ckpt_path).expanduser().resolve()}"
+        ) from exc
     if getattr(graph_generator, "model_name", None) is not None:
         save_graph_generator(graph_generator)
     return graph_generator

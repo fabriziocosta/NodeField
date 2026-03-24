@@ -3,12 +3,12 @@
 This document describes the artificial-graph and synthetic-dataset helpers that support demo workflows, synthetic experiments, and some tests.
 
 These utilities are not part of the core NodeField model. New code should access them through the synthetic extension namespace:
-- [`conditional_node_field_graph_generator/extensions/synthetic/__init__.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/__init__.py)
+- [`conditional_node_field_graph_generator/extensions/synthetic/__init__.py`](../../../conditional_node_field_graph_generator/extensions/synthetic/__init__.py)
 
 The maintained implementation now lives in:
-- [`conditional_node_field_graph_generator/extensions/synthetic/primitives.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/primitives.py)
-- [`conditional_node_field_graph_generator/extensions/synthetic/datasets.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/datasets.py)
-- [`conditional_node_field_graph_generator/extensions/synthetic/composition.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/composition.py)
+- [`conditional_node_field_graph_generator/extensions/synthetic/primitives.py`](../../../conditional_node_field_graph_generator/extensions/synthetic/primitives.py)
+- [`conditional_node_field_graph_generator/extensions/synthetic/datasets.py`](../../../conditional_node_field_graph_generator/extensions/synthetic/datasets.py)
+- [`conditional_node_field_graph_generator/extensions/synthetic/composition.py`](../../../conditional_node_field_graph_generator/extensions/synthetic/composition.py)
 
 ## Main Responsibilities
 
@@ -16,7 +16,7 @@ The maintained implementation now lives in:
 
 The primitive samplers generate unlabeled graph structures that are later decorated with node and edge labels.
 
-Main functions in [`extensions/synthetic/primitives.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/primitives.py):
+Main functions in [`extensions/synthetic/primitives.py`](../../../conditional_node_field_graph_generator/extensions/synthetic/primitives.py):
 
 - `random_path_graph(n)`
   Build a path graph with `n` nodes.
@@ -55,7 +55,7 @@ Utility classes:
 
 The dataset helpers can decorate graph nodes with labels and optional feature vectors.
 
-Main pieces in [`extensions/synthetic/datasets.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/datasets.py):
+Main pieces in [`extensions/synthetic/datasets.py`](../../../conditional_node_field_graph_generator/extensions/synthetic/datasets.py):
 
 - `AttributeGenerator`
   Samples node-level auxiliary attribute vectors conditioned on sampled class labels.
@@ -134,7 +134,7 @@ Important methods:
 
 ## 6. Graph composition utilities
 
-[`extensions/synthetic/composition.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/synthetic/composition.py) contains:
+[`extensions/synthetic/composition.py`](../../../conditional_node_field_graph_generator/extensions/synthetic/composition.py) contains:
 
 - `make_combined_graphs(graphs1, targets1, graphs2=None, targets2=None, number_of_graphs=1, number_of_edges=1)`
 

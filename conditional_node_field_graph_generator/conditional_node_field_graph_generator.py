@@ -409,6 +409,7 @@ def _plot_decoder_diagnostics(
     else:
         active_mask = None
         active_indices = np.arange(adj_mtx.shape[0], dtype=int)
+    prob_display = prob_matrix[np.ix_(active_indices, active_indices)]
     adj_display = adj_mtx[np.ix_(active_indices, active_indices)]
     target_degrees_display = target_degrees[active_indices]
     realized_degrees = adj_display.sum(axis=1)
@@ -421,13 +422,20 @@ def _plot_decoder_diagnostics(
     n_panels = 5 if has_node_label_panel else 4
     fig, axes = plt.subplots(1, n_panels, figsize=(22 if has_node_label_panel else 18, 4))
 
-    im0 = axes[0].imshow(prob_matrix, vmin=0.0, vmax=max(1.0, float(np.max(prob_matrix)) if prob_matrix.size else 1.0), cmap="viridis")
+    im0 = axes[0].imshow(
+        prob_display,
+        vmin=0.0,
+        vmax=max(1.0, float(np.max(prob_display)) if prob_display.size else 1.0),
+        cmap="viridis",
+    )
     axes[0].set_title("Edge probabilities")
     axes[0].set_xlabel("node j")
     axes[0].set_ylabel("node i")
     if active_indices.size > 0:
-        axes[0].set_xticks(active_indices.astype(int).tolist())
-        axes[0].set_yticks(active_indices.astype(int).tolist())
+        axes[0].set_xticks(np.arange(len(active_indices)))
+        axes[0].set_xticklabels(active_indices.astype(int).tolist())
+        axes[0].set_yticks(np.arange(len(active_indices)))
+        axes[0].set_yticklabels(active_indices.astype(int).tolist())
     fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
     axes[1].imshow(adj_display, vmin=0.0, vmax=1.0, cmap="gray")
@@ -1837,6 +1845,33 @@ class ConditionalNodeFieldGraphGenerator(object):
             return None
         return np.asarray(edge_label_classes, dtype=object)
 
+    def _fill_unlabeled_active_edges(
+        self,
+        *,
+        adj_mtx: np.ndarray,
+        edge_label_matrix: np.ndarray,
+        edge_label_probabilities: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Fill newly active unlabeled edges from edge-label probabilities when available."""
+        repaired = np.asarray(edge_label_matrix, dtype=object).copy()
+        edge_label_names = self._get_edge_label_names()
+        if edge_label_probabilities is None or edge_label_names is None or len(edge_label_names) == 0:
+            return repaired
+
+        adj_mtx = np.asarray(adj_mtx, dtype=float)
+        edge_label_probabilities = np.asarray(edge_label_probabilities, dtype=float)
+        for i in range(adj_mtx.shape[0]):
+            for j in range(i + 1, adj_mtx.shape[1]):
+                if adj_mtx[i, j] == 0:
+                    continue
+                if repaired[i, j] is not None:
+                    continue
+                label_idx = int(np.argmax(edge_label_probabilities[i, j]))
+                selected_label = edge_label_names[label_idx]
+                repaired[i, j] = selected_label
+                repaired[j, i] = selected_label
+        return repaired
+
     def set_feasibility_filtering(self, enabled: bool) -> None:
         """Enable or disable feasibility filtering during generation without discarding the fitted estimator.
 
@@ -2738,7 +2773,14 @@ class ConditionalNodeFieldGraphGenerator(object):
                     forbidden_edge_assignments=accumulated_edge_label_forbidden,
                 )
                 current_node_labels = relabeled_node_labels
-                current_edge_label_matrix = relabeled_edge_label_matrix
+                current_edge_label_matrix = self._fill_unlabeled_active_edges(
+                    adj_mtx=single_adj_mtx,
+                    edge_label_matrix=relabeled_edge_label_matrix,
+                    edge_label_probabilities=None if edge_label_probabilities is None else np.asarray(
+                        edge_label_probabilities[graph_idx],
+                        dtype=float,
+                    ),
+                )
                 structural_graph = _assemble_graph_job(
                     existence_mask,
                     current_node_labels,
@@ -3249,6 +3291,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                 graph_conditioning=graph_conditioning,
                 targets=targets,
             )
+            setattr(self.conditional_node_generator_model, "_graph_generator_snapshot_owner", self)
             fit_kwargs = {
                 "node_batch": node_batch,
                 "graph_conditioning": graph_conditioning,

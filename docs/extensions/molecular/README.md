@@ -16,5 +16,5 @@ Use:
 - when you want chemistry extras from NodeField, install `nodefield[chem]` so the dependency cascades through `abstractgraph-graphicalizer[chem]`
 
 Reference:
-- [`docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md`](/home/fabrizio/code/NodeField/docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md)
+- [`docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md`](MOLECULAR_GRAPH_UTILS_README.md)
 - `abstractgraph-graphicalizer/docs/CHEMISTRY.md` in the graphicalizer checkout

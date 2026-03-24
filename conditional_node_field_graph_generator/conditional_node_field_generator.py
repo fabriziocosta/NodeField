@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
-from .metrics_collection import MetricsLogger
+from .metrics_collection import GraphGeneratorEpochSnapshotCallback, MetricsLogger
 from .metrics_visualization import plot_metrics
 from .runtime_utils import run_trainer_fit, verbose_log
 from .training_policy import (
@@ -2399,6 +2399,10 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
             val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
 
+        snapshot_callback = None
+        snapshot_owner = getattr(self, "_graph_generator_snapshot_owner", None)
+        if snapshot_owner is not None and getattr(snapshot_owner, "model_name", None) is not None:
+            snapshot_callback = GraphGeneratorEpochSnapshotCallback(snapshot_owner)
         callbacks, checkpoint_dir, checkpoint_callback = build_training_callbacks(
             generator_name=self.__class__.__name__,
             checkpoint_root_dir=self.checkpoint_root_dir,
@@ -2408,6 +2412,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             early_stopping_patience=self.early_stopping_patience,
             early_stopping_min_delta=self.early_stopping_min_delta,
             metrics_logger=MetricsLogger(),
+            epoch_snapshot_callback=snapshot_callback,
         )
         if self.model_name is not None:
             verbose_log(self, f"Save target model_name={self.model_name} model_dir={self.model_dir}")
