@@ -3,10 +3,6 @@
 from .conversion import (
     molecule_to_networkx,
     networkx_to_molecule,
-    nx_to_rdkit,
-    rdkmol_to_nx,
-    sdf_to_nx,
-    smi_to_nx,
     smiles_to_networkx_molecule,
 )
 from .datasets import (
@@ -49,11 +45,7 @@ __all__ = [
     "molecule_to_networkx",
     "networkx_to_molecule",
     "nx_to_image",
-    "nx_to_rdkit",
-    "rdkmol_to_nx",
     "resolve_pubchem_dir",
-    "sdf_to_nx",
     "set_coordinates",
-    "smi_to_nx",
     "smiles_to_networkx_molecule",
 ]

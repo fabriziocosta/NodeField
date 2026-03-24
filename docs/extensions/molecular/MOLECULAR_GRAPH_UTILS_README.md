@@ -32,10 +32,10 @@ These helpers convert between RDKit molecules and the NetworkX graph format used
   Converts a labeled molecular graph back to an RDKit molecule.
 
 - `nx_to_rdkit(graph)`
-  Deprecated compatibility wrapper around `networkx_to_molecule(..., sanitize=False)`.
+  Deprecated internal compatibility wrapper around `networkx_to_molecule(..., sanitize=False)`.
 
 - `rdkmol_to_nx(mol)`
-  Deprecated compatibility wrapper around `molecule_to_networkx(...)`.
+  Deprecated internal compatibility wrapper around `molecule_to_networkx(...)`.
 
 Expected graph conventions:
 - node label: atomic symbol, stored in `node["label"]`
@@ -65,7 +65,7 @@ remain available for lower-level image construction.
 
 Notes:
 - this is the maintained notebook-facing display entry point
-- transitional aliases such as `nx_to_rdkit`, `rdkmol_to_nx`, `sdf_to_nx`, and `smi_to_nx` are deprecated and kept only for compatibility
+- transitional aliases such as `nx_to_rdkit`, `rdkmol_to_nx`, `sdf_to_nx`, and `smi_to_nx` are deprecated internal compatibility helpers and are no longer exported from the public extension namespace
 
 ## 3. PubChem loading
 

@@ -28,6 +28,7 @@ from conditional_node_field_graph_generator.extensions.demo.visualization import
     infer_display_mode,
     offset_neg_graphs,
     select_pos_neg,
+    show_molecules,
 )
 from conditional_node_field_graph_generator.extensions.synthetic import ArtificialGraphDatasetConstructor
 
@@ -83,6 +84,15 @@ def test_temporary_decoder_n_jobs_restores_original_value():
         assert decoder.n_jobs == 1
 
     assert decoder.n_jobs == 3
+
+
+def test_show_molecules_returns_none_for_empty_input(capsys):
+    result = show_molecules([], title="Empty")
+
+    assert result is None
+    output = capsys.readouterr().out
+    assert "Empty" in output
+    assert "No graphs to display." in output
 
 
 def test_prepare_experiment_splits_dataset_and_preserves_outputs(capsys):

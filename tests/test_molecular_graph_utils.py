@@ -1,6 +1,5 @@
 from pathlib import Path
 import pickle
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -10,7 +9,7 @@ from conditional_node_field_graph_generator.extensions.molecular import (
     SupervisedDataSetLoader,
     build_zinc_graph_corpus,
     extract_zinc_targets,
-    nx_to_rdkit,
+    networkx_to_molecule,
     smiles_to_networkx_molecule,
 )
 
@@ -27,11 +26,8 @@ def test_smiles_round_trip_to_rdkit():
     assert graph.graph["qed"] == 0.5
     assert graph.number_of_nodes() == 3
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        mol = nx_to_rdkit(graph)
+    mol = networkx_to_molecule(graph, sanitize=False)
     assert mol.GetNumAtoms() == 3
-    assert any("deprecated" in str(item.message).lower() for item in caught)
 
 
 def test_local_pubchem_loader_reads_bundled_sdf_files():

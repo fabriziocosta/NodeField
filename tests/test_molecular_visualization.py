@@ -1,6 +1,7 @@
 from conditional_node_field_graph_generator.extensions.molecular import _impl as molecular_impl
 from conditional_node_field_graph_generator.extensions.molecular import smiles_to_networkx_molecule
 from conditional_node_field_graph_generator.extensions.molecular import visualization as molecular_visualization
+import conditional_node_field_graph_generator.extensions.molecular as molecular_api
 
 
 def test_draw_molecules_delegates_to_abstractgraph_renderer(monkeypatch):
@@ -27,3 +28,10 @@ def test_draw_molecules_delegates_to_abstractgraph_renderer(monkeypatch):
     assert calls["kwargs"]["titles"] == ["ethanol"]
     assert calls["kwargs"]["size"] == (5.0, 3.0)
     assert calls["kwargs"]["show"] is True
+
+
+def test_deprecated_aliases_are_not_exported_from_public_molecular_namespace():
+    assert not hasattr(molecular_api, "nx_to_rdkit")
+    assert not hasattr(molecular_api, "rdkmol_to_nx")
+    assert not hasattr(molecular_api, "sdf_to_nx")
+    assert not hasattr(molecular_api, "smi_to_nx")

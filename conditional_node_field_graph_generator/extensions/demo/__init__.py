@@ -24,6 +24,7 @@ from .visualization import (
     run_label_histogram_analysis,
     sample_positive_endpoint_pair,
     select_pos_neg,
+    show_molecules,
     show_samples,
     summarize_label_histogram_alignment,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "score_graph_generator_feasible_rate",
     "save_graph_generator",
     "select_pos_neg",
+    "show_molecules",
     "show_samples",
     "summarize_label_histogram_alignment",
 ]
