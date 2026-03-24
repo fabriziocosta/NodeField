@@ -1,6 +1,7 @@
 """Demo-oriented helpers for notebook workflows."""
 
 from ...persistence import list_saved_graph_generators, load_graph_generator, save_graph_generator
+from .oracle import collect_oracle_trace_rows, oracle_trace_frame, parse_oracle_trace_title
 from .pipeline import (
     benchmark_regression_guidance,
     build_dataset,
@@ -32,6 +33,7 @@ __all__ = [
     "build_graph_generator",
     "build_zinc_dataset",
     "benchmark_regression_guidance",
+    "collect_oracle_trace_rows",
     "compare_real_vs_generated",
     "describe_resume_checkpoint",
     "find_latest_checkpoint",
@@ -41,6 +43,8 @@ __all__ = [
     "list_saved_graph_generators",
     "load_graph_generator",
     "offset_neg_graphs",
+    "oracle_trace_frame",
+    "parse_oracle_trace_title",
     "plot_label_histogram_alignment",
     "plot_networkx_graphs",
     "plot_sample",

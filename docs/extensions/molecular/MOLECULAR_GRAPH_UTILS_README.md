@@ -1,8 +1,8 @@
 ## Molecular Graph Utilities
 
-This document describes the molecular-graph utilities now implemented directly under the molecular extension.
+This document describes the maintained molecular-graph utilities under the molecular extension.
 
-It is intended to replace the previous external chemistry-helper dependency for:
+The extension now owns dataset loading and graph conversion, while molecule drawing delegates to the abstractgraph graphicalizer:
 - PubChem assay loading
 - molecule drawing
 - ZINC download, caching, and conversion
@@ -32,10 +32,10 @@ These helpers convert between RDKit molecules and the NetworkX graph format used
   Converts a labeled molecular graph back to an RDKit molecule.
 
 - `nx_to_rdkit(graph)`
-  Compatibility wrapper around `networkx_to_molecule(..., sanitize=False)`.
+  Deprecated compatibility wrapper around `networkx_to_molecule(..., sanitize=False)`.
 
 - `rdkmol_to_nx(mol)`
-  Compatibility wrapper around `molecule_to_networkx(...)`.
+  Deprecated compatibility wrapper around `molecule_to_networkx(...)`.
 
 Expected graph conventions:
 - node label: atomic symbol, stored in `node["label"]`
@@ -44,7 +44,9 @@ Expected graph conventions:
 
 ## 2. Molecule drawing
 
-These helpers render molecular graphs using RDKit instead of the previous external visualization helper.
+The maintained `draw_molecules(...)` entry point delegates to `abstractgraph_graphicalizer.chem.draw_molecules(...)`.
+Local helpers such as `set_coordinates(...)`, `compounds_to_image(...)`, and `molecule_graphs_to_grid_image(...)`
+remain available for lower-level image construction.
 
 - `set_coordinates(compounds)`
   Computes 2D coordinates for RDKit molecules before drawing.
@@ -59,12 +61,11 @@ These helpers render molecular graphs using RDKit instead of the previous extern
   Lightweight compatibility helper for notebook-oriented molecule drawing.
 
 - `draw_molecules(graphs, titles=None, num=None, n_graphs_per_line=7, size=7, ...)`
-  Displays batches of molecular graphs.
+  Supported notebook-facing entry point for displaying batches of molecular graphs.
 
 Notes:
-- this is notebook-oriented display code
-- graphs are rendered in chunks of 50 molecules
-- the API intentionally stays close to the old helper so legacy notebook cells remain usable
+- this is the maintained notebook-facing display entry point
+- transitional aliases such as `nx_to_rdkit`, `rdkmol_to_nx`, `sdf_to_nx`, and `smi_to_nx` are deprecated and kept only for compatibility
 
 ## 3. PubChem loading
 

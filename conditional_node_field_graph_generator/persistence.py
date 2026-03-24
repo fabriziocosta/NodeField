@@ -6,10 +6,15 @@ from datetime import datetime
 from pathlib import Path
 import re
 import uuid
-from typing import Optional
 
 import dill as pickle
 import pandas as pd
+
+from .persistence_migrations import (
+    GRAPH_GENERATOR_PERSISTENCE_VERSION,
+    apply_graph_generator_persistence_migrations,
+)
+from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
 
 try:
     from IPython.display import display
@@ -19,16 +24,7 @@ except Exception:  # pragma: no cover
 
 
 def resolve_saved_generator_dir(model_dir=None):
-    if model_dir is not None:
-        root = Path(model_dir).expanduser().resolve()
-    else:
-        root = next(
-            candidate.resolve()
-            for candidate in [Path.cwd(), Path.cwd().parent]
-            if (candidate / "conditional_node_field_graph_generator").exists()
-        ) / ".artifacts" / "saved_generators"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return _resolve_saved_generator_dir(model_dir=model_dir)
 
 
 def _sanitize_model_token(value: str) -> str:
@@ -43,6 +39,7 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None):
         return None
     resolved_model_dir = model_dir if model_dir is not None else getattr(graph_generator, "model_dir", None)
     model_root = resolve_saved_generator_dir(model_dir=resolved_model_dir)
+    graph_generator._persistence_schema_version = GRAPH_GENERATOR_PERSISTENCE_VERSION
     stem = _sanitize_model_token(resolved_model_name)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
     short_id = uuid.uuid4().hex[:6]
@@ -103,9 +100,7 @@ def load_graph_generator(model_name, model_dir=None):
     path = candidates[0]
     with open(path, "rb") as handle:
         graph_generator = pickle.load(handle)
-    migrate_legacy = getattr(graph_generator, "_apply_legacy_feasibility_config", None)
-    if callable(migrate_legacy):
-        migrate_legacy()
+    graph_generator = apply_graph_generator_persistence_migrations(graph_generator)
     print(f"Loaded graph generator: {path.name}")
     print(path)
     return graph_generator

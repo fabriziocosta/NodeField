@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import importlib
-import os
 import sys
 import warnings
 from pathlib import Path
+
+from conditional_node_field_graph_generator.runtime_paths import (
+    ensure_repo_on_syspath as _ensure_repo_on_syspath,
+    resolve_artifact_root,
+    resolve_checkpoint_root,
+    resolve_notebook_data_root,
+    resolve_nsppk_root,
+    resolve_saved_generator_dir,
+)
 
 
 def _add_to_syspath(path: Path) -> None:
@@ -17,39 +25,19 @@ def _add_to_syspath(path: Path) -> None:
 
 def find_repo_root() -> Path:
     """Locate the NodeField repo root from a notebook working directory."""
-    for root in [Path.cwd(), *Path.cwd().parents]:
-        if (root / "conditional_node_field_graph_generator").exists():
-            return root.resolve()
-    raise ModuleNotFoundError(
-        "Could not locate the NodeField repo root from the current notebook directory."
-    )
+    return _ensure_repo_on_syspath(Path.cwd())
 
 
 def ensure_repo_on_syspath() -> Path:
-    repo_root = find_repo_root()
-    _add_to_syspath(repo_root)
-    return repo_root
+    return _ensure_repo_on_syspath(Path.cwd())
 
 
 def ensure_nsppk_on_syspath(repo_root: Path) -> Path | None:
     """Add a local NSPPK checkout to sys.path when present."""
-    candidates: list[Path] = []
-    if os.environ.get("NSPPK_ROOT"):
-        candidates.append(Path(os.environ["NSPPK_ROOT"]).expanduser())
-    candidates.extend(
-        [
-            repo_root / "NSPPK",
-            repo_root.parent / "NSPPK",
-            Path.cwd() / "NSPPK",
-            Path.cwd().parent / "NSPPK",
-        ]
-    )
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if resolved.exists():
-            _add_to_syspath(resolved)
-            return resolved
-    return None
+    nsppk_root = resolve_nsppk_root(repo_root=repo_root, start=Path.cwd())
+    if nsppk_root is not None:
+        _add_to_syspath(nsppk_root)
+    return nsppk_root
 
 
 def import_nsppk():
@@ -88,13 +76,13 @@ def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True)
         print(f"PyTorch version: {torch.__version__}")
         print(f"CUDA available: {torch.cuda.is_available()}")
 
-    artifact_root = repo_root / ".artifacts"
+    artifact_root = resolve_artifact_root(repo_root=repo_root)
     context: dict[str, Path] = {
         "REPO_ROOT": repo_root,
         "ARTIFACT_ROOT": artifact_root,
-        "NOTEBOOK_DATA_ROOT": repo_root / "notebooks" / "datasets",
-        "CHECKPOINT_ROOT": artifact_root / "checkpoints" / "node_field",
-        "SAVED_GENERATOR_ROOT": artifact_root / "saved_generators",
+        "NOTEBOOK_DATA_ROOT": resolve_notebook_data_root(repo_root=repo_root),
+        "CHECKPOINT_ROOT": resolve_checkpoint_root(repo_root=repo_root),
+        "SAVED_GENERATOR_ROOT": resolve_saved_generator_dir(repo_root=repo_root),
     }
     if nsppk_root is not None:
         context["NSPPK_ROOT"] = nsppk_root

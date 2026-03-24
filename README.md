@@ -209,4 +209,5 @@ Keep experimental outputs in ignored paths to avoid inflating repository history
 Notebook execution flow is kept lean by design:
 - Prefer assigning variables and calling functions from `.py` modules.
 - Place reusable notebook logic in extension modules, especially `conditional_node_field_graph_generator/extensions/demo/`.
+- Use `conditional_node_field_graph_generator.runtime_paths` for repo, dataset, checkpoint, and artifact resolution instead of re-implementing `Path.cwd()/parents` probes.
 - Clear notebook outputs before committing.

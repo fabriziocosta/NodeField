@@ -9,6 +9,7 @@ import torch
 from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
+from conditional_node_field_graph_generator.persistence_migrations import apply_graph_generator_persistence_migrations
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
@@ -1605,19 +1606,23 @@ def test_can_use_feasibility_oracle_respects_attempt_budget():
     ) is False
 
 
-def test_apply_legacy_feasibility_config_maps_old_boolean_flag():
+def test_persistence_migration_maps_old_boolean_flag():
     generator = ConditionalNodeFieldGraphGenerator(verbose=False)
     del generator.feasibility_oracle_candidates_per_attempt
     generator.use_feasibility_oracle = False
+    if hasattr(generator, "_persistence_schema_version"):
+        del generator._persistence_schema_version
 
-    generator._apply_legacy_feasibility_config()
+    apply_graph_generator_persistence_migrations(generator)
 
     assert generator.feasibility_oracle_candidates_per_attempt == 0
 
     del generator.feasibility_oracle_candidates_per_attempt
     generator.use_feasibility_oracle = True
+    if hasattr(generator, "_persistence_schema_version"):
+        del generator._persistence_schema_version
 
-    generator._apply_legacy_feasibility_config()
+    apply_graph_generator_persistence_migrations(generator)
 
     assert generator.feasibility_oracle_candidates_per_attempt == 2
 

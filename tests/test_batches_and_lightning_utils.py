@@ -18,6 +18,7 @@ from conditional_node_field_graph_generator.metrics_visualization import (
     plot_metrics,
 )
 from conditional_node_field_graph_generator.persistence import save_graph_generator
+from conditional_node_field_graph_generator.persistence import load_graph_generator
 from conditional_node_field_graph_generator.runtime_utils import run_trainer_fit
 from conditional_node_field_graph_generator.training_policy import (
     format_restored_checkpoint_summary,
@@ -205,6 +206,28 @@ def test_save_graph_generator_skips_when_model_name_is_none(tmp_path):
 
     assert filename is None
     assert not list(tmp_path.glob("*.pkl"))
+
+
+def test_load_graph_generator_applies_persistence_migrations(tmp_path):
+    import dill as pickle
+
+    generator = _SaveableGenerator(model_name="demo-chem", model_dir=tmp_path)
+    generator.use_feasibility_oracle = False
+    filename = save_graph_generator(generator)
+    saved_path = tmp_path / filename
+
+    with open(saved_path, "rb") as handle:
+        restored = pickle.load(handle)
+    if hasattr(restored, "feasibility_oracle_candidates_per_attempt"):
+        del restored.feasibility_oracle_candidates_per_attempt
+    if hasattr(restored, "_persistence_schema_version"):
+        del restored._persistence_schema_version
+    with open(saved_path, "wb") as handle:
+        pickle.dump(restored, handle)
+
+    loaded = load_graph_generator(filename, model_dir=tmp_path)
+
+    assert loaded.feasibility_oracle_candidates_per_attempt == 0
 
 
 def test_build_train_val_subsets_reuses_single_example_for_train_and_val():

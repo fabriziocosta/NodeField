@@ -1793,37 +1793,6 @@ class ConditionalNodeFieldGraphGenerator(object):
                 f"(got {self.feasibility_failure_mode!r})."
             )
 
-    def _apply_legacy_feasibility_config(self) -> None:
-        if not hasattr(self, "feasibility_oracle_candidates_per_attempt"):
-            legacy_use_oracle = getattr(self, "use_feasibility_oracle", True)
-            self.feasibility_oracle_candidates_per_attempt = (
-                int(self._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT)
-                if bool(legacy_use_oracle)
-                else 0
-            )
-        self.feasibility_oracle_candidates_per_attempt = int(
-            self.feasibility_oracle_candidates_per_attempt
-        )
-        if self.feasibility_oracle_candidates_per_attempt < 0:
-            self.feasibility_oracle_candidates_per_attempt = 0
-        if not hasattr(self, "oracle_edge_memory_penalty"):
-            self.oracle_edge_memory_penalty = 0.5
-        if not hasattr(self, "oracle_edge_memory_update"):
-            self.oracle_edge_memory_update = 1.0
-        if not hasattr(self, "oracle_edge_memory_decay"):
-            self.oracle_edge_memory_decay = 1.0
-        if not hasattr(self, "oracle_edge_memory_clip"):
-            self.oracle_edge_memory_clip = 5.0
-        if not hasattr(self, "node_label_classes_"):
-            self.node_label_classes_ = None
-        if not hasattr(self, "node_label_to_index_"):
-            self.node_label_to_index_ = None
-        if not hasattr(self, "edge_label_classes_"):
-            self.edge_label_classes_ = None
-        if not hasattr(self, "edge_label_to_index_"):
-            self.edge_label_to_index_ = None
-        self._restore_label_vocab_metadata_from_node_model()
-
     def _restore_label_vocab_metadata_from_node_model(self) -> None:
         node_model = getattr(self, "conditional_node_generator_model", None)
         if node_model is None:
@@ -1868,10 +1837,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         if edge_label_classes is None:
             return None
         return np.asarray(edge_label_classes, dtype=object)
-
-    def __setstate__(self, state: Dict[str, Any]) -> None:
-        self.__dict__.update(state)
-        self._apply_legacy_feasibility_config()
 
     def set_feasibility_filtering(self, enabled: bool) -> None:
         """Enable or disable feasibility filtering during generation without discarding the fitted estimator.

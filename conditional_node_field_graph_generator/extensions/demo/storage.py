@@ -8,6 +8,8 @@ from typing import Optional
 
 import pandas as pd
 
+from ...runtime_paths import resolve_checkpoint_root
+
 try:
     from IPython.display import display
 except Exception:  # pragma: no cover
@@ -16,16 +18,7 @@ except Exception:  # pragma: no cover
 
 
 def _resolve_checkpoint_root(checkpoint_root=None):
-    if checkpoint_root is not None:
-        root = Path(checkpoint_root).expanduser().resolve()
-    else:
-        root = next(
-            candidate.resolve()
-            for candidate in [Path.cwd(), Path.cwd().parent]
-            if (candidate / "conditional_node_field_graph_generator").exists()
-        ) / ".artifacts" / "checkpoints" / "node_field"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return resolve_checkpoint_root(checkpoint_root=checkpoint_root)
 
 
 def list_training_checkpoints(checkpoint_root=None):
@@ -84,4 +77,3 @@ def describe_resume_checkpoint(ckpt_path: Optional[str]) -> None:
     path = Path(ckpt_path).expanduser().resolve()
     print(f"Resuming training from checkpoint: {path.name}")
     print(path)
-

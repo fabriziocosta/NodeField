@@ -1,5 +1,6 @@
 from pathlib import Path
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -26,8 +27,11 @@ def test_smiles_round_trip_to_rdkit():
     assert graph.graph["qed"] == 0.5
     assert graph.number_of_nodes() == 3
 
-    mol = nx_to_rdkit(graph)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mol = nx_to_rdkit(graph)
     assert mol.GetNumAtoms() == 3
+    assert any("deprecated" in str(item.message).lower() for item in caught)
 
 
 def test_local_pubchem_loader_reads_bundled_sdf_files():

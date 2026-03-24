@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import pickle
 from typing import Iterable, Optional
+import warnings
 
 import networkx as nx
 import numpy as np
@@ -106,25 +107,48 @@ def molecule_to_networkx(
 
 def rdkmol_to_nx(mol: Chem.Mol) -> nx.Graph:
     """Compatibility wrapper for RDKit-to-NetworkX conversion."""
+    warnings.warn(
+        "rdkmol_to_nx() is deprecated; use molecule_to_networkx().",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return molecule_to_networkx(mol)
 
 
-def sdf_to_nx(file: str | Path):
-    """Yield NetworkX graphs from an SDF file."""
+def _iter_sdf_graphs(file: str | Path):
     if not Path(file).exists():
         raise FileNotFoundError(f"SDF file does not exist: {file}")
     supplier = Chem.SDMolSupplier(str(file))
     for mol in supplier:
         if mol is not None:
-            yield rdkmol_to_nx(mol)
+            yield molecule_to_networkx(mol)
+
+
+def _iter_smi_graphs(file: str | Path):
+    supplier = Chem.SmilesMolSupplier(str(file))
+    for mol in supplier:
+        if mol is not None:
+            yield molecule_to_networkx(mol)
+
+
+def sdf_to_nx(file: str | Path):
+    """Yield NetworkX graphs from an SDF file."""
+    warnings.warn(
+        "sdf_to_nx() is deprecated; use the maintained chemistry loaders instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    yield from _iter_sdf_graphs(file)
 
 
 def smi_to_nx(file: str | Path):
     """Yield NetworkX graphs from a SMILES file."""
-    supplier = Chem.SmilesMolSupplier(str(file))
-    for mol in supplier:
-        if mol is not None:
-            yield rdkmol_to_nx(mol)
+    warnings.warn(
+        "smi_to_nx() is deprecated; use the maintained chemistry loaders instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    yield from _iter_smi_graphs(file)
 
 
 def networkx_to_molecule(
@@ -173,11 +197,16 @@ def networkx_to_molecule(
 
 def nx_to_rdkit(graph: nx.Graph) -> Chem.Mol:
     """Convert a molecular graph to an RDKit molecule without forced sanitization."""
+    warnings.warn(
+        "nx_to_rdkit() is deprecated; use networkx_to_molecule(..., sanitize=False).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return networkx_to_molecule(graph, sanitize=False)
 
 
 def _prepare_molecule_for_drawing(graph: nx.Graph) -> Chem.Mol:
-    mol = nx_to_rdkit(graph)
+    mol = networkx_to_molecule(graph, sanitize=False)
     try:
         Chem.SanitizeMol(mol)
     except Exception:
@@ -468,9 +497,9 @@ class RDKitMolFileLoader(object):
     def read(self, filename):
         ext = str(filename).split(".")[-1]
         if ext == "sdf":
-            return sdf_to_nx(filename)
+            return _iter_sdf_graphs(filename)
         if ext == "smi":
-            return smi_to_nx(filename)
+            return _iter_smi_graphs(filename)
         raise Exception(f"Unknown extension: {ext!r}")
 
     def load(self, filename):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import math
 from typing import Any, Callable, Optional
@@ -47,6 +46,7 @@ from ...conditional_node_field_graph_generator import (
     GeneratedGuidanceBatch,
 )
 from ...persistence import save_graph_generator
+from ...runtime_paths import resolve_pubchem_data_root, resolve_zinc_data_root
 from ..molecular import (
     PubChemLoader,
     SupervisedDataSetLoader,
@@ -96,10 +96,7 @@ def _build_demo_operator(operator_fn, /, *args, **kwargs):
 
 
 def _resolve_pubchem_dir() -> Path:
-    env_path = os.environ.get("PUBCHEM_DATA_DIR")
-    if env_path:
-        return Path(env_path).expanduser().resolve()
-    return Path(__file__).resolve().parents[3] / "notebooks" / "datasets" / "PUBCHEM"
+    return resolve_pubchem_data_root()
 
 
 def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
@@ -166,8 +163,8 @@ def build_zinc_dataset(
         raise ValueError("max_size must be >= min_size")
 
     if dataset_dir is None:
-        dataset_dir = Path(__file__).resolve().parents[3] / "notebooks" / "datasets" / "zinc"
-    dataset_dir = Path(dataset_dir).expanduser().resolve()
+        dataset_dir = resolve_zinc_data_root()
+    dataset_dir = resolve_zinc_data_root(dataset_dir)
 
     csv_path = download_zinc_dataset(dataset_dir)
     manifest = build_zinc_graph_corpus(dataset_dir, csv_path=csv_path)
