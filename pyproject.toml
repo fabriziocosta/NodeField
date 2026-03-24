@@ -41,14 +41,14 @@ ecosystem = [
   "abstractgraph-graphicalizer>=0.1.0"
 ]
 chem = [
-  "abstractgraph-graphicalizer>=0.1.0",
-  "rdkit-pypi"
+  "abstractgraph-graphicalizer[chem]>=0.1.0; python_version < '3.13'",
+  "abstractgraph-graphicalizer>=0.1.0; python_version >= '3.13'"
 ]
 full = [
   "abstractgraph>=0.1.0",
   "abstractgraph-ml>=0.1.0",
-  "abstractgraph-graphicalizer>=0.1.0",
-  "rdkit-pypi"
+  "abstractgraph-graphicalizer[chem]>=0.1.0; python_version < '3.13'",
+  "abstractgraph-graphicalizer>=0.1.0; python_version >= '3.13'"
 ]
 
 [tool.setuptools.packages.find]

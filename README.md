@@ -138,8 +138,13 @@ pip install -e ".[dev]"
 
 Optional extras:
 - `pip install -e ".[ecosystem]"` to install the AbstractGraph ecosystem packages used by demo and chemistry workflows.
-- `pip install -e ".[chem]"` to enable the RDKit-based chemistry helpers through `abstractgraph-graphicalizer`.
+- `pip install -e ".[chem]"` to enable chemistry support through `abstractgraph-graphicalizer[chem]`.
 - `pip install -e ".[full]"` to install both the ecosystem and chemistry extras.
+
+Python 3.13 note:
+- `abstractgraph-graphicalizer[chem]` depends on RDKit where wheels are available.
+- on Python 3.13, `nodefield[chem]` and `nodefield[full]` currently install the graphicalizer package without forcing an RDKit wheel, because the standard pip RDKit path is not consistently available there.
+- if your environment already provides RDKit, chemistry notebooks will still work on Python 3.13.
 
 Additional external packages used by some notebook/demo workflows are still not bundled here:
 - `NSPPK`

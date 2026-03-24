@@ -25,6 +25,7 @@ from abstractgraph_graphicalizer.chem import (
 Install the supporting package normally:
 - `pip install abstractgraph-graphicalizer`
 - or `pip install -e /path/to/abstractgraph-graphicalizer`
+- or install NodeField with `pip install -e ".[chem]"`, which cascades chemistry extras through `abstractgraph-graphicalizer[chem]`
 
 Canonical chemistry schema:
 - node label: atomic symbol in `node["label"]`
