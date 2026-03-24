@@ -10,7 +10,9 @@ import warnings
 import networkx as nx
 import numpy as np
 import pandas as pd
+import torch
 from abstractgraph_graphicalizer.chem import (
+    DEFAULT_ZINC_TARGET_COLUMNS,
     PubChemLoader,
     SupervisedDataSetLoader,
     download_zinc_dataset,
@@ -151,13 +153,11 @@ def build_zinc_dataset(
 
     csv_path = download_zinc_dataset(dataset_dir)
     loader = ZINCLoader(root=dataset_dir)
-    graphs, metadata = loader.load(csv_path.stem)
-    selected_indices = [
-        idx for idx, graph in enumerate(graphs)
-        if int(min_size) <= nx.number_of_nodes(graph) <= int(max_size)
-    ]
-    graphs = [graphs[idx] for idx in selected_indices]
-    metadata = metadata.iloc[selected_indices].reset_index(drop=True)
+    graphs, metadata = loader.load(
+        csv_path.stem,
+        min_node_count=int(min_size),
+        max_node_count=int(max_size),
+    )
     manifest = {
         "dataset_name": csv_path.stem,
         "csv_path": str(csv_path.resolve()),
@@ -170,6 +170,82 @@ def build_zinc_dataset(
         graphs = [graphs[idx] for idx in selected_indices.tolist()]
         metadata = metadata.iloc[selected_indices].reset_index(drop=True)
     return graphs, metadata, manifest
+
+
+def prepare_zinc_data_split(
+    dataset_dir=None,
+    num_examples=10_000,
+    min_size=10,
+    max_size=15,
+    test_size=256,
+    random_state=42,
+    debug_mode=False,
+    debug_train_subset=None,
+    debug_test_subset=None,
+    target_columns=DEFAULT_ZINC_TARGET_COLUMNS,
+):
+    """Build one ZINC regression dataset bundle for notebooks and demos."""
+    graphs, metadata, manifest = build_zinc_dataset(
+        dataset_dir=dataset_dir,
+        num_examples=num_examples,
+        min_size=min_size,
+        max_size=max_size,
+        random_state=random_state,
+    )
+    target_columns = list(target_columns)
+    targets = torch.tensor(
+        metadata.loc[:, target_columns].to_numpy(dtype=np.float32),
+        dtype=torch.float32,
+    )
+
+    all_indices = np.arange(len(graphs))
+    effective_test_size = min(int(test_size), max(1, len(all_indices) // 10))
+    train_indices, test_indices = train_test_split(
+        all_indices,
+        test_size=effective_test_size,
+        random_state=random_state,
+    )
+    train_graphs = [graphs[int(i)] for i in train_indices]
+    test_graphs = [graphs[int(i)] for i in test_indices]
+    train_metadata = metadata.iloc[train_indices].reset_index(drop=True)
+    test_metadata = metadata.iloc[test_indices].reset_index(drop=True)
+    train_targets = targets[torch.as_tensor(train_indices, dtype=torch.long)]
+    test_targets = targets[torch.as_tensor(test_indices, dtype=torch.long)]
+
+    if debug_mode:
+        rng = np.random.default_rng(random_state)
+        if len(train_graphs) > 0:
+            train_pick = rng.choice(
+                len(train_graphs),
+                size=min(int(debug_train_subset or len(train_graphs)), len(train_graphs)),
+                replace=False,
+            )
+            train_graphs = [train_graphs[int(i)] for i in train_pick]
+            train_metadata = train_metadata.iloc[train_pick].reset_index(drop=True)
+            train_targets = train_targets[torch.as_tensor(train_pick, dtype=torch.long)]
+        if len(test_graphs) > 0:
+            test_pick = rng.choice(
+                len(test_graphs),
+                size=min(int(debug_test_subset or len(test_graphs)), len(test_graphs)),
+                replace=False,
+            )
+            test_graphs = [test_graphs[int(i)] for i in test_pick]
+            test_metadata = test_metadata.iloc[test_pick].reset_index(drop=True)
+            test_targets = test_targets[torch.as_tensor(test_pick, dtype=torch.long)]
+
+    return {
+        "graphs": graphs,
+        "metadata": metadata,
+        "manifest": manifest,
+        "target_columns": target_columns,
+        "targets": targets,
+        "train_graphs": train_graphs,
+        "test_graphs": test_graphs,
+        "train_metadata": train_metadata,
+        "test_metadata": test_metadata,
+        "train_targets": train_targets,
+        "test_targets": test_targets,
+    }
 
 
 def prepare_experiment(build_dataset_fn: Callable, dataset_size=200, test_size=10, random_state=42, **build_kwargs):

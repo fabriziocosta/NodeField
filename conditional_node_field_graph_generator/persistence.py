@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
-import uuid
 
 import dill as pickle
 import pandas as pd
@@ -31,7 +30,7 @@ def _sanitize_model_token(value: str) -> str:
     return token or "gg"
 
 
-def save_graph_generator(graph_generator, model_name=None, model_dir=None):
+def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
     resolved_model_name = model_name if model_name is not None else getattr(graph_generator, "model_name", None)
     if resolved_model_name is None:
         print("Skipping graph generator save because model_name is None.")
@@ -40,14 +39,13 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None):
     model_root = resolve_saved_generator_dir(model_dir=resolved_model_dir)
     graph_generator._persistence_schema_version = GRAPH_GENERATOR_PERSISTENCE_VERSION
     stem = _sanitize_model_token(resolved_model_name)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-    short_id = uuid.uuid4().hex[:6]
-    filename = f"{stem}-{timestamp}-{short_id}.pkl"
+    filename = f"{stem}.pkl"
     path = model_root / filename
     with open(path, "wb") as handle:
         pickle.dump(graph_generator, handle)
-    print(f"Saved graph generator as: {filename}")
-    print(path)
+    if log:
+        print(f"Saved graph generator as: {filename}")
+        print(path)
     return filename
 
 

@@ -12,6 +12,7 @@ from conditional_node_field_graph_generator.extensions.demo.pipeline import (
     benchmark_regression_guidance,
     build_graph_generator,
     build_zinc_dataset,
+    prepare_zinc_data_split,
     combination,
     compose,
     cycle,
@@ -130,8 +131,13 @@ def test_build_zinc_dataset_uses_compact_size_interface(monkeypatch, tmp_path):
         def __init__(self, root, *, on_error="raise"):
             calls["loader"] = {"root": Path(root), "on_error": on_error}
 
-        def load(self, dataset_name, *, limit=None):
-            calls["load"] = {"dataset_name": dataset_name, "limit": limit}
+        def load(self, dataset_name, *, limit=None, min_node_count=None, max_node_count=None):
+            calls["load"] = {
+                "dataset_name": dataset_name,
+                "limit": limit,
+                "min_node_count": min_node_count,
+                "max_node_count": max_node_count,
+            }
             graphs = []
             for idx in range(40):
                 graph = nx.path_graph(10 + (idx % 2))
@@ -164,7 +170,12 @@ def test_build_zinc_dataset_uses_compact_size_interface(monkeypatch, tmp_path):
     assert manifest["node_counts"] == [10, 11]
     assert manifest["total_graphs"] == 40
     assert calls["loader"] == {"root": tmp_path.resolve(), "on_error": "raise"}
-    assert calls["load"] == {"dataset_name": "zinc_250k", "limit": None}
+    assert calls["load"] == {
+        "dataset_name": "zinc_250k",
+        "limit": None,
+        "min_node_count": 10,
+        "max_node_count": 12,
+    }
     repeated_graphs = build_zinc_dataset(
         dataset_dir=tmp_path,
         num_examples=25,
@@ -175,6 +186,50 @@ def test_build_zinc_dataset_uses_compact_size_interface(monkeypatch, tmp_path):
     assert [graph.graph["zinc_id"] for graph in graphs] == [
         graph.graph["zinc_id"] for graph in repeated_graphs
     ]
+
+
+def test_prepare_zinc_data_split_builds_targets_and_debug_subsets(monkeypatch, tmp_path):
+    graphs = [nx.path_graph(10 + (idx % 12)) for idx in range(30)]
+    metadata = pd.DataFrame(
+        {
+            "zinc_id": [f"z{idx}" for idx in range(30)],
+            "logP": np.linspace(1.0, 3.9, num=30),
+            "qed": np.linspace(0.1, 0.9, num=30),
+            "SAS": np.linspace(2.0, 4.9, num=30),
+        }
+    )
+    manifest = {"dataset_name": "zinc_250k", "node_counts": list(range(10, 22))}
+
+    def fake_build_zinc_dataset(**kwargs):
+        return list(graphs), metadata.copy(), dict(manifest)
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline.build_zinc_dataset",
+        fake_build_zinc_dataset,
+    )
+
+    bundle = prepare_zinc_data_split(
+        dataset_dir=tmp_path,
+        num_examples=30,
+        min_size=10,
+        max_size=21,
+        test_size=4,
+        random_state=7,
+        debug_mode=True,
+        debug_train_subset=3,
+        debug_test_subset=2,
+    )
+
+    assert len(bundle["graphs"]) == 30
+    assert bundle["metadata"]["zinc_id"].tolist() == [f"z{idx}" for idx in range(30)]
+    assert bundle["targets"].shape == (30, 3)
+    assert bundle["target_columns"] == ["logP", "qed", "SAS"]
+    assert len(bundle["train_graphs"]) == 3
+    assert len(bundle["test_graphs"]) == 2
+    assert len(bundle["train_metadata"]) == 3
+    assert len(bundle["test_metadata"]) == 2
+    assert tuple(bundle["train_targets"].shape) == (3, 3)
+    assert tuple(bundle["test_targets"].shape) == (2, 3)
 
 
 def test_fit_graph_generator_rejects_conflicting_resume_arguments():

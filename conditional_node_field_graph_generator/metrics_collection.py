@@ -275,8 +275,9 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
         try:
             save_graph_generator(
                 owner,
-                model_name=f"{model_name}-epoch{epoch_label:03d}",
+                model_name=model_name,
                 model_dir=getattr(owner, "model_dir", None),
+                log=False,
             )
         finally:
             owner.is_fitted_ = previous_fit_state

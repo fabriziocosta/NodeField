@@ -199,8 +199,8 @@ def test_save_graph_generator_uses_explicit_generator_metadata(tmp_path):
         generator,
     )
 
-    assert filename.startswith("demo-chem-")
-    assert filename.endswith(".pkl")
+    assert filename == "demo-chem.pkl"
+    assert (tmp_path / filename).exists()
 
 
 def test_save_graph_generator_skips_when_model_name_is_none(tmp_path):
@@ -234,12 +234,13 @@ def test_load_graph_generator_rejects_incompatible_schema_version(tmp_path):
 def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
     calls = []
 
-    def fake_save_graph_generator(graph_generator, model_name=None, model_dir=None):
+    def fake_save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
         calls.append(
             {
                 "graph_generator": graph_generator,
                 "model_name": model_name,
                 "model_dir": model_dir,
+                "log": log,
                 "is_fitted": graph_generator.is_fitted_,
             }
         )
@@ -270,8 +271,9 @@ def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch
     assert calls == [
         {
             "graph_generator": owner,
-            "model_name": "demo-chem-epoch003",
+            "model_name": "demo-chem",
             "model_dir": tmp_path,
+            "log": False,
             "is_fitted": True,
         }
     ]

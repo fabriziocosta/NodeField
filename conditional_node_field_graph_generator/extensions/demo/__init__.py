@@ -6,6 +6,7 @@ from .pipeline import (
     benchmark_regression_guidance,
     build_dataset,
     build_graph_generator,
+    prepare_zinc_data_split,
     build_zinc_dataset,
     fit_graph_generator,
     prepare_experiment,
@@ -32,6 +33,7 @@ from .visualization import (
 __all__ = [
     "build_dataset",
     "build_graph_generator",
+    "prepare_zinc_data_split",
     "build_zinc_dataset",
     "benchmark_regression_guidance",
     "collect_oracle_trace_rows",
