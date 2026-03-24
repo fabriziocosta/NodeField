@@ -586,7 +586,7 @@ def _plot_decoder_diagnostics(
     plt.close(fig)
     if graph_renderer is not None and decoded_graph is not None and not rendered_inline:
         try:
-            graph_renderer([decoded_graph], legends=[formatted_title])
+            graph_renderer([decoded_graph], titles=[formatted_title])
         except TypeError:
             graph_renderer([decoded_graph])
 
@@ -613,16 +613,12 @@ def _try_render_molecular_graph_inline(ax: Any, *, decoded_graph: nx.Graph, titl
     if not _is_molecule_like_graph(decoded_graph):
         return False
     try:
-        from .extensions.molecular import molecule_graphs_to_grid_image
+        from abstractgraph_graphicalizer.chem import draw_molecule
     except Exception:
         return False
-    image = molecule_graphs_to_grid_image(
-        [decoded_graph],
-        legends=None,
-        mols_per_row=1,
-        sub_img_size=(500, 350),
-    )
-    if image is None:
+    try:
+        image = draw_molecule(decoded_graph, size=(500, 350))
+    except Exception:
         return False
     image_array = _coerce_inline_image_array(image)
     if image_array is None:

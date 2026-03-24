@@ -22,12 +22,20 @@ def build_optional_dependency_candidates() -> list[Path]:
     """Return plausible local workspace roots for sibling source checkouts."""
     repo_root = Path(__file__).resolve().parent
     repo_parent = repo_root.parent
+    repo_grandparent = repo_parent.parent
+    repo_ancestors = list(repo_root.parents[:4])
     candidates = [
+        *repo_ancestors,
         repo_parent,
+        repo_grandparent,
         repo_parent / "abstractgraph-ecosystem" / "repos",
         repo_parent / "abstractgraph_ecosystem" / "repos",
         repo_parent / "abstractgraph-ecosystem",
         repo_parent / "abstractgraph_ecosystem",
+        repo_grandparent / "abstractgraph-ecosystem" / "repos",
+        repo_grandparent / "abstractgraph_ecosystem" / "repos",
+        repo_grandparent / "abstractgraph-ecosystem",
+        repo_grandparent / "abstractgraph_ecosystem",
         repo_root,
     ]
     return _dedupe_paths(candidates)

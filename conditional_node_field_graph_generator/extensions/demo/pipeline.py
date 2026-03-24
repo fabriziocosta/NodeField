@@ -10,6 +10,14 @@ import warnings
 import networkx as nx
 import numpy as np
 import pandas as pd
+from abstractgraph_graphicalizer.chem import (
+    PubChemLoader,
+    SupervisedDataSetLoader,
+    build_zinc_graph_corpus,
+    download_zinc_dataset,
+    draw_molecules,
+    load_zinc_graph_dataset,
+)
 from sklearn.model_selection import train_test_split
 
 try:
@@ -47,14 +55,6 @@ from ...conditional_node_field_graph_generator import (
 )
 from ...persistence import save_graph_generator
 from ...runtime_paths import resolve_pubchem_data_root, resolve_zinc_data_root
-from ..molecular import (
-    PubChemLoader,
-    SupervisedDataSetLoader,
-    build_zinc_graph_corpus,
-    download_zinc_dataset,
-    draw_molecules,
-    load_zinc_graph_dataset,
-)
 from ..synthetic import ArtificialGraphDatasetConstructor
 from .storage import describe_resume_checkpoint, find_latest_checkpoint
 from .visualization import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
@@ -125,11 +125,10 @@ def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
 
     if dataset_type == "MOLECULAR":
         pubchem_dir = _resolve_pubchem_dir()
+        loader = PubChemLoader(pubchem_dir)
 
         def pubchem_loader():
-            loader = PubChemLoader()
-            loader.pubchem_dir = str(pubchem_dir)
-            return loader.load(assay_id, dirname=str(pubchem_dir))
+            return loader.load(assay_id)
 
         original_graphs, original_targets = SupervisedDataSetLoader(
             pubchem_loader,

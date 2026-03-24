@@ -5,11 +5,13 @@ from _external_imports import build_optional_dependency_candidates, resolve_sour
 
 def test_build_optional_dependency_candidates_includes_workspace_roots():
     candidates = build_optional_dependency_candidates()
+    repo_root = Path(__file__).resolve().parents[1]
 
     assert candidates
     assert all(isinstance(path, Path) for path in candidates)
     assert any(path.name == "NodeField" for path in candidates)
-    assert any(path.name == "Projects" for path in candidates)
+    assert repo_root.resolve() in candidates
+    assert repo_root.parent.resolve() in candidates
     assert any(path.name == "repos" for path in candidates)
     assert any(path.name == "abstractgraph-ecosystem" for path in candidates)
 

@@ -11,8 +11,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
-
-from ..molecular import draw_molecules
+from abstractgraph_graphicalizer.chem import draw_molecules
 
 try:
     from IPython.display import display
@@ -42,7 +41,7 @@ def show_molecules(graphs, n=12, title=None, legends=None):
     if not graph_list:
         print("No graphs to display.")
         return None
-    return draw_molecules(graph_list, legends=legends)
+    return draw_molecules(graph_list, titles=legends)
 
 
 def offset_neg_graphs(graphs, targets, offset=10):

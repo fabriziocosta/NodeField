@@ -47,4 +47,5 @@ def test_apply_graph_generator_persistence_migrations_repairs_legacy_state():
     assert generator.oracle_edge_memory_clip == 5.0
     assert generator.restore_calls == 1
     assert np.asarray(generator.node_label_classes_, dtype=object).tolist() == ["C", "N"]
-    assert np.asarray(generator.edge_label_classes_, dtype=object).tolist() == ["1", "2"]
+    assert np.asarray(generator.edge_label_classes_, dtype=object).tolist() == ["single", "double"]
+    assert generator.edge_label_to_index_ == {"single": 0, "double": 1}

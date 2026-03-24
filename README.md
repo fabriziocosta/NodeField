@@ -44,7 +44,7 @@ This is a local development conventions file. It covers documentation and notebo
 
 [`docs/extensions/molecular/README.md`](docs/extensions/molecular/README.md)
 
-This extension document covers the chemistry-specific support layer. It points to the molecular conversion, dataset, and visualization utilities used for PubChem, ZINC, and notebook molecule workflows.
+This document explains the chemistry ownership boundary after the migration to the abstractgraph ecosystem. NodeField now relies on `abstractgraph_graphicalizer.chem` for molecule conversion, loading, caching, and rendering.
 
 [`docs/extensions/synthetic/README.md`](docs/extensions/synthetic/README.md)
 
@@ -82,8 +82,6 @@ NodeField/
 │   ├── extensions/
 │   │   ├── demo/
 │   │   │   └── README.md
-│   │   ├── molecular/
-│   │   │   └── README.md
 │   │   └── synthetic/
 │   │       └── README.md
 │   └── PREFERENCES.md
@@ -109,13 +107,13 @@ Key paths:
   High-level graph generator, supervision assembly, decode orchestration, and graph-level sampling helpers.
 
 - `conditional_node_field_graph_generator/extensions/`
-  Optional extension layers for demo workflows, molecular graph tooling, and synthetic/artificial graph utilities.
+  Optional extension layers for demo workflows and synthetic/artificial graph utilities.
 
 - `docs/`
   Technical documentation for the model, public interfaces, graph generator, decoder, extension layers, and local development conventions.
 
 - `notebooks/`
-  Demo and experiment notebooks. Reusable notebook support logic is being moved into `extensions/demo`.
+  Demo and experiment notebooks. Reusable notebook support logic lives in `extensions/demo`, while chemistry loaders and drawing come from `abstractgraph_graphicalizer.chem`.
 
 - `tests/`
   Pytest suite for generator behavior and supporting modules.
@@ -210,4 +208,5 @@ Notebook execution flow is kept lean by design:
 - Prefer assigning variables and calling functions from `.py` modules.
 - Place reusable notebook logic in extension modules, especially `conditional_node_field_graph_generator/extensions/demo/`.
 - Use `conditional_node_field_graph_generator.runtime_paths` for repo, dataset, checkpoint, and artifact resolution instead of re-implementing `Path.cwd()/parents` probes.
+- Import notebook bootstrap helpers from `conditional_node_field_graph_generator.notebooks`, not from notebook-local `sys.path` setup.
 - Clear notebook outputs before committing.

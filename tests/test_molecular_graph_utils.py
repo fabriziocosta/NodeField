@@ -3,38 +3,38 @@ import pickle
 
 import numpy as np
 import pandas as pd
-
-from conditional_node_field_graph_generator.extensions.molecular import (
+from abstractgraph_graphicalizer.chem import (
     PubChemLoader,
     SupervisedDataSetLoader,
     build_zinc_graph_corpus,
     extract_zinc_targets,
-    networkx_to_molecule,
-    smiles_to_networkx_molecule,
+    graph_to_rdmol,
+    load_zinc_graph_dataset,
+    smiles_to_graph,
 )
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PUBCHEM_DATA_ROOT = PROJECT_ROOT / "notebooks" / "datasets" / "PUBCHEM"
 
 
 def test_smiles_round_trip_to_rdkit():
-    graph = smiles_to_networkx_molecule("CCO", zinc_id="z1", properties={"qed": 0.5})
+    graph = smiles_to_graph("CCO")
+    graph.graph["zinc_id"] = "z1"
+    graph.graph["qed"] = 0.5
 
     assert graph is not None
     assert graph.graph["zinc_id"] == "z1"
     assert graph.graph["qed"] == 0.5
     assert graph.number_of_nodes() == 3
 
-    mol = networkx_to_molecule(graph, sanitize=False)
+    mol = graph_to_rdmol(graph)
     assert mol.GetNumAtoms() == 3
 
 
 def test_local_pubchem_loader_reads_bundled_sdf_files():
-    loader = PubChemLoader()
-    loader.pubchem_dir = str(PUBCHEM_DATA_ROOT)
+    loader = PubChemLoader(PUBCHEM_DATA_ROOT)
 
-    graphs, targets = loader.load("651610", dirname=str(PUBCHEM_DATA_ROOT))
+    graphs, targets = loader.load("651610")
 
     assert len(graphs) == len(targets)
     assert len(graphs) > 100
@@ -42,11 +42,10 @@ def test_local_pubchem_loader_reads_bundled_sdf_files():
 
 
 def test_supervised_dataset_loader_equalizes_and_resizes():
-    loader = PubChemLoader()
-    loader.pubchem_dir = str(PUBCHEM_DATA_ROOT)
+    loader = PubChemLoader(PUBCHEM_DATA_ROOT)
 
     def load_func():
-        return loader.load("651610", dirname=str(PUBCHEM_DATA_ROOT))
+        return loader.load("651610")
 
     graphs, targets = SupervisedDataSetLoader(
         load_func=load_func,
@@ -96,8 +95,6 @@ def test_load_zinc_graph_dataset_repairs_legacy_manifest(tmp_path):
     with open(manifest_path, "wb") as handle:
         pickle.dump(legacy_manifest, handle)
 
-    from conditional_node_field_graph_generator.extensions.molecular import load_zinc_graph_dataset
-
     graphs, metadata = load_zinc_graph_dataset(tmp_path, max_molecules=10)
 
     assert len(graphs) == 2
@@ -131,8 +128,6 @@ def test_load_zinc_graph_dataset_repairs_legacy_bucket_payload(tmp_path):
     }
     with open(bucket_path, "wb") as handle:
         pickle.dump(legacy_items, handle)
-
-    from conditional_node_field_graph_generator.extensions.molecular import load_zinc_graph_dataset
 
     graphs, metadata = load_zinc_graph_dataset(tmp_path, max_molecules=10)
 

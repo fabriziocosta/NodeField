@@ -1,23 +1,18 @@
-# Molecular Extension
+# Molecular Support
 
-This section documents the chemistry-oriented extension layer for NodeField.
+NodeField no longer ships a local molecular extension.
 
-The molecular extension is useful for:
-- molecule/graph conversion
+All maintained chemistry support now lives in the abstractgraph ecosystem under
+`abstractgraph_graphicalizer.chem`, including:
+- molecule graph conversion
+- molecule drawing
 - PubChem assay loading
-- ZINC download, caching, and preprocessing
-- molecule drawing in notebooks
-- compatibility with older molecule-oriented notebook workflows
+- ZINC download, caching, and corpus loading
+- small supervised dataset shaping helpers used by notebooks
 
-Primary entry points live under:
-- [`conditional_node_field_graph_generator/extensions/molecular/__init__.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/molecular/__init__.py)
-- [`conditional_node_field_graph_generator/extensions/molecular/conversion.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/molecular/conversion.py)
-- [`conditional_node_field_graph_generator/extensions/molecular/datasets.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/molecular/datasets.py)
-- [`conditional_node_field_graph_generator/extensions/molecular/visualization.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/conditional_node_field_graph_generator/extensions/molecular/visualization.py)
+Use:
+- `from abstractgraph_graphicalizer.chem import ...`
 
-Detailed module documentation:
-- [`docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md)
-
-Boundary:
-- this extension is not required for the core NodeField model
-- it exists to support chemistry-specific datasets and notebook workflows
+Reference:
+- [`docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md`](/home/fabrizio/code/NodeField/docs/extensions/molecular/MOLECULAR_GRAPH_UTILS_README.md)
+- `abstractgraph-graphicalizer/docs/CHEMISTRY.md` in the graphicalizer checkout

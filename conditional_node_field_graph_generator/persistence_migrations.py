@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from abstractgraph_graphicalizer.chem import normalize_bond_label
 
 
-GRAPH_GENERATOR_PERSISTENCE_VERSION = 2
+GRAPH_GENERATOR_PERSISTENCE_VERSION = 3
 
 
 def get_graph_generator_persistence_version(graph_generator: Any) -> int:
@@ -53,6 +54,22 @@ def _migrate_graph_generator_v2(graph_generator: Any) -> None:
         graph_generator.edge_label_classes_ = np.asarray(graph_generator.edge_label_classes_, dtype=object)
 
 
+def _migrate_graph_generator_v3(graph_generator: Any) -> None:
+    edge_label_classes = getattr(graph_generator, "edge_label_classes_", None)
+    if edge_label_classes is not None:
+        graph_generator.edge_label_classes_ = np.asarray(
+            [normalize_bond_label(label) for label in edge_label_classes],
+            dtype=object,
+        )
+
+    edge_label_to_index = getattr(graph_generator, "edge_label_to_index_", None)
+    if edge_label_to_index is not None:
+        graph_generator.edge_label_to_index_ = {
+            normalize_bond_label(label): int(index)
+            for label, index in edge_label_to_index.items()
+        }
+
+
 def apply_graph_generator_persistence_migrations(graph_generator: Any) -> Any:
     version = get_graph_generator_persistence_version(graph_generator)
     if version < 1:
@@ -61,5 +78,8 @@ def apply_graph_generator_persistence_migrations(graph_generator: Any) -> Any:
     if version < 2:
         _migrate_graph_generator_v2(graph_generator)
         version = 2
+    if version < 3:
+        _migrate_graph_generator_v3(graph_generator)
+        version = 3
     graph_generator._persistence_schema_version = version
     return graph_generator

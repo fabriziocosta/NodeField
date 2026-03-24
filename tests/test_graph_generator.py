@@ -1078,7 +1078,7 @@ def test_decode_forwards_diagnostic_graph_renderer_with_decoded_graph(monkeypatc
 
     monkeypatch.setattr(cngg_module, "_plot_decoder_diagnostics", fake_plot_decoder_diagnostics)
 
-    def fake_renderer(graphs, legends=None):
+    def fake_renderer(graphs, titles=None):
         return None
 
     decoder = ConditionalNodeFieldGraphDecoder(
@@ -1121,16 +1121,14 @@ def test_try_render_molecular_graph_inline_renders_image(monkeypatch):
         def set_axis_off(self):
             rendered["axis_off"] = True
 
-    def fake_molecule_graphs_to_grid_image(graphs, legends, mols_per_row, sub_img_size):
-        rendered["graphs"] = graphs
-        rendered["legends"] = legends
-        rendered["mols_per_row"] = mols_per_row
-        rendered["sub_img_size"] = sub_img_size
+    def fake_draw_molecule(graph, size):
+        rendered["graph"] = graph
+        rendered["size"] = size
         return np.ones((4, 4, 3), dtype=np.uint8) * 255
 
     monkeypatch.setattr(
-        "conditional_node_field_graph_generator.extensions.molecular.molecule_graphs_to_grid_image",
-        fake_molecule_graphs_to_grid_image,
+        "abstractgraph_graphicalizer.chem.draw_molecule",
+        fake_draw_molecule,
     )
 
     graph = nx.Graph()
@@ -1145,7 +1143,7 @@ def test_try_render_molecular_graph_inline_renders_image(monkeypatch):
     )
 
     assert result is True
-    assert rendered["legends"] is None
+    assert rendered["size"] == (500, 350)
     assert rendered["title"] == "Decoded graph"
     assert rendered["axis_off"] is True
 
