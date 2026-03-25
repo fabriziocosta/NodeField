@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 from abstractgraph_graphicalizer.chem import (
     DEFAULT_ZINC_TARGET_COLUMNS,
-    PubChemLoader,
+    PubChemAssayLoader,
     SupervisedDataSetLoader,
     ZINCLoader,
     download_zinc_dataset,
@@ -446,7 +446,7 @@ def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
 
     if dataset_type == "MOLECULAR":
         pubchem_dir = _resolve_pubchem_dir()
-        loader = PubChemLoader(pubchem_dir)
+        loader = PubChemAssayLoader(pubchem_dir)
 
         def pubchem_loader():
             return loader.load(assay_id)

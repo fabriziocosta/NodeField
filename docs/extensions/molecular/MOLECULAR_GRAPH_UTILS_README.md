@@ -6,7 +6,7 @@ Use the abstractgraph ecosystem directly:
 
 ```python
 from abstractgraph_graphicalizer.chem import (
-    PubChemLoader,
+    PubChemAssayLoader,
     SupervisedDataSetLoader,
     ZINCLoader,
     build_zinc_graph_corpus,

@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 import pandas as pd
 from abstractgraph_graphicalizer.chem import (
-    PubChemLoader,
+    PubChemAssayLoader,
     SupervisedDataSetLoader,
     build_zinc_graph_corpus,
     extract_zinc_targets,
@@ -32,7 +32,7 @@ def test_smiles_round_trip_to_rdkit():
 
 
 def test_local_pubchem_loader_reads_bundled_sdf_files():
-    loader = PubChemLoader(PUBCHEM_DATA_ROOT)
+    loader = PubChemAssayLoader(PUBCHEM_DATA_ROOT)
 
     graphs, targets = loader.load("651610")
 
@@ -42,7 +42,7 @@ def test_local_pubchem_loader_reads_bundled_sdf_files():
 
 
 def test_supervised_dataset_loader_equalizes_and_resizes():
-    loader = PubChemLoader(PUBCHEM_DATA_ROOT)
+    loader = PubChemAssayLoader(PUBCHEM_DATA_ROOT)
 
     def load_func():
         return loader.load("651610")
@@ -90,7 +90,7 @@ def test_load_zinc_graph_dataset_repairs_legacy_manifest(tmp_path):
     frame.to_csv(csv_path, index=False)
 
     manifest = build_zinc_graph_corpus(tmp_path, csv_path)
-    manifest_path = tmp_path / "graph_corpus" / "manifest.pkl"
+    manifest_path = tmp_path / "graph_corpus_cache" / "zinc_small" / "graph_corpus" / "manifest.pkl"
     legacy_manifest = {key: value for key, value in manifest.items() if key != "bucket_files"}
     with open(manifest_path, "wb") as handle:
         pickle.dump(legacy_manifest, handle)
@@ -117,7 +117,7 @@ def test_load_zinc_graph_dataset_repairs_legacy_bucket_payload(tmp_path):
     frame.to_csv(csv_path, index=False)
 
     manifest = build_zinc_graph_corpus(tmp_path, csv_path)
-    bucket_path = Path(manifest["bucket_files"][3])
+    bucket_path = tmp_path / "graph_corpus_cache" / "zinc_small" / manifest["bucket_files"][3]
     with open(bucket_path, "rb") as handle:
         current_items = pickle.load(handle)
 
