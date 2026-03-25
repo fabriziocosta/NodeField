@@ -568,3 +568,81 @@ def test_compare_real_vs_generated_returns_summary_tables(monkeypatch):
     assert len(result["real_graphs"]) == 2
     assert len(result["generated_graphs"]) == 2
     assert len(displayed) >= 5
+
+
+class _MaskAwareFeasibilityLeaf:
+    def __init__(self, accepted_ids, violating_edge_sets=None):
+        self.accepted_ids = set(accepted_ids)
+        self._violating_edge_sets = list(violating_edge_sets or [])
+        self.parallel = True
+
+    def fit(self, graphs):
+        return self
+
+    def predict(self, graphs):
+        return np.asarray([graph.graph["graph_id"] in self.accepted_ids for graph in graphs], dtype=bool)
+
+    def number_of_violations(self, graphs):
+        return np.asarray(
+            [0 if graph.graph["graph_id"] in self.accepted_ids else 1 for graph in graphs],
+            dtype=int,
+        )
+
+    def violating_edge_sets(self, graphs):
+        return [list(self._violating_edge_sets) for _ in graphs]
+
+
+def _oracle_test_graph(graph_id):
+    graph = nx.Graph()
+    graph.graph["graph_id"] = graph_id
+    graph.add_node(0, label="C")
+    graph.add_node(1, label="C")
+    graph.add_edge(0, 1, label="single")
+    return graph
+
+
+def test_demo_feasibility_estimator_mask_selects_active_levels():
+    graphs = [_oracle_test_graph(0), _oracle_test_graph(1)]
+    estimator = FeasibilityEstimator(
+        [
+            _MaskAwareFeasibilityLeaf({0}),
+            _MaskAwareFeasibilityLeaf({1}),
+        ],
+        estimator_names=["first", "second"],
+    )
+
+    assert estimator.predict(graphs).tolist() == [False, False]
+    assert estimator.predict(graphs, estimator_mask=[1, 0]).tolist() == [True, False]
+    assert estimator.predict(graphs, estimator_mask=[0, 1]).tolist() == [False, True]
+
+    estimator.set_active_mask([0, 1])
+    assert estimator.predict(graphs).tolist() == [False, True]
+
+
+def test_demo_feasibility_estimator_caps_oracle_cuts_per_level():
+    graph = _oracle_test_graph(0)
+    estimator = FeasibilityEstimator(
+        [
+            _MaskAwareFeasibilityLeaf(
+                {0},
+                violating_edge_sets=[
+                    frozenset({(0, 1)}),
+                    frozenset({(0, 2)}),
+                ],
+            ),
+            _MaskAwareFeasibilityLeaf(
+                {0},
+                violating_edge_sets=[
+                    frozenset({(1, 2)}),
+                    frozenset({(2, 3)}),
+                ],
+            ),
+        ],
+        estimator_names=["small", "large"],
+    )
+
+    estimator.set_oracle_cut_budget_per_estimator([1, 0])
+    assert estimator.violating_edge_sets([graph]) == [[frozenset({(0, 1)})]]
+
+    estimator.set_oracle_cut_budget_schedule(4, schedule="exponential", minimum_budget=1, decay=0.5)
+    assert estimator.oracle_cut_budget_per_estimator.tolist() == [4, 2]

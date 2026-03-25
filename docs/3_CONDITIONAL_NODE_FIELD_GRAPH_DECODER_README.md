@@ -139,8 +139,25 @@ bounded oracle-guided loop:
 - ask the feasibility estimator for violating edge or node sets,
 - optionally forbid the currently offending node-label or edge-label
   assignments and repair labels using label probabilities,
-- add one no-good cut per persistent violating edge set,
+- allocate a per-estimator structural-cut budget,
+- add one no-good cut per selected persistent violating edge set,
 - re-solve until no new violations remain or the iteration budget is exhausted.
+
+For the maintained demo feasibility estimator, violating edge sets are grouped
+by internal estimator level, such as edge, path, valence, and cycle checks.
+The oracle now uses an adaptive budget policy by default:
+
+- start from a decreasing prior budget for smaller-to-larger motif families,
+- inspect how many violating edge sets each active estimator produced on the
+  current candidate graph,
+- keep each estimator up to its base allocation,
+- reassign unused budget from quieter levels to levels that still expose
+  additional violations.
+
+This is adaptive reallocation around a decreasing prior, not a learned policy.
+The estimator interface also supports boolean masks so one-hot or cumulative
+subsets of internal estimator levels can be activated for ablations or staged
+decode experiments.
 
 ### 3. Label Reconstruction
 

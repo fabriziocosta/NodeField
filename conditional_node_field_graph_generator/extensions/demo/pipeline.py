@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 import warnings
 
 import networkx as nx
@@ -34,14 +34,16 @@ except ModuleNotFoundError:
 
 try:
     from abstractgraph_ml.feasibility import (
-        FeasibilityEstimator,
+        FeasibilityEstimator as _AbstractGraphFeasibilityEstimator,
         FeasibilityEstimatorFeatureCannotExist,
         WithinRangeFeasibilityEstimatorFromNumericalFunction,
+        filter_graphs_without_node_and_edge_label_attribute,
     )
 except ModuleNotFoundError:
-    FeasibilityEstimator = None
+    _AbstractGraphFeasibilityEstimator = None
     FeasibilityEstimatorFeatureCannotExist = None
     WithinRangeFeasibilityEstimatorFromNumericalFunction = None
+    filter_graphs_without_node_and_edge_label_attribute = None
 
 from nsppk import NSPPK, NodeNSPPK
 
@@ -67,11 +69,317 @@ def _has_demo_feasibility_support():
             neighborhood,
             unlabel,
             combination,
-            FeasibilityEstimator,
+            _AbstractGraphFeasibilityEstimator,
             FeasibilityEstimatorFeatureCannotExist,
             WithinRangeFeasibilityEstimatorFromNumericalFunction,
+            filter_graphs_without_node_and_edge_label_attribute,
         )
     )
+
+
+class FeasibilityEstimator:
+    """Composite feasibility estimator with optional per-level masking and cut budgets."""
+
+    def __init__(
+        self,
+        feasibility_estimators,
+        parallel=True,
+        estimator_names=None,
+        active_mask=None,
+        oracle_cut_budget_per_estimator=None,
+        oracle_cut_budget_strategy="adaptive",
+    ):
+        if _AbstractGraphFeasibilityEstimator is None:
+            raise ModuleNotFoundError(
+                "abstractgraph_ml.feasibility is required to build the demo feasibility estimator."
+            )
+        self.feasibility_estimators = list(feasibility_estimators)
+        self.estimator_names = self._resolve_estimator_names(estimator_names)
+        self.active_mask = self._normalize_mask(active_mask)
+        self.oracle_cut_budget_per_estimator = self._normalize_cut_budgets(
+            oracle_cut_budget_per_estimator
+        )
+        self.oracle_cut_budget_strategy = str(oracle_cut_budget_strategy)
+        self.set_parallel(parallel)
+
+    def _resolve_estimator_names(self, estimator_names):
+        if estimator_names is None:
+            return [f"estimator_{idx}" for idx in range(len(self.feasibility_estimators))]
+        estimator_names = list(estimator_names)
+        if len(estimator_names) != len(self.feasibility_estimators):
+            raise ValueError("estimator_names must match feasibility_estimators length.")
+        return estimator_names
+
+    def _normalize_mask(self, mask):
+        if mask is None:
+            return np.ones(len(self.feasibility_estimators), dtype=bool)
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != (len(self.feasibility_estimators),):
+            raise ValueError("Estimator mask must match feasibility_estimators length.")
+        return mask.copy()
+
+    def _normalize_cut_budgets(self, cut_budgets):
+        if cut_budgets is None:
+            return None
+        budgets = np.asarray(cut_budgets, dtype=int)
+        if budgets.shape != (len(self.feasibility_estimators),):
+            raise ValueError("Cut budgets must match feasibility_estimators length.")
+        if np.any(budgets < 0):
+            raise ValueError("Cut budgets must be >= 0.")
+        return budgets.copy()
+
+    def _selected_estimators(self, estimator_mask=None):
+        mask = self._normalize_mask(self.active_mask if estimator_mask is None else estimator_mask)
+        return [
+            (idx, self.estimator_names[idx], self.feasibility_estimators[idx])
+            for idx, is_active in enumerate(mask.tolist())
+            if is_active
+        ]
+
+    @staticmethod
+    def _predict_estimator_on_indices(feasibility_estimator, graphs, indices):
+        if hasattr(feasibility_estimator, "predict_masked"):
+            return np.asarray(feasibility_estimator.predict_masked(graphs, indices))
+        selected_graphs = [graphs[idx] for idx in indices]
+        return np.asarray(feasibility_estimator.predict(selected_graphs))
+
+    @staticmethod
+    def _deduplicate_frozensets(values):
+        deduplicated = []
+        seen = set()
+        for value in values:
+            frozen = frozenset(value)
+            if frozen in seen:
+                continue
+            seen.add(frozen)
+            deduplicated.append(frozen)
+        return deduplicated
+
+    def set_parallel(self, parallel):
+        for feasibility_estimator in self.feasibility_estimators:
+            feasibility_estimator.parallel = parallel
+        return self
+
+    def set_active_mask(self, mask):
+        self.active_mask = self._normalize_mask(mask)
+        return self
+
+    def set_oracle_cut_budget_per_estimator(self, cut_budgets):
+        self.oracle_cut_budget_per_estimator = self._normalize_cut_budgets(cut_budgets)
+        return self
+
+    def set_oracle_cut_budget_strategy(self, strategy):
+        strategy = str(strategy)
+        if strategy not in {"adaptive", "fixed", "none"}:
+            raise ValueError("strategy must be one of {'adaptive', 'fixed', 'none'}.")
+        self.oracle_cut_budget_strategy = strategy
+        return self
+
+    def set_oracle_cut_budget_schedule(
+        self,
+        initial_budget,
+        *,
+        schedule="exponential",
+        minimum_budget=0,
+        decay=0.5,
+    ):
+        n_estimators = len(self.feasibility_estimators)
+        initial_budget = int(initial_budget)
+        minimum_budget = int(minimum_budget)
+        if initial_budget < 0:
+            raise ValueError("initial_budget must be >= 0.")
+        if minimum_budget < 0:
+            raise ValueError("minimum_budget must be >= 0.")
+        if schedule == "linear":
+            if n_estimators <= 1:
+                budgets = np.asarray([initial_budget], dtype=int)
+            else:
+                budgets = np.linspace(initial_budget, minimum_budget, num=n_estimators)
+                budgets = np.floor(budgets).astype(int)
+        elif schedule == "exponential":
+            decay = float(decay)
+            if decay <= 0.0:
+                raise ValueError("decay must be > 0 for exponential schedules.")
+            budgets = np.asarray(
+                [int(np.floor(initial_budget * (decay ** idx))) for idx in range(n_estimators)],
+                dtype=int,
+            )
+        else:
+            raise ValueError("schedule must be either 'linear' or 'exponential'.")
+        budgets = np.maximum(budgets, minimum_budget)
+        return self.set_oracle_cut_budget_per_estimator(budgets)
+
+    def _default_oracle_cut_budget_per_estimator(self):
+        n_estimators = len(self.feasibility_estimators)
+        if n_estimators == 0:
+            return np.zeros(0, dtype=int)
+        initial_budget = max(1, 2 ** max(0, n_estimators - 1))
+        budgets = np.asarray(
+            [max(1, int(np.floor(initial_budget * (0.5 ** idx)))) for idx in range(n_estimators)],
+            dtype=int,
+        )
+        return budgets
+
+    def _resolve_oracle_cut_budgets(self, cut_budget_per_estimator=None):
+        if cut_budget_per_estimator is not None:
+            return self._normalize_cut_budgets(cut_budget_per_estimator)
+        if self.oracle_cut_budget_per_estimator is not None:
+            return self.oracle_cut_budget_per_estimator.copy()
+        return self._default_oracle_cut_budget_per_estimator()
+
+    @staticmethod
+    def _allocate_adaptive_cut_budgets(available_counts, base_budgets):
+        available_counts = np.asarray(available_counts, dtype=int)
+        base_budgets = np.asarray(base_budgets, dtype=int)
+        if available_counts.shape != base_budgets.shape:
+            raise ValueError("available_counts and base_budgets must have the same shape.")
+        allocated = np.minimum(available_counts, base_budgets)
+        leftover = int(np.sum(base_budgets - allocated))
+        if leftover <= 0:
+            return allocated
+        deficits = np.maximum(available_counts - allocated, 0)
+        while leftover > 0 and int(deficits.sum()) > 0:
+            priority_order = sorted(
+                range(len(deficits)),
+                key=lambda idx: (-int(deficits[idx]), -int(base_budgets[idx]), idx),
+            )
+            progressed = False
+            for idx in priority_order:
+                if deficits[idx] <= 0 or leftover <= 0:
+                    continue
+                allocated[idx] += 1
+                deficits[idx] -= 1
+                leftover -= 1
+                progressed = True
+                if leftover <= 0:
+                    break
+            if not progressed:
+                break
+        return allocated
+
+    def fit(self, graphs):
+        graphs = filter_graphs_without_node_and_edge_label_attribute(graphs)
+        self.feasibility_estimators = [
+            feasibility_estimator.fit(graphs) for feasibility_estimator in self.feasibility_estimators
+        ]
+        return self
+
+    def predict_masked(self, graphs, indices=None, estimator_mask=None):
+        if indices is None:
+            indices = np.arange(len(graphs))
+        else:
+            indices = np.asarray(indices, dtype=int)
+
+        preds = np.zeros(len(graphs), dtype=bool)
+        if len(indices) == 0:
+            return preds
+
+        surviving_indices = indices.copy()
+        preds[surviving_indices] = True
+        for _, _, feasibility_estimator in self._selected_estimators(estimator_mask=estimator_mask):
+            if len(surviving_indices) == 0:
+                break
+            estimator_preds = self._predict_estimator_on_indices(
+                feasibility_estimator,
+                graphs,
+                surviving_indices,
+            ).astype(bool, copy=False)
+            failed_indices = surviving_indices[np.logical_not(estimator_preds)]
+            preds[failed_indices] = False
+            surviving_indices = surviving_indices[estimator_preds]
+        return preds
+
+    def predict(self, graphs, estimator_mask=None):
+        return self.predict_masked(graphs, estimator_mask=estimator_mask)
+
+    def violations(self, graphs, estimator_mask=None):
+        selected_estimators = self._selected_estimators(estimator_mask=estimator_mask)
+        if not selected_estimators:
+            return np.zeros((len(graphs), 0), dtype=int)
+        preds = [
+            np.asarray(feasibility_estimator.number_of_violations(graphs)).reshape(-1, 1)
+            for _, _, feasibility_estimator in selected_estimators
+        ]
+        return np.hstack(preds)
+
+    def number_of_violations(self, graphs, estimator_mask=None):
+        preds = self.violations(graphs, estimator_mask=estimator_mask)
+        return np.sum(preds, axis=1)
+
+    def violating_edge_sets(
+        self,
+        graphs: Iterable,
+        estimator_mask=None,
+        cut_budget_per_estimator=None,
+    ):
+        graphs = list(graphs)
+        violating_sets = [[] for _ in range(len(graphs))]
+        selected_estimators = self._selected_estimators(estimator_mask=estimator_mask)
+        if not selected_estimators:
+            return violating_sets
+        base_budgets = self._resolve_oracle_cut_budgets(cut_budget_per_estimator)
+        estimator_violations_by_estimator = []
+        for estimator_idx, _, feasibility_estimator in selected_estimators:
+            if not hasattr(feasibility_estimator, "violating_edge_sets"):
+                estimator_violations_by_estimator.append((estimator_idx, [[] for _ in range(len(graphs))]))
+                continue
+            estimator_violations = []
+            for graph_violations in feasibility_estimator.violating_edge_sets(graphs):
+                estimator_violations.append(self._deduplicate_frozensets(graph_violations))
+            estimator_violations_by_estimator.append((estimator_idx, estimator_violations))
+
+        for graph_idx in range(len(graphs)):
+            per_estimator_counts = np.asarray(
+                [
+                    len(graph_violations[graph_idx])
+                    for _, graph_violations in estimator_violations_by_estimator
+                ],
+                dtype=int,
+            )
+            per_estimator_base_budgets = np.asarray(
+                [int(base_budgets[estimator_idx]) for estimator_idx, _ in estimator_violations_by_estimator],
+                dtype=int,
+            )
+            if self.oracle_cut_budget_strategy == "none":
+                per_estimator_allocations = per_estimator_counts
+            elif self.oracle_cut_budget_strategy == "fixed":
+                per_estimator_allocations = np.minimum(per_estimator_counts, per_estimator_base_budgets)
+            else:
+                per_estimator_allocations = self._allocate_adaptive_cut_budgets(
+                    per_estimator_counts,
+                    per_estimator_base_budgets,
+                )
+
+            for allocation_idx, (_estimator_idx, estimator_violations) in enumerate(estimator_violations_by_estimator):
+                graph_violations = estimator_violations[graph_idx]
+                violating_sets[graph_idx].extend(graph_violations[: int(per_estimator_allocations[allocation_idx])])
+        return [
+            self._deduplicate_frozensets(graph_violations)
+            for graph_violations in violating_sets
+        ]
+
+    def violating_node_labels_sets(self, graphs: Iterable, estimator_mask=None):
+        graphs = list(graphs)
+        violating_sets = [[] for _ in range(len(graphs))]
+        for _, _, feasibility_estimator in self._selected_estimators(estimator_mask=estimator_mask):
+            if not hasattr(feasibility_estimator, "violating_node_labels_sets"):
+                continue
+            estimator_violations = feasibility_estimator.violating_node_labels_sets(graphs)
+            for graph_idx, graph_violations in enumerate(estimator_violations):
+                violating_sets[graph_idx].extend(self._deduplicate_frozensets(graph_violations))
+        return [
+            self._deduplicate_frozensets(graph_violations)
+            for graph_violations in violating_sets
+        ]
+
+    def filter(self, graphs, targets=None, estimator_mask=None):
+        graphs = filter_graphs_without_node_and_edge_label_attribute(graphs)
+        is_feasible = self.predict(graphs, estimator_mask=estimator_mask)
+        selected_graphs = [graphs[idx] for idx in range(len(graphs)) if is_feasible[idx]]
+        if targets is None:
+            return selected_graphs
+        selected_targets = [targets[idx] for idx in range(len(targets)) if is_feasible[idx]]
+        return selected_graphs, selected_targets
 
 
 def _build_demo_operator(operator_fn, /, *args, **kwargs):
@@ -79,6 +387,33 @@ def _build_demo_operator(operator_fn, /, *args, **kwargs):
     if operator_fn is None:
         raise RuntimeError("Requested abstractgraph operator is unavailable.")
     return operator_fn(*args, **kwargs)
+
+
+def ensure_demo_feasibility_estimator(feasibility_estimator):
+    """Upgrade composite abstractgraph feasibility estimators to the local adaptive wrapper."""
+    if feasibility_estimator is None:
+        return None
+    if isinstance(feasibility_estimator, FeasibilityEstimator):
+        if getattr(feasibility_estimator, "oracle_cut_budget_strategy", None) is None:
+            feasibility_estimator.set_oracle_cut_budget_strategy("adaptive")
+        return feasibility_estimator
+    child_estimators = getattr(feasibility_estimator, "feasibility_estimators", None)
+    if child_estimators is None:
+        return feasibility_estimator
+    child_estimators = list(child_estimators)
+    default_names = ["edge", "path", "valence", "cycle"]
+    estimator_names = (
+        default_names[: len(child_estimators)]
+        if len(child_estimators) <= len(default_names)
+        else [f"estimator_{idx}" for idx in range(len(child_estimators))]
+    )
+    wrapped = FeasibilityEstimator(
+        child_estimators,
+        parallel=getattr(child_estimators[0], "parallel", True) if child_estimators else True,
+        estimator_names=estimator_names,
+        oracle_cut_budget_strategy="adaptive",
+    )
+    return wrapped
 
 
 def _resolve_pubchem_dir() -> Path:
@@ -666,15 +1001,22 @@ def build_graph_generator(
         )
         feasibility_estimator = FeasibilityEstimator(
             [
-                #feasibility_size,
+                # feasibility_size,
                 feasibility_edge,
                 feasibility_path,
                 feasibility_valence,
                 feasibility_cycle,
-                #feasibility_unlabeled_structure,
-                #feasibility_cycle_composition,
-            ]
+                # feasibility_unlabeled_structure,
+                # feasibility_cycle_composition,
+            ],
+            estimator_names=[
+                "edge",
+                "path",
+                "valence",
+                "cycle",
+            ],
         )
+        feasibility_estimator = ensure_demo_feasibility_estimator(feasibility_estimator)
     else:
         if feasibility_oracle_candidates_per_attempt or use_feasibility_filtering:
             warnings.warn(

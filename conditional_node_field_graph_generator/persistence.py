@@ -105,4 +105,12 @@ def load_graph_generator(model_name, model_dir=None):
         )
     print(f"Loaded graph generator: {path.name}")
     print(path)
+    try:
+        from .extensions.demo.pipeline import ensure_demo_feasibility_estimator
+    except Exception:
+        ensure_demo_feasibility_estimator = None
+    if ensure_demo_feasibility_estimator is not None and hasattr(graph_generator, "feasibility_estimator"):
+        graph_generator.feasibility_estimator = ensure_demo_feasibility_estimator(
+            graph_generator.feasibility_estimator
+        )
     return graph_generator

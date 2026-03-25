@@ -415,6 +415,24 @@ There is now a second integration path as well:
 - within one graph's oracle trace, edges that repeatedly appear inside violating
   sets also accumulate a temporary soft penalty before the next ILP solve.
 
+For the maintained demo pipeline, the feasibility estimator is now exposed as a
+stack of internal checks with a boolean activation mask. That lets experiments
+run one-hot configurations such as `[1, 0, 0, 0]`, cumulative configurations
+such as `[1, 1, 0, 0]`, or the full stack `[1, 1, 1, 1]` without changing the
+generator API.
+
+The same demo estimator also supports per-level structural-cut budgets during
+oracle-guided decode. By default, these budgets use an adaptive policy:
+
+- assign a decreasing prior budget to earlier and cheaper estimator levels,
+- observe how many violating edge sets each level returned for the current
+  decoded graph,
+- keep each level up to its prior allocation,
+- redistribute leftover budget to levels that still have additional violations.
+
+So the default behavior is no longer a rigid fixed ratio of cuts per estimator.
+It is a graph-local adaptive redistribution rule around a decreasing prior.
+
 So the same feasibility estimator can contribute in two ways:
 
 - as a separation oracle during adjacency reconstruction,
@@ -448,6 +466,11 @@ By default, decode now attempts oracle-guided feasibility cuts before falling
 back to the usual final feasibility filtering stage. If the configured
 feasibility estimator does not expose `violating_edge_sets(...)`, decode
 silently reuses the previous behavior.
+
+Saved generators loaded through the maintained persistence helper are also
+upgraded on load when possible so older demo feasibility-estimator composites
+pick up the masked interface and the default adaptive oracle-cut policy without
+requiring notebook changes.
 
 ### `sample(n_samples, ...)`
 
