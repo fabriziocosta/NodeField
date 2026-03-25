@@ -34,14 +34,14 @@ def sample_positive_endpoint_pair(graphs, targets):
     )
 
 
-def show_molecules(graphs, n=12, title=None, legends=None):
+def show_molecules(graphs, n=12, title=None, legends=None, n_graphs_per_line=7):
     graph_list = list(graphs)[:n]
     if title:
         print(title)
     if not graph_list:
         print("No graphs to display.")
         return None
-    return draw_molecules(graph_list, titles=legends)
+    return draw_molecules(graph_list, titles=legends, n_graphs_per_line=n_graphs_per_line)
 
 
 def offset_neg_graphs(graphs, targets, offset=10):
