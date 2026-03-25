@@ -729,6 +729,7 @@ ConditionalNodeFieldGraphDecoder(
     degree_slack_penalty: float = 1e6,
     warm_start_mst: bool = True,
     n_jobs: int = 1,
+    diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
 )
 ```
 
@@ -762,6 +763,10 @@ Parameters:
   Increase: higher throughput on CPU-bound decode workloads.
   Decrease: lower CPU usage and simpler debugging.
 
+- `diagnostic_graph_renderer`
+  Optional callable used by high-verbosity notebook workflows to render decoded
+  graphs alongside decoder diagnostics.
+
 ### Main Public Method
 
 #### `decode(...)`
@@ -773,6 +778,8 @@ decode(
     predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
     predicted_edge_labels_list: Optional[List[np.ndarray]] = None,
     predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
+    desired_node_counts: Optional[Sequence[int]] = None,
+    desired_edge_counts: Optional[Sequence[int]] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -795,6 +802,14 @@ Parameters:
 
 - `predicted_edge_label_matrices`
   Optional dense per-graph edge-label matrices.
+
+- `desired_node_counts`
+  Optional requested node counts per graph. When provided, the decoder resolves
+  node presence by selecting the top-scoring slots to match these counts.
+
+- `desired_edge_counts`
+  Optional requested edge counts per graph. When provided, degree targets and
+  the ILP edge budget are projected to match these counts.
 
 ## `ConditionalNodeFieldGraphGenerator`
 

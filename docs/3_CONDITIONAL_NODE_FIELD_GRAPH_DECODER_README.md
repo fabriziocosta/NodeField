@@ -106,8 +106,10 @@ head.
 `GeneratedNodeBatch` may also carry richer full-shape distribution tensors such
 as `node_label_logits`, `node_label_probabilities`,
 `edge_existence_probabilities`, `edge_label_logits`, and
-`edge_label_probabilities`. Those are currently analysis-facing outputs. The
-decoder still reconstructs graphs from the hard channels listed above.
+`edge_label_probabilities`. In the standard non-oracle path, structural decode
+still uses the hard channels listed above. In the oracle-guided path, these
+richer probability tensors are also used to score candidates and repair node or
+edge labels between structural re-solves.
 
 ## Decoder Responsibilities
 
@@ -127,15 +129,18 @@ This is the core global-consistency step.
 
 ### 2. Oracle-Guided Cut Generation
 
-When `use_feasibility_oracle=True` and the configured feasibility estimator
-exposes `violating_edge_sets(graphs)`, the generator runs a bounded
-cut-generation loop:
+When the configured feasibility estimator exposes oracle hooks and the current
+attempt is still within the
+`feasibility_oracle_candidates_per_attempt` budget, the generator runs a
+bounded oracle-guided loop:
 
 - solve the current adjacency MILP,
 - materialize the candidate graph,
-- ask the feasibility estimator for violating edge sets,
-- add one no-good cut per violating set,
-- re-solve until no violating sets remain or the iteration budget is exhausted.
+- ask the feasibility estimator for violating edge or node sets,
+- optionally forbid the currently offending node-label or edge-label
+  assignments and repair labels using label probabilities,
+- add one no-good cut per persistent violating edge set,
+- re-solve until no new violations remain or the iteration budget is exhausted.
 
 ### 3. Label Reconstruction
 
@@ -164,7 +169,8 @@ The structural pipeline is:
 6. symmetrize the matrix,
 7. convert predicted degrees plus node existence into integer degree targets,
 8. solve the adjacency MILP,
-9. optionally add feasibility cuts and re-solve.
+9. optionally run the oracle loop, which may relabel, add feasibility cuts, and
+   re-solve.
 
 ```mermaid
 flowchart TD
@@ -298,7 +304,7 @@ This forces the selected graph to be connected.
 ### Oracle Cuts
 
 If the feasibility oracle returns violating edge sets
-`S_1, S_2, ..., S_K`, the decoder adds one no-good cut per set:
+`S_1, S_2, ..., S_K`, the decoder adds one no-good cut per persistent set:
 
 `sum(x_e for e in S_k) <= |S_k| - 1`
 
@@ -321,17 +327,25 @@ For one graph:
 1. decode an adjacency matrix,
 2. attach the currently implied labels,
 3. materialize a `networkx.Graph`,
-4. call `feasibility_estimator.violating_edge_sets([graph])`,
-5. add all newly discovered cuts,
-6. re-run the structural solve.
+4. query the feasibility estimator for violating edge sets and, when supported,
+   violating node sets,
+5. forbid newly discovered label assignments and try a joint label repair step,
+6. add newly discovered persistent structural cuts,
+7. re-run the structural solve if needed.
 
 Important points:
 
+- oracle-guided decode is activated by estimator capability plus the
+  `feasibility_oracle_candidates_per_attempt` budget for the current retry
+  attempt,
 - `violating_edge_sets(...)` is optional,
-- if it is missing, NodeField silently falls back to the older one-shot decode
-  path,
+- if the required oracle hooks are missing, NodeField falls back to the older
+  one-shot decode path,
 - the loop is bounded by `max_oracle_iterations`,
-- labels are still reconstructed outside the MILP itself,
+- labels are still reconstructed outside the MILP itself, but may now be
+  repaired between structural solves,
+- structural cuts only encode violating edge motifs; node and edge-label
+  violations are handled through forbidden assignments and relabeling,
 - post-decode feasibility filtering may still reject the final graph.
 
 So the oracle improves structural decode, but it does not replace the rest of
@@ -396,6 +410,10 @@ They are reconstructed after structure by:
 - assigning a constant label from the supervision plan,
 - or leaving labels absent.
 
+In oracle-guided decode, node labels may also be revised between structural
+solves when node-label probabilities are available and the estimator reports
+violating node sets.
+
 ### Edge Labels
 
 Edge labels are also reconstructed after adjacency is fixed.
@@ -406,6 +424,8 @@ This means:
 - the edge-label decoder decides what labels to assign to those realized edges.
 
 So semantics are attached to a graph whose structure has already been chosen.
+In oracle-guided decode, edge labels may also be repaired between structural
+solves before deciding whether a structural re-solve is still needed.
 
 ## Feasibility Filtering After Decode
 

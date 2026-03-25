@@ -22,6 +22,7 @@ def test_show_molecules_uses_graphicalizer_drawer(monkeypatch):
     assert result is None
     assert calls["graphs"] == [graph]
     assert calls["kwargs"]["titles"] == ["ethanol"]
+    assert calls["kwargs"]["n_graphs_per_line"] == 7
 
 
 def test_show_molecules_can_return_figure_when_requested(monkeypatch):
