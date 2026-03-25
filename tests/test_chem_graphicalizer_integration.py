@@ -19,9 +19,22 @@ def test_show_molecules_uses_graphicalizer_drawer(monkeypatch):
 
     result = show_molecules([graph], legends=["ethanol"])
 
-    assert result == "figure"
+    assert result is None
     assert calls["graphs"] == [graph]
     assert calls["kwargs"]["titles"] == ["ethanol"]
+
+
+def test_show_molecules_can_return_figure_when_requested(monkeypatch):
+    graph = smiles_to_graph("CCO")
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.visualization.draw_molecules",
+        lambda *args, **kwargs: "figure",
+    )
+
+    result = show_molecules([graph], return_figure=True)
+
+    assert result == "figure"
 
 
 def test_normalize_graph_schema_upgrades_legacy_numeric_bond_labels():
