@@ -1697,6 +1697,9 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_oracle_candidates_per_attempt: int = _DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT,
             use_feasibility_filtering: bool = True,
             max_oracle_iterations: int = 8,
+            num_oracle_cycles: int = 3,
+            oracle_use_node_label_cuts: bool = False,
+            oracle_use_edge_label_cuts: bool = False,
             oracle_edge_memory_penalty: float = 0.5,
             oracle_edge_memory_update: float = 1.0,
             oracle_edge_memory_decay: float = 1.0,
@@ -1724,6 +1727,9 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_oracle_candidates_per_attempt (int): Optional input value.
             use_feasibility_filtering (bool): Optional input value.
             max_oracle_iterations (int): Optional input value.
+            num_oracle_cycles (int): Optional input value.
+            oracle_use_node_label_cuts (bool): Optional input value.
+            oracle_use_edge_label_cuts (bool): Optional input value.
             oracle_edge_memory_penalty (float): Optional input value.
             oracle_edge_memory_update (float): Optional input value.
             oracle_edge_memory_decay (float): Optional input value.
@@ -1755,6 +1761,9 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.feasibility_oracle_candidates_per_attempt = int(feasibility_oracle_candidates_per_attempt)
         self.use_feasibility_filtering = bool(use_feasibility_filtering)
         self.max_oracle_iterations = int(max_oracle_iterations)
+        self.num_oracle_cycles = int(num_oracle_cycles)
+        self.oracle_use_node_label_cuts = bool(oracle_use_node_label_cuts)
+        self.oracle_use_edge_label_cuts = bool(oracle_use_edge_label_cuts)
         self.oracle_edge_memory_penalty = float(oracle_edge_memory_penalty)
         self.oracle_edge_memory_update = float(oracle_edge_memory_update)
         self.oracle_edge_memory_decay = float(oracle_edge_memory_decay)
@@ -1781,6 +1790,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise ValueError("feasibility_oracle_candidates_per_attempt must be >= 0")
         if self.max_oracle_iterations < 1:
             raise ValueError("max_oracle_iterations must be >= 1")
+        if self.num_oracle_cycles < 1:
+            raise ValueError("num_oracle_cycles must be >= 1")
         if self.oracle_edge_memory_penalty < 0.0:
             raise ValueError("oracle_edge_memory_penalty must be >= 0")
         if self.oracle_edge_memory_update < 0.0:
@@ -2049,6 +2060,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         *,
         n_nodes: int,
     ) -> List[NodeSet]:
+        if not getattr(self, "oracle_use_node_label_cuts", True):
+            return []
         if self.feasibility_estimator is None or not hasattr(self.feasibility_estimator, "violating_node_labels_sets"):
             return []
         violating_sets_raw = self.feasibility_estimator.violating_node_labels_sets([graph])[0]
@@ -2404,6 +2417,28 @@ class ConditionalNodeFieldGraphGenerator(object):
         selected_indices = sorted(random.sample(range(len(accumulated_cuts)), keep_count))
         return [accumulated_cuts[idx] for idx in selected_indices]
 
+    def _oracle_phase_schedule(self) -> List[str]:
+        active_phases = ["structural"]
+        if self.oracle_use_node_label_cuts:
+            active_phases.append("node")
+        if self.oracle_use_edge_label_cuts:
+            active_phases.append("edge")
+
+        phase_slots = active_phases * max(1, int(self.num_oracle_cycles))
+        if not phase_slots:
+            return ["structural"] * int(self.max_oracle_iterations)
+
+        total_iterations = int(self.max_oracle_iterations)
+        base_iterations = total_iterations // len(phase_slots)
+        remainder = total_iterations % len(phase_slots)
+
+        schedule: List[str] = []
+        for slot_idx, phase_name in enumerate(phase_slots):
+            slot_iterations = base_iterations + (1 if slot_idx < remainder else 0)
+            if slot_iterations > 0:
+                schedule.extend([phase_name] * slot_iterations)
+        return schedule
+
     def _solve_oracle_relaxed_adjacency(
         self,
         *,
@@ -2567,7 +2602,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                     node_labels=np.asarray(current_node_labels, dtype=object),
                     existence_mask=existence_mask,
                 )
-            for _iteration_idx in range(self.max_oracle_iterations):
+            oracle_phase_schedule = self._oracle_phase_schedule()
+            for _iteration_idx, oracle_phase in enumerate(oracle_phase_schedule):
                 edge_labels = self.graph_decoder.decode_edge_labels(
                     single_generated_nodes,
                     [single_adj_mtx],
@@ -2586,8 +2622,19 @@ class ConditionalNodeFieldGraphGenerator(object):
                     np.asarray(edge_labels, dtype=object),
                     np.asarray(single_adj_mtx, dtype=float),
                 )
-                current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
-                current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                node_phase_active = oracle_phase == "node"
+                edge_label_phase_active = oracle_phase == "edge"
+                structural_phase_active = oracle_phase == "structural"
+                current_node_violation_sets = (
+                    self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                    if node_phase_active
+                    else []
+                )
+                current_edge_violation_sets = (
+                    self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                    if structural_phase_active or edge_label_phase_active
+                    else []
+                )
 
                 new_node_forbidden = [] if node_label_probabilities is None else [
                     assignment
@@ -2597,6 +2644,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                     )
                     if assignment not in accumulated_node_label_forbidden
                 ]
+                if not self.oracle_use_node_label_cuts or not node_phase_active:
+                    new_node_forbidden = []
                 new_edge_label_forbidden = [] if edge_label_probabilities is None else [
                     assignment
                     for assignment in self._forbidden_edge_label_assignment_from_sets(
@@ -2605,15 +2654,27 @@ class ConditionalNodeFieldGraphGenerator(object):
                     )
                     if assignment not in accumulated_edge_label_forbidden
                 ]
+                if not self.oracle_use_edge_label_cuts or not edge_label_phase_active:
+                    new_edge_label_forbidden = []
                 if new_node_forbidden:
                     accumulated_node_label_forbidden.extend(new_node_forbidden)
                 if new_edge_label_forbidden:
                     accumulated_edge_label_forbidden.extend(new_edge_label_forbidden)
+                active_node_forbidden = (
+                    list(accumulated_node_label_forbidden)
+                    if self.oracle_use_node_label_cuts and node_phase_active
+                    else []
+                )
+                active_edge_label_forbidden = (
+                    list(accumulated_edge_label_forbidden)
+                    if self.oracle_use_edge_label_cuts and edge_label_phase_active
+                    else []
+                )
 
-                joint_label_detail = "no new label cuts"
+                joint_label_detail = f"phase={oracle_phase}"
                 repaired_node_labels = np.asarray(current_node_labels, dtype=object)
                 repaired_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object)
-                if new_node_forbidden or new_edge_label_forbidden:
+                if active_node_forbidden or active_edge_label_forbidden:
                     repaired_node_labels, repaired_edge_label_matrix = self._repair_labels_with_oracle(
                         existence_mask=existence_mask,
                         adj_mtx=single_adj_mtx,
@@ -2627,20 +2688,22 @@ class ConditionalNodeFieldGraphGenerator(object):
                             edge_label_probabilities[graph_idx],
                             dtype=float,
                         ),
-                        forbidden_node_assignments=accumulated_node_label_forbidden,
-                        forbidden_edge_assignments=accumulated_edge_label_forbidden,
+                        forbidden_node_assignments=active_node_forbidden,
+                        forbidden_edge_assignments=active_edge_label_forbidden,
                     )
                     if (
                         not np.array_equal(repaired_node_labels, current_node_labels)
                         or not np.array_equal(repaired_edge_label_matrix, current_edge_label_matrix)
                     ):
-                        joint_label_detail = "labels changed"
+                        joint_label_detail = f"phase={oracle_phase}; labels changed"
                         current_node_labels = repaired_node_labels
                         current_edge_label_matrix = repaired_edge_label_matrix
                     else:
-                        joint_label_detail = "relabel attempted but unchanged"
+                        joint_label_detail = f"phase={oracle_phase}; relabel attempted but unchanged"
+                elif structural_phase_active:
+                    joint_label_detail = "phase=structural; label repair disabled"
                 elif node_label_probabilities is None and edge_label_probabilities is None:
-                    joint_label_detail = "label probabilities unavailable"
+                    joint_label_detail = f"phase={oracle_phase}; label probabilities unavailable"
                 elif (
                     node_label_probabilities is not None
                     and (self._get_node_label_names() is None or getattr(self, "node_label_to_index_", None) is None)
@@ -2648,7 +2711,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     edge_label_probabilities is not None
                     and (self._get_edge_label_names() is None or getattr(self, "edge_label_to_index_", None) is None)
                 ):
-                    joint_label_detail = "legacy model missing label vocabulary"
+                    joint_label_detail = f"phase={oracle_phase}; legacy model missing label vocabulary"
 
                 graph = _assemble_graph_job(
                     existence_mask,
@@ -2656,8 +2719,10 @@ class ConditionalNodeFieldGraphGenerator(object):
                     np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
                     np.asarray(single_adj_mtx, dtype=float),
                 )
-                if joint_label_detail == "labels changed":
+                if "labels changed" in joint_label_detail and node_phase_active:
                     current_node_violation_sets = self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                if "labels changed" in joint_label_detail and edge_label_phase_active:
+                    current_edge_violation_sets = self._get_oracle_edge_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
 
                 score, edge_score, node_score, edge_label_score = self._oracle_candidate_score_components(
                     existence_mask=existence_mask,
@@ -2684,7 +2749,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                 current_node_log_score = float(node_score)
                 current_edge_label_log_score = float(edge_label_score)
                 plot_oracle_phase(
-                    "Joint-Label Phase",
+                    {
+                        "structural": "Structural Edge-Set Phase",
+                        "node": "Node-Label Phase",
+                        "edge": "Edge-Label Phase",
+                    }.get(oracle_phase, "Oracle Phase"),
                     adj_mtx=single_adj_mtx,
                     decoded_graph=graph,
                     node_violation_sets=current_node_violation_sets,
@@ -2700,14 +2769,31 @@ class ConditionalNodeFieldGraphGenerator(object):
                     best_score = score
                     best_graph = graph
 
-                is_feasible = not current_node_violation_sets and not current_edge_violation_sets
-                if is_feasible and score > best_feasible_score:
-                    best_feasible_score = score
-                    best_feasible_graph = graph
+                cycle_boundary = (
+                    (_iteration_idx + 1) >= len(oracle_phase_schedule)
+                    or oracle_phase_schedule[_iteration_idx + 1] == "structural"
+                )
+                is_feasible = False
+                if cycle_boundary:
+                    final_node_violation_sets = (
+                        self._get_oracle_node_violation_sets(graph, n_nodes=single_adj_mtx.shape[0])
+                        if self.oracle_use_node_label_cuts
+                        else []
+                    )
+                    final_edge_violation_sets = self._get_oracle_edge_violation_sets(
+                        graph,
+                        n_nodes=single_adj_mtx.shape[0],
+                    )
+                    is_feasible = not final_node_violation_sets and not final_edge_violation_sets
+                    if is_feasible and score > best_feasible_score:
+                        best_feasible_score = score
+                        best_feasible_graph = graph
 
-                persistent_structural_cuts = [
-                    edge_set for edge_set in current_edge_violation_sets if edge_set not in accumulated_structural_cuts
-                ]
+                persistent_structural_cuts = []
+                if structural_phase_active:
+                    persistent_structural_cuts = [
+                        edge_set for edge_set in current_edge_violation_sets if edge_set not in accumulated_structural_cuts
+                    ]
                 if is_feasible:
                     plot_oracle_phase(
                         "Feasibility Check",
@@ -2715,19 +2801,33 @@ class ConditionalNodeFieldGraphGenerator(object):
                         decoded_graph=graph,
                         node_violation_sets=current_node_violation_sets,
                         edge_violation_sets=current_edge_violation_sets,
-                        joint_label_changed=(joint_label_detail == "labels changed"),
+                        joint_label_changed=("labels changed" in joint_label_detail),
                     )
                     break
-                if not new_node_forbidden and not new_edge_label_forbidden and not persistent_structural_cuts:
+                if (
+                    not structural_phase_active
+                    and not node_phase_active
+                    and not edge_label_phase_active
+                ):
+                    continue
+                if (
+                    structural_phase_active
+                    and not persistent_structural_cuts
+                    and _iteration_idx + 1 >= len(oracle_phase_schedule)
+                ):
                     plot_oracle_phase(
                         "Feasibility Check",
                         adj_mtx=single_adj_mtx,
                         decoded_graph=graph,
                         node_violation_sets=current_node_violation_sets,
                         edge_violation_sets=current_edge_violation_sets,
-                        joint_label_changed=(joint_label_detail == "labels changed"),
+                        joint_label_changed=("labels changed" in joint_label_detail),
                     )
                     break
+                if structural_phase_active and not persistent_structural_cuts:
+                    continue
+                if not structural_phase_active:
+                    continue
                 local_edge_violation_prior = _update_oracle_edge_memory(
                     local_edge_violation_prior,
                     current_edge_violation_sets,
@@ -2736,7 +2836,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     clip_value=self.oracle_edge_memory_clip,
                 )
                 accumulated_structural_cuts.extend(persistent_structural_cuts)
-                if _iteration_idx + 1 >= self.max_oracle_iterations:
+                if _iteration_idx + 1 >= len(oracle_phase_schedule):
                     plot_oracle_phase(
                         "Structural Edge-Set Phase",
                         adj_mtx=single_adj_mtx,
@@ -2754,28 +2854,9 @@ class ConditionalNodeFieldGraphGenerator(object):
                     start_iteration_idx=_iteration_idx + 1,
                     edge_violation_prior=local_edge_violation_prior,
                 )
-                pre_structural_node_labels = np.asarray(current_node_labels, dtype=object).copy()
-                pre_structural_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object).copy()
-                relabeled_node_labels, relabeled_edge_label_matrix = self._repair_labels_with_oracle(
-                    existence_mask=existence_mask,
-                    adj_mtx=single_adj_mtx,
-                    current_node_labels=current_node_labels,
-                    current_edge_label_matrix=current_edge_label_matrix,
-                    node_label_probabilities=None if node_label_probabilities is None else np.asarray(
-                        node_label_probabilities[graph_idx],
-                        dtype=float,
-                    ),
-                    edge_label_probabilities=None if edge_label_probabilities is None else np.asarray(
-                        edge_label_probabilities[graph_idx],
-                        dtype=float,
-                    ),
-                    forbidden_node_assignments=accumulated_node_label_forbidden,
-                    forbidden_edge_assignments=accumulated_edge_label_forbidden,
-                )
-                current_node_labels = relabeled_node_labels
                 current_edge_label_matrix = self._fill_unlabeled_active_edges(
                     adj_mtx=single_adj_mtx,
-                    edge_label_matrix=relabeled_edge_label_matrix,
+                    edge_label_matrix=current_edge_label_matrix,
                     edge_label_probabilities=None if edge_label_probabilities is None else np.asarray(
                         edge_label_probabilities[graph_idx],
                         dtype=float,
@@ -2801,11 +2882,9 @@ class ConditionalNodeFieldGraphGenerator(object):
                     decoded_graph=structural_graph,
                     node_violation_sets=structural_node_violation_sets,
                     edge_violation_sets=structural_edge_violation_sets,
-                    joint_label_changed=(
-                        not np.array_equal(pre_structural_node_labels, relabeled_node_labels)
-                        or not np.array_equal(pre_structural_edge_label_matrix, relabeled_edge_label_matrix)
-                    ),
+                    joint_label_changed=False,
                     new_structural_cut_count=len(persistent_structural_cuts),
+                    detail=f"phase=structural; next={oracle_phase_schedule[_iteration_idx + 1] if _iteration_idx + 1 < len(oracle_phase_schedule) else 'end'}",
                 )
             final_graph = best_feasible_graph if best_feasible_graph is not None else best_graph
             if final_graph is None:

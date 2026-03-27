@@ -331,11 +331,19 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
     overridden_generator = build_graph_generator(
         feasibility_oracle_candidates_per_attempt=0,
         max_oracle_iterations=3,
+        num_oracle_cycles=2,
+        oracle_use_node_label_cuts=True,
+        oracle_use_edge_label_cuts=True,
     )
 
     assert default_generator.feasibility_oracle_candidates_per_attempt == 2
+    assert default_generator.oracle_use_node_label_cuts is False
+    assert default_generator.oracle_use_edge_label_cuts is False
     assert overridden_generator.feasibility_oracle_candidates_per_attempt == 0
     assert overridden_generator.max_oracle_iterations == 3
+    assert overridden_generator.num_oracle_cycles == 2
+    assert overridden_generator.oracle_use_node_label_cuts is True
+    assert overridden_generator.oracle_use_edge_label_cuts is True
 
 
 def test_build_graph_generator_disables_feasibility_when_optional_dependencies_are_missing(monkeypatch):

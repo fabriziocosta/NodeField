@@ -231,6 +231,34 @@ def test_load_graph_generator_rejects_incompatible_schema_version(tmp_path):
         load_graph_generator(filename, model_dir=tmp_path)
 
 
+def test_load_graph_generator_repairs_legacy_nsppk_fit_flags(tmp_path):
+    class _BaseNSPPK:
+        pass
+
+    class _NSPPKWrapper:
+        def __init__(self):
+            self.base_nsppk = _BaseNSPPK()
+
+    class _NodeNSPPKWrapper:
+        def __init__(self):
+            self.nsppk = _NSPPKWrapper()
+
+    class _Generator(_SaveableGenerator):
+        def __init__(self, model_name=None, model_dir=None):
+            super().__init__(model_name=model_name, model_dir=model_dir)
+            self.is_fitted_ = True
+            self.graph_vectorizer = _NSPPKWrapper()
+            self.node_graph_vectorizer = _NodeNSPPKWrapper()
+
+    generator = _Generator(model_name="demo-chem", model_dir=tmp_path)
+    filename = save_graph_generator(generator)
+
+    restored = load_graph_generator(filename, model_dir=tmp_path)
+
+    assert restored.graph_vectorizer.base_nsppk.is_fitted_ is True
+    assert restored.node_graph_vectorizer.nsppk.base_nsppk.is_fitted_ is True
+
+
 def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
     calls = []
 

@@ -30,6 +30,25 @@ def _sanitize_model_token(value: str) -> str:
     return token or "gg"
 
 
+def _restore_loaded_vectorizer_fit_state(graph_generator) -> None:
+    """Repair legacy NSPPK-style fitted flags on trusted loaded generators."""
+    if not bool(getattr(graph_generator, "is_fitted_", False)):
+        return
+    for attr_name in ("graph_vectorizer", "node_graph_vectorizer"):
+        vectorizer = getattr(graph_generator, attr_name, None)
+        if vectorizer is None:
+            continue
+        if hasattr(vectorizer, "base_nsppk"):
+            base_nsppk = getattr(vectorizer, "base_nsppk", None)
+            if base_nsppk is not None and not bool(getattr(base_nsppk, "is_fitted_", False)):
+                base_nsppk.is_fitted_ = True
+        nsppk = getattr(vectorizer, "nsppk", None)
+        if nsppk is not None and hasattr(nsppk, "base_nsppk"):
+            base_nsppk = getattr(nsppk, "base_nsppk", None)
+            if base_nsppk is not None and not bool(getattr(base_nsppk, "is_fitted_", False)):
+                base_nsppk.is_fitted_ = True
+
+
 def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
     resolved_model_name = model_name if model_name is not None else getattr(graph_generator, "model_name", None)
     if resolved_model_name is None:
@@ -105,6 +124,7 @@ def load_graph_generator(model_name, model_dir=None):
         )
     print(f"Loaded graph generator: {path.name}")
     print(path)
+    _restore_loaded_vectorizer_fit_state(graph_generator)
     try:
         from .extensions.demo.pipeline import ensure_demo_feasibility_estimator
     except Exception:

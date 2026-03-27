@@ -248,6 +248,8 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_candidates_per_attempt=0)
     with pytest.raises(ValueError, match="max_oracle_iterations"):
         ConditionalNodeFieldGraphGenerator(max_oracle_iterations=0)
+    with pytest.raises(ValueError, match="num_oracle_cycles"):
+        ConditionalNodeFieldGraphGenerator(num_oracle_cycles=0)
     with pytest.raises(ValueError, match="oracle_edge_memory_penalty"):
         ConditionalNodeFieldGraphGenerator(oracle_edge_memory_penalty=-0.1)
     with pytest.raises(ValueError, match="oracle_edge_memory_update"):
@@ -1393,6 +1395,7 @@ def test_decode_generated_nodes_uses_oracle_cuts_when_available():
     generator = ConditionalNodeFieldGraphGenerator(
         graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True),
         feasibility_estimator=estimator,
+        oracle_use_edge_label_cuts=True,
         verbose=False,
     )
 
@@ -1482,7 +1485,7 @@ def test_decode_generated_nodes_repairs_node_labels_before_structural_cuts():
         edge_sets_per_call=[[], []],
         node_sets_per_call=[[[0]], []],
     )
-    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False, oracle_use_node_label_cuts=True)
     generator.feasibility_estimator = estimator
     generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
     generator.node_label_to_index_ = {"C": 0, "O": 1}
@@ -1515,7 +1518,7 @@ def test_decode_generated_nodes_repairs_edge_labels_before_structural_cuts():
         edge_sets_per_call=[[[(0, 1)]], []],
         node_sets_per_call=[[], []],
     )
-    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False, oracle_use_edge_label_cuts=True)
     generator.feasibility_estimator = estimator
     generator.node_label_classes_ = np.asarray(["C"], dtype=object)
     generator.node_label_to_index_ = {"C": 0}
@@ -1548,7 +1551,11 @@ def test_decode_generated_nodes_jointly_repairs_node_and_edge_labels():
         edge_sets_per_call=[[[(0, 1)]], []],
         node_sets_per_call=[[[0]], []],
     )
-    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        oracle_use_node_label_cuts=True,
+        oracle_use_edge_label_cuts=True,
+    )
     generator.feasibility_estimator = estimator
     generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
     generator.node_label_to_index_ = {"C": 0, "O": 1}
@@ -1582,7 +1589,11 @@ def test_decode_generated_nodes_skips_node_label_repair_without_probabilities():
         edge_sets_per_call=[[], []],
         node_sets_per_call=[[[0]], [[0]]],
     )
-    generator = ConditionalNodeFieldGraphGenerator(verbose=False, max_oracle_iterations=2)
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        max_oracle_iterations=2,
+        oracle_use_node_label_cuts=True,
+    )
     generator.feasibility_estimator = estimator
     generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
     generator.node_label_to_index_ = {"C": 0, "O": 1}
@@ -1598,6 +1609,40 @@ def test_decode_generated_nodes_skips_node_label_repair_without_probabilities():
 
     assert len(decoded) == 1
     assert decoded[0].nodes[0]["label"] == "C"
+
+
+def test_decode_generated_nodes_ignores_label_cuts_by_default_but_keeps_structural_cuts():
+    estimator = _LabelAwareOracleEstimator(
+        edge_sets_per_call=[[[(0, 1)]], []],
+        node_sets_per_call=[[[0]], [[0]]],
+    )
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.feasibility_estimator = estimator
+    generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
+    generator.node_label_to_index_ = {"C": 0, "O": 1}
+    generator.edge_label_classes_ = np.asarray(["-", "="], dtype=object)
+    generator.edge_label_to_index_ = {"-": 0, "=": 1}
+
+    decoded = generator._decode_generated_nodes(
+        _oracle_label_generated_batch(
+            node_labels=["C", "C"],
+            edge_label_matrix=[[None, "-"], ["-", None]],
+            node_label_probabilities=[
+                [0.05, 0.95],
+                [0.95, 0.05],
+            ],
+            edge_label_probabilities=[
+                [[1.0, 0.0], [0.05, 0.95]],
+                [[0.05, 0.95], [1.0, 0.0]],
+            ],
+        )
+    )
+
+    assert len(decoded) == 1
+    assert decoded[0].nodes[0]["label"] == "C"
+    assert decoded[0].edges[(0, 1)]["label"] == "-"
+    assert estimator.node_calls == 0
+    assert estimator.edge_calls >= 2
 
 
 def test_oracle_candidate_score_prefers_higher_probability_feasible_labels():
@@ -1639,6 +1684,31 @@ def test_oracle_candidate_score_prefers_higher_probability_feasible_labels():
     assert score_high > score_low
 
 
+def test_oracle_phase_schedule_splits_budget_across_cycles_and_active_cut_types():
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        max_oracle_iterations=12,
+        num_oracle_cycles=2,
+        oracle_use_node_label_cuts=True,
+        oracle_use_edge_label_cuts=True,
+    )
+
+    assert generator._oracle_phase_schedule() == [
+        "structural",
+        "structural",
+        "node",
+        "node",
+        "edge",
+        "edge",
+        "structural",
+        "structural",
+        "node",
+        "node",
+        "edge",
+        "edge",
+    ]
+
+
 def test_decode_generated_nodes_reruns_joint_label_repair_after_structural_change(monkeypatch):
     estimator = _OracleOnceEstimator([
         [[(1, 0), (2, 1), (3, 2), (3, 0)]],
@@ -1647,6 +1717,7 @@ def test_decode_generated_nodes_reruns_joint_label_repair_after_structural_chang
     generator = ConditionalNodeFieldGraphGenerator(
         graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True),
         feasibility_estimator=estimator,
+        oracle_use_edge_label_cuts=True,
         verbose=False,
     )
     generator.node_label_classes_ = np.asarray(["C"], dtype=object)
