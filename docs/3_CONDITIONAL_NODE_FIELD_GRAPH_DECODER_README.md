@@ -137,8 +137,12 @@ bounded oracle-guided loop:
 - solve the current adjacency MILP,
 - materialize the candidate graph,
 - ask the feasibility estimator for violating edge or node sets,
-- optionally forbid the currently offending node-label or edge-label
-  assignments and repair labels using label probabilities,
+- optionally accumulate the currently offending node-label or edge-label
+  assignments as relabeling constraints,
+- propose a node-label repair andor edge-label repair using the predicted label
+  probabilities,
+- accept a relabeling proposal only if it improves the full oracle state rather
+  than treating label repair as an independent stage,
 - allocate a per-estimator structural-cut budget,
 - add one no-good cut per selected persistent violating edge set,
 - re-solve until no new violations remain or the iteration budget is exhausted.
@@ -346,9 +350,12 @@ For one graph:
 3. materialize a `networkx.Graph`,
 4. query the feasibility estimator for violating edge sets and, when supported,
    violating node sets,
-5. forbid newly discovered label assignments and try a joint label repair step,
-6. add newly discovered persistent structural cuts,
-7. re-run the structural solve if needed.
+5. record newly discovered forbidden node-label or edge-label assignments,
+6. try soft node-label and edge-label repair proposals against the current
+   structure,
+7. keep a proposal only if it improves the full oracle state,
+8. add newly discovered persistent structural cuts,
+9. re-run the structural solve if needed.
 
 Important points:
 
@@ -360,9 +367,10 @@ Important points:
   one-shot decode path,
 - the loop is bounded by `max_oracle_iterations`,
 - labels are still reconstructed outside the MILP itself, but may now be
-  repaired between structural solves,
+  repaired between structural solves as soft follow-up moves,
 - structural cuts only encode violating edge motifs; node and edge-label
-  violations are handled through forbidden assignments and relabeling,
+  violations are handled through forbidden assignments plus accepted relabeling
+  proposals,
 - post-decode feasibility filtering may still reject the final graph.
 
 So the oracle improves structural decode, but it does not replace the rest of

@@ -412,6 +412,11 @@ There is now a second integration path as well:
 - the generator uses the estimator during structural decode itself,
 - returned violating edge sets are converted into no-good cuts and the adjacency
   ILP is re-solved for a bounded number of rounds,
+- optional node-label and edge-label repairs are treated as soft follow-up
+  proposals after each structural candidate rather than as independent decode
+  stages,
+- those relabeling proposals are accepted only when the full oracle state
+  improves,
 - within one graph's oracle trace, edges that repeatedly appear inside violating
   sets also accumulate a temporary soft penalty before the next ILP solve.
 

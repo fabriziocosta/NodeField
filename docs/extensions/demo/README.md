@@ -38,4 +38,6 @@ Demo feasibility estimator notes:
 - the maintained demo pipeline builds the feasibility estimator as an ordered stack of internal motif checks
 - the wrapper accepts boolean masks to activate one-hot, cumulative, or full-stack subsets of those internal checks
 - oracle-guided decode uses per-level structural-cut budgets
+- oracle-guided decode keeps structural edge-set cuts as the hard refinement mechanism
+- optional node-label and edge-label repairs are soft follow-up proposals evaluated against the full oracle state after each structural candidate, rather than isolated decode stages
 - the default budget policy is adaptive: it starts from a decreasing prior and redistributes unused budget toward estimator levels that still expose violations on the current graph

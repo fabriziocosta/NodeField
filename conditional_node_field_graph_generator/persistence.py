@@ -44,9 +44,17 @@ def _restore_loaded_vectorizer_fit_state(graph_generator) -> None:
                 base_nsppk.is_fitted_ = True
         nsppk = getattr(vectorizer, "nsppk", None)
         if nsppk is not None and hasattr(nsppk, "base_nsppk"):
-            base_nsppk = getattr(nsppk, "base_nsppk", None)
-            if base_nsppk is not None and not bool(getattr(base_nsppk, "is_fitted_", False)):
-                base_nsppk.is_fitted_ = True
+                base_nsppk = getattr(nsppk, "base_nsppk", None)
+                if base_nsppk is not None and not bool(getattr(base_nsppk, "is_fitted_", False)):
+                    base_nsppk.is_fitted_ = True
+
+
+def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
+    """Backfill runtime attrs added after older persisted generators were saved."""
+    if not hasattr(graph_generator, "oracle_use_node_label_cuts"):
+        graph_generator.oracle_use_node_label_cuts = False
+    if not hasattr(graph_generator, "oracle_use_edge_label_cuts"):
+        graph_generator.oracle_use_edge_label_cuts = False
 
 
 def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
@@ -125,6 +133,7 @@ def load_graph_generator(model_name, model_dir=None):
     print(f"Loaded graph generator: {path.name}")
     print(path)
     _restore_loaded_vectorizer_fit_state(graph_generator)
+    _restore_loaded_generator_runtime_defaults(graph_generator)
     try:
         from .extensions.demo.pipeline import ensure_demo_feasibility_estimator
     except Exception:

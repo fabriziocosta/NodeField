@@ -248,8 +248,6 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_candidates_per_attempt=0)
     with pytest.raises(ValueError, match="max_oracle_iterations"):
         ConditionalNodeFieldGraphGenerator(max_oracle_iterations=0)
-    with pytest.raises(ValueError, match="num_oracle_cycles"):
-        ConditionalNodeFieldGraphGenerator(num_oracle_cycles=0)
     with pytest.raises(ValueError, match="oracle_edge_memory_penalty"):
         ConditionalNodeFieldGraphGenerator(oracle_edge_memory_penalty=-0.1)
     with pytest.raises(ValueError, match="oracle_edge_memory_update"):
@@ -1485,7 +1483,10 @@ def test_decode_generated_nodes_repairs_node_labels_before_structural_cuts():
         edge_sets_per_call=[[], []],
         node_sets_per_call=[[[0]], []],
     )
-    generator = ConditionalNodeFieldGraphGenerator(verbose=False, oracle_use_node_label_cuts=True)
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        oracle_use_node_label_cuts=True,
+    )
     generator.feasibility_estimator = estimator
     generator.node_label_classes_ = np.asarray(["C", "O"], dtype=object)
     generator.node_label_to_index_ = {"C": 0, "O": 1}
@@ -1518,7 +1519,10 @@ def test_decode_generated_nodes_repairs_edge_labels_before_structural_cuts():
         edge_sets_per_call=[[[(0, 1)]], []],
         node_sets_per_call=[[], []],
     )
-    generator = ConditionalNodeFieldGraphGenerator(verbose=False, oracle_use_edge_label_cuts=True)
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        oracle_use_edge_label_cuts=True,
+    )
     generator.feasibility_estimator = estimator
     generator.node_label_classes_ = np.asarray(["C"], dtype=object)
     generator.node_label_to_index_ = {"C": 0}
@@ -1682,31 +1686,6 @@ def test_oracle_candidate_score_prefers_higher_probability_feasible_labels():
     )
 
     assert score_high > score_low
-
-
-def test_oracle_phase_schedule_splits_budget_across_cycles_and_active_cut_types():
-    generator = ConditionalNodeFieldGraphGenerator(
-        verbose=False,
-        max_oracle_iterations=12,
-        num_oracle_cycles=2,
-        oracle_use_node_label_cuts=True,
-        oracle_use_edge_label_cuts=True,
-    )
-
-    assert generator._oracle_phase_schedule() == [
-        "structural",
-        "structural",
-        "node",
-        "node",
-        "edge",
-        "edge",
-        "structural",
-        "structural",
-        "node",
-        "node",
-        "edge",
-        "edge",
-    ]
 
 
 def test_decode_generated_nodes_reruns_joint_label_repair_after_structural_change(monkeypatch):

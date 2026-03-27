@@ -833,6 +833,8 @@ ConditionalNodeFieldGraphGenerator(
     feasibility_oracle_candidates_per_attempt: int = 2,
     use_feasibility_filtering: bool = True,
     max_oracle_iterations: int = 8,
+    oracle_use_node_label_cuts: bool = False,
+    oracle_use_edge_label_cuts: bool = False,
     oracle_edge_memory_penalty: float = 0.5,
     oracle_edge_memory_update: float = 1.0,
     oracle_edge_memory_decay: float = 1.0,
@@ -914,6 +916,22 @@ ConditionalNodeFieldGraphGenerator(
   Increase: more chances to remove violating motifs, but slower decode.
   Decrease: faster decode, but more residual violations may reach filtering.
 
+- `oracle_use_node_label_cuts`
+  Whether oracle-guided decode may accumulate forbidden node-label assignments
+  and propose node relabeling follow-up moves.
+  Enable: the oracle can revise node labels when that improves the joint
+  structural-plus-semantic state.
+  Disable: keep the node-field model's node labels fixed during oracle-guided
+  decode.
+
+- `oracle_use_edge_label_cuts`
+  Whether oracle-guided decode may accumulate forbidden edge-label assignments
+  and propose edge relabeling follow-up moves.
+  Enable: the oracle can revise edge labels when that improves the joint oracle
+  state.
+  Disable: keep the edge-label assignments implied by the model and current
+  structure.
+
 - `oracle_edge_memory_penalty`
   Weight of the temporary per-graph penalty applied in logit space to edges
   that repeatedly appear in violating edge sets during one oracle trace.
@@ -925,6 +943,14 @@ ConditionalNodeFieldGraphGenerator(
   Additive increment applied to each edge that appears in a violating edge set.
   Increase: one violation has more effect on later oracle iterations.
   Decrease toward `0`: the local memory matters less.
+
+Oracle semantics:
+- structural edge-set cuts remain the hard mechanism inside the adjacency MILP
+- node-label and edge-label repairs remain outside the MILP
+- when enabled, label repairs are soft follow-up proposals evaluated against
+  the full oracle state after each structural candidate
+- a relabeling proposal is accepted only if it improves the combined violation
+  pattern and oracle score
 
 - `oracle_edge_memory_decay`
   Multiplicative decay applied to the temporary per-graph edge-memory matrix

@@ -259,6 +259,21 @@ def test_load_graph_generator_repairs_legacy_nsppk_fit_flags(tmp_path):
     assert restored.node_graph_vectorizer.nsppk.base_nsppk.is_fitted_ is True
 
 
+def test_load_graph_generator_restores_legacy_oracle_runtime_defaults(tmp_path):
+    class _Generator(_SaveableGenerator):
+        def __init__(self, model_name=None, model_dir=None):
+            super().__init__(model_name=model_name, model_dir=model_dir)
+            self.is_fitted_ = True
+
+    generator = _Generator(model_name="demo-chem", model_dir=tmp_path)
+    filename = save_graph_generator(generator)
+
+    restored = load_graph_generator(filename, model_dir=tmp_path)
+
+    assert restored.oracle_use_node_label_cuts is False
+    assert restored.oracle_use_edge_label_cuts is False
+
+
 def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
     calls = []
 
