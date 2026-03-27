@@ -210,7 +210,7 @@ def _plot_decoder_diagnostics(
         n_nodes=adj_mtx.shape[0],
     )
 
-    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 4.8))
 
     im0 = axes[0].imshow(
         prob_matrix,

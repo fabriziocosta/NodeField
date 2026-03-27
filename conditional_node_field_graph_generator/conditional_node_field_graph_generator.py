@@ -420,7 +420,7 @@ def _plot_decoder_diagnostics(
 
     has_node_label_panel = node_label_probabilities is not None
     n_panels = 5 if has_node_label_panel else 4
-    fig, axes = plt.subplots(1, n_panels, figsize=(22 if has_node_label_panel else 18, 4))
+    fig, axes = plt.subplots(1, n_panels, figsize=(24 if has_node_label_panel else 20, 4.8))
 
     im0 = axes[0].imshow(
         prob_display,
@@ -536,12 +536,12 @@ def _plot_decoder_diagnostics(
             label_names = [str(label) for label in node_label_names]
             if len(label_names) == label_probs.shape[1]:
                 heatmap_axis.set_xticks(np.arange(len(label_names)))
-                heatmap_axis.set_xticklabels(label_names, rotation=45, ha="right")
+                heatmap_axis.set_xticklabels(label_names, rotation=0, ha="center")
             else:
                 label_names = None
         if label_names is None:
             heatmap_axis.set_xticks(np.arange(label_probs.shape[1]))
-            heatmap_axis.set_xticklabels([str(idx) for idx in range(label_probs.shape[1])], rotation=45, ha="right")
+            heatmap_axis.set_xticklabels([str(idx) for idx in range(label_probs.shape[1])], rotation=0, ha="center")
         node_ids = np.arange(label_probs.shape[0])
         heatmap_axis.set_yticks(node_ids)
         heatmap_axis.set_yticklabels([str(idx) for idx in node_ids])
