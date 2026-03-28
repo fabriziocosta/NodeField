@@ -14,7 +14,7 @@ The suite is intentionally biased toward fast, deterministic checks rather than 
 
 ## Files
 
-[`tests/test_graph_generator.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_graph_generator.py)
+[`tests/test_graph_generator.py`](/Users/fabriziocosta/Resilio Sync/Sync/Projects/NodeField/tests/test_graph_generator.py)
 
 This is the largest test module. It covers the graph-level orchestration layer, including:
 - constructor validation
@@ -26,7 +26,7 @@ This is the largest test module. It covers the graph-level orchestration layer, 
 - adjacency optimization failure handling
 - serial vs parallel decode consistency
 
-[`tests/test_cfg_guidance.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_cfg_guidance.py)
+[`tests/test_cfg_guidance.py`](/Users/fabriziocosta/Resilio Sync/Sync/Projects/NodeField/tests/test_cfg_guidance.py)
 
 This module covers the distinction between classifier-free guidance and the separate post-hoc guidance predictor path. It checks:
 - explicit CFG target-mode behavior
@@ -36,7 +36,7 @@ This module covers the distinction between classifier-free guidance and the sepa
 - invalid negative guidance scales
 - predictor mode inference for the separate guidance path
 
-[`tests/test_batches_and_lightning_utils.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_batches_and_lightning_utils.py)
+[`tests/test_batches_and_lightning_utils.py`](/Users/fabriziocosta/Resilio Sync/Sync/Projects/NodeField/tests/test_batches_and_lightning_utils.py)
 
 This module focuses on lower-level contracts and utilities:
 - batch dataclass length behavior
@@ -48,20 +48,20 @@ This module focuses on lower-level contracts and utilities:
 - plotting-key compatibility
 - package export expectations for the main public classes
 
-[`tests/test_timeit.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_timeit.py)
+[`tests/test_timeit.py`](/Users/fabriziocosta/Resilio Sync/Sync/Projects/NodeField/tests/test_timeit.py)
 
 This module checks the verbose timing helpers:
 - verbosity-level normalization
 - conditional printing behavior for the timing decorator
 
-[`tests/test_interpolate.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_interpolate.py)
+[`tests/test_interpolate.py`](/Users/fabriziocosta/Resilio Sync/Sync/Projects/NodeField/tests/test_interpolate.py)
 
 This module covers lightweight interpolation and demo-extension behavior:
 - integer interpolation utilities
 - positive-endpoint sampling for interpolation demos
 - summary object structure for interpolation results
 
-[`tests/test_demo_extension.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_demo_extension.py)
+[`tests/test_demo_extension.py`](/Users/fabriziocosta/Resilio Sync/Sync/Projects/NodeField/tests/test_demo_extension.py)
 
 This module covers the demo extension directly:
 - dataset split orchestration
@@ -71,7 +71,7 @@ This module covers the demo extension directly:
 - temporary decoder parallelism overrides
 - comparison-summary generation for real vs generated graphs
 
-[`tests/test_molecular_graph_utils.py`](/Users/fabriziocosta/Resilio%20Sync/Sync/Projects/GraphGen/tests/test_molecular_graph_utils.py)
+[`tests/test_molecular_graph_utils.py`](/Users/fabriziocosta/Resilio Sync/Sync/Projects/NodeField/tests/test_molecular_graph_utils.py)
 
 This module covers the local chemistry helper layer:
 - SMILES to graph conversion
