@@ -1427,6 +1427,30 @@ def test_decoder_decode_node_labels_requires_explicit_labels():
         )
 
 
+def test_decoder_decode_node_labels_validates_batch_alignment():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+
+    with pytest.raises(ValueError, match="predicted_node_labels_list must align with generated_nodes"):
+        decoder.decode_node_labels(
+            GeneratedNodeBatch(
+                node_presence_mask=np.asarray([[True, True], [True, False]], dtype=bool),
+            ),
+            predicted_node_labels_list=[np.asarray(["C", "O"], dtype=object)],
+        )
+
+
+def test_decoder_decode_node_labels_validates_slot_count():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+
+    with pytest.raises(ValueError, match="received 1 labels for 2 slots"):
+        decoder.decode_node_labels(
+            GeneratedNodeBatch(
+                node_presence_mask=np.asarray([[True, True]], dtype=bool),
+            ),
+            predicted_node_labels_list=[np.asarray(["C"], dtype=object)],
+        )
+
+
 def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
 
@@ -1498,6 +1522,55 @@ def test_decode_adjacency_matrix_enforces_desired_edge_count():
 
     assert adj_mtx.shape == (4, 4)
     assert int(np.sum(adj_mtx) // 2) == 1
+
+
+def test_decoder_decode_edge_labels_validates_edge_label_count():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+
+    with pytest.raises(ValueError, match="received 0 labels for 1 edges"):
+        decoder.decode_edge_labels(
+            GeneratedNodeBatch(
+                node_presence_mask=np.asarray([[True, True]], dtype=bool),
+            ),
+            adj_mtx_list=[np.asarray([[0, 1], [1, 0]], dtype=int)],
+            predicted_edge_labels_list=[np.asarray([], dtype=object)],
+        )
+
+
+def test_decoder_decode_validates_node_label_count_during_decode():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True]], dtype=bool),
+        node_existence_probabilities=np.asarray([[0.9, 0.8, 0.1]], dtype=float),
+        node_degree_predictions=np.asarray([[1, 1, 0]], dtype=float),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.95, 0.10],
+                    [0.95, 0.0, 0.05],
+                    [0.10, 0.05, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="received 4 labels for 3 slots"):
+        decoder.decode(
+            generated_nodes,
+            predicted_node_labels_list=[np.asarray(["C", "O", "N", "F"], dtype=object)],
+            predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+            predicted_edge_label_matrices=[
+                np.asarray(
+                    [
+                        [None, "-", None],
+                        ["-", None, None],
+                        [None, None, None],
+                    ],
+                    dtype=object,
+                )
+            ],
+        )
 
 
 def test_decode_forwards_diagnostic_graph_renderer_with_decoded_graph(monkeypatch):

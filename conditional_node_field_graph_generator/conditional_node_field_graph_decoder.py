@@ -1,8 +1,6 @@
 """Decoder helpers for rebuilding labeled graphs from node-field predictions."""
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-import io
-import os
+import sys
 from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import dill as pickle
@@ -10,313 +8,46 @@ import networkx as nx
 import numpy as np
 import pulp
 
-try:
-    import matplotlib.pyplot as plt
-except Exception:  # pragma: no cover
-    plt = None
-
 from .conditional_node_field_generator import GeneratedNodeBatch
+from . import diagnostics as _shared_diagnostics
+from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
+from .parallel_utils import _normalize_n_jobs, _parallel_map
 
 Edge = Tuple[int, int]
 _DECODER_PROBABILITY_EPS = 1e-6
-
-
-def _canonicalize_edge(edge: Sequence[Any]) -> Optional[Edge]:
-    if len(edge) != 2:
-        return None
-    try:
-        u = int(edge[0])
-        v = int(edge[1])
-    except (TypeError, ValueError):
-        return None
-    if u == v:
-        return None
-    return (u, v) if u < v else (v, u)
-
-
-def _normalize_violating_edge_sets(
-    edge_sets: Iterable[Iterable[Sequence[Any]]],
-    *,
-    n_nodes: Optional[int] = None,
-) -> List[frozenset[Edge]]:
-    normalized: List[frozenset[Edge]] = []
-    seen: set[frozenset[Edge]] = set()
-    for edge_set in edge_sets:
-        canonical_edges = []
-        for edge in edge_set:
-            normalized_edge = _canonicalize_edge(edge)
-            if normalized_edge is None:
-                continue
-            if n_nodes is not None and (
-                normalized_edge[0] < 0
-                or normalized_edge[1] < 0
-                or normalized_edge[0] >= int(n_nodes)
-                or normalized_edge[1] >= int(n_nodes)
-            ):
-                continue
-            canonical_edges.append(normalized_edge)
-        frozen = frozenset(canonical_edges)
-        if not frozen or frozen in seen:
-            continue
-        seen.add(frozen)
-        normalized.append(frozen)
-    return normalized
-
-
-def _normalize_n_jobs(n_jobs: Optional[int]) -> int:
-    if n_jobs is None:
-        return 1
-    n_jobs = int(n_jobs)
-    if n_jobs == 0:
-        raise ValueError("n_jobs must be != 0.")
-    if n_jobs < 0:
-        cpu_count = os.cpu_count() or 1
-        return max(1, cpu_count + 1 + n_jobs)
-    return max(1, n_jobs)
-
-
-def _parallel_map(func, jobs, max_workers: int, verbose: bool = False):
-    if max_workers <= 1 or len(jobs) <= 1:
-        return [func(job) for job in jobs]
-    try:
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(jobs))) as executor:
-            return list(executor.map(func, jobs))
-    except (OSError, PermissionError):
-        if verbose:
-            print("Process-based decode parallelism unavailable; falling back to threads.")
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(jobs))) as executor:
-            return list(executor.map(func, jobs))
+plt = _shared_diagnostics.plt
 
 
 def _is_molecule_like_graph(graph: nx.Graph) -> bool:
-    atom_symbols = {
-        "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
-        "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
-        "Br", "I",
-    }
-    graph_meta = getattr(graph, "graph", {})
-    if any(key in graph_meta for key in ("smiles", "mol", "molecule", "inchi")):
-        return True
-    for _, attrs in graph.nodes(data=True):
-        if "symbol" in attrs or "atomic_num" in attrs or "atom" in attrs:
-            return True
-        label = attrs.get("label")
-        if isinstance(label, str) and label in atom_symbols:
-            return True
-    return False
+    return _shared_diagnostics._is_molecule_like_graph(graph)
 
 
 def _coerce_inline_image_array(image: Any) -> Optional[np.ndarray]:
-    try:
-        image_array = np.asarray(image)
-        if image_array.dtype != object:
-            return image_array
-    except Exception:
-        image_array = None
-
-    image_bytes = getattr(image, "data", None)
-    if image_bytes is None:
-        return None
-    if isinstance(image_bytes, memoryview):
-        image_bytes = image_bytes.tobytes()
-    if isinstance(image_bytes, str):
-        image_bytes = image_bytes.encode("utf-8")
-    try:
-        from PIL import Image
-    except Exception:
-        return None
-    try:
-        with Image.open(io.BytesIO(image_bytes)) as pil_image:
-            return np.asarray(pil_image)
-    except Exception:
-        return None
+    return _shared_diagnostics._coerce_inline_image_array(image)
 
 
 def _try_render_molecular_graph_inline(ax: Any, *, decoded_graph: nx.Graph, title: str) -> bool:
-    if not _is_molecule_like_graph(decoded_graph):
-        return False
-    try:
-        from abstractgraph_graphicalizer.chem import draw_molecule
-    except Exception:
-        return False
-    try:
-        image = draw_molecule(decoded_graph, size=(500, 350))
-    except Exception:
-        return False
-    image_array = _coerce_inline_image_array(image)
-    if image_array is None:
-        return False
-    ax.imshow(image_array)
-    ax.set_title("Decoded graph")
-    ax.set_axis_off()
-    return True
-
-
-def _plot_decoder_diagnostics(
-    *,
-    prob_matrix: np.ndarray,
-    adj_mtx: np.ndarray,
-    target_degrees: Sequence[int],
-    title: str,
-    violating_edge_sets: Optional[Iterable[Iterable[Sequence[Any]]]] = None,
-    decoded_graph: Optional[nx.Graph] = None,
-    graph_renderer: Optional[Callable[..., Any]] = None,
-    existence_mask: Optional[Sequence[bool]] = None,
-) -> None:
-    if plt is None:
-        return
-    def _format_plot_title(value: str) -> str:
-        if " | " not in value or not value.startswith("Oracle "):
-            return value
-        parts = value.split(" | ")
-        head = parts[0]
-        groups = [[], [], []]
-        for metric in parts[1:]:
-            key = metric.split("=", 1)[0].strip()
-            if key in {
-                "violating_node_sets",
-                "violating_edge_sets",
-                "new_node_cuts",
-                "new_edge_label_cuts",
-                "joint_label_changed",
-            }:
-                groups[0].append(metric)
-            elif key in {
-                "log_total",
-                "log_edge",
-                "log_node",
-                "log_edge_label",
-            }:
-                groups[1].append(metric)
-            else:
-                groups[2].append(metric)
-        return "\n".join([head] + [" | ".join(group) for group in groups if group])
-
-    formatted_title = _format_plot_title(title)
-    prob_matrix = np.asarray(prob_matrix, dtype=float)
-    adj_mtx = np.asarray(adj_mtx, dtype=float)
-    target_degrees = np.asarray(target_degrees, dtype=float)
-    active_mask = None if existence_mask is None else np.asarray(existence_mask, dtype=bool)
-    if active_mask is not None and len(active_mask) == adj_mtx.shape[0]:
-        active_indices = np.flatnonzero(active_mask)
-    else:
-        active_mask = None
-        active_indices = np.arange(adj_mtx.shape[0], dtype=int)
-    adj_display = adj_mtx[np.ix_(active_indices, active_indices)]
-    target_degrees_display = target_degrees[active_indices]
-    realized_degrees = adj_display.sum(axis=1)
-    normalized_violations = _normalize_violating_edge_sets(
-        [] if violating_edge_sets is None else violating_edge_sets,
-        n_nodes=adj_mtx.shape[0],
+    return _shared_diagnostics._try_render_molecular_graph_inline(
+        ax,
+        decoded_graph=decoded_graph,
+        title=title,
     )
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 4.8))
 
-    im0 = axes[0].imshow(
-        prob_matrix,
-        vmin=0.0,
-        vmax=max(1.0, float(np.max(prob_matrix)) if prob_matrix.size else 1.0),
-        cmap="viridis",
+def _plot_decoder_diagnostics(**kwargs) -> None:
+    generator_module = sys.modules.get(
+        "conditional_node_field_graph_generator.conditional_node_field_graph_generator"
     )
-    axes[0].set_title("Edge probabilities")
-    axes[0].set_xlabel("node j")
-    axes[0].set_ylabel("node i")
-    if active_indices.size > 0:
-        axes[0].set_xticks(active_indices.astype(int).tolist())
-        axes[0].set_yticks(active_indices.astype(int).tolist())
-    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+    patched_plotter = None if generator_module is None else getattr(generator_module, "_plot_decoder_diagnostics", None)
+    if callable(patched_plotter) and patched_plotter is not _plot_decoder_diagnostics:
+        return patched_plotter(**kwargs)
+    return _shared_diagnostics._plot_decoder_diagnostics(
+        **kwargs,
+        plot_backend=plt,
+        inline_renderer=_try_render_molecular_graph_inline,
+    )
 
-    axes[1].imshow(adj_display, vmin=0.0, vmax=1.0, cmap="gray")
-    axes[1].set_title("Decoded adjacency")
-    axes[1].set_xlabel("node j")
-    axes[1].set_ylabel("node i")
-    if active_indices.size > 0:
-        axes[1].set_xticks(np.arange(len(active_indices)))
-        axes[1].set_xticklabels(active_indices.astype(int).tolist())
-        axes[1].set_yticks(np.arange(len(active_indices)))
-        axes[1].set_yticklabels(active_indices.astype(int).tolist())
-    active_index_lookup = {int(node_idx): pos for pos, node_idx in enumerate(active_indices.tolist())}
-    if normalized_violations:
-        for edge_set in normalized_violations:
-            for i, j in edge_set:
-                if i not in active_index_lookup or j not in active_index_lookup:
-                    continue
-                ii = active_index_lookup[i]
-                jj = active_index_lookup[j]
-                axes[1].plot([jj, ii], [ii, jj], marker="s", color="tab:red", markersize=6, linewidth=1.5)
-                axes[1].plot([ii, jj], [jj, ii], marker="s", color="tab:red", markersize=6, linewidth=1.5)
 
-    node_idx = active_indices.astype(int)
-    axes[2].bar(node_idx - 0.18, target_degrees_display, width=0.36, label="target")
-    axes[2].bar(node_idx + 0.18, realized_degrees, width=0.36, label="realized")
-    axes[2].set_title("Degree targets vs realized")
-    axes[2].set_xlabel("node")
-    axes[2].set_ylabel("degree")
-    if node_idx.size > 0:
-        axes[2].set_xticks(node_idx)
-        y_max = int(max(np.max(target_degrees_display), np.max(realized_degrees)))
-        axes[2].set_yticks(np.arange(0, y_max + 1, 1))
-    axes[2].grid(axis="y", alpha=0.3)
-    axes[2].legend()
-
-    graph = nx.from_numpy_array(adj_display.astype(int))
-    violating_edges = {
-        (min(active_index_lookup[i], active_index_lookup[j]), max(active_index_lookup[i], active_index_lookup[j]))
-        for edge_set in normalized_violations
-        for i, j in edge_set
-        if i in active_index_lookup and j in active_index_lookup
-    }
-    rendered_inline = False
-    if decoded_graph is not None:
-        rendered_inline = _try_render_molecular_graph_inline(
-            axes[3],
-            decoded_graph=decoded_graph,
-            title=formatted_title,
-        )
-    if not rendered_inline and (graph_renderer is None or decoded_graph is None):
-        layout = nx.circular_layout(graph)
-        edge_colors = [
-            "tab:red" if (min(u, v), max(u, v)) in violating_edges else "black"
-            for u, v in graph.edges()
-        ]
-        edge_widths = [
-            2.5 if (min(u, v), max(u, v)) in violating_edges else 1.5
-            for u, v in graph.edges()
-        ]
-        nx.draw_networkx(
-            graph,
-            pos=layout,
-            ax=axes[3],
-            node_color="white",
-            edge_color=edge_colors,
-            width=edge_widths,
-            with_labels=True,
-            font_size=9,
-            node_size=500,
-            linewidths=1.5,
-        )
-        axes[3].set_title("Decoded graph")
-    elif not rendered_inline:
-        axes[3].text(
-            0.5,
-            0.5,
-            "Custom graph renderer\nshown below",
-            ha="center",
-            va="center",
-            fontsize=11,
-        )
-        axes[3].set_title("Decoded graph")
-    axes[3].set_axis_off()
-
-    fig.suptitle(formatted_title, fontsize=10)
-    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
-    plt.show()
-    plt.close(fig)
-    if graph_renderer is not None and decoded_graph is not None and not rendered_inline:
-        try:
-            graph_renderer([decoded_graph], titles=[formatted_title])
-        except TypeError:
-            graph_renderer([decoded_graph])
 
 
 def _build_masked_prob_matrix(
@@ -363,6 +94,46 @@ def _assemble_graph_job(
 
 def _assemble_graph_job_star(args) -> nx.Graph:
     return _assemble_graph_job(*args)
+
+
+def _validate_node_label_array(
+    node_labels: np.ndarray,
+    *,
+    graph_idx: int,
+    n_slots: int,
+) -> np.ndarray:
+    node_labels = np.asarray(node_labels, dtype=object)
+    if node_labels.ndim != 1:
+        raise ValueError(
+            "Each predicted node-label array must be one-dimensional; "
+            f"graph {graph_idx} received shape {node_labels.shape}."
+        )
+    if node_labels.shape[0] != n_slots:
+        raise ValueError(
+            "Each predicted node-label array must align with the decoder node slots; "
+            f"graph {graph_idx} received {node_labels.shape[0]} labels for {n_slots} slots."
+        )
+    return node_labels
+
+
+def _validate_edge_label_array(
+    edge_labels: np.ndarray,
+    *,
+    graph_idx: int,
+    expected_edge_count: int,
+) -> np.ndarray:
+    edge_labels = np.asarray(edge_labels, dtype=object)
+    if edge_labels.ndim != 1:
+        raise ValueError(
+            "Each predicted edge-label array must be one-dimensional; "
+            f"graph {graph_idx} received shape {edge_labels.shape}."
+        )
+    if edge_labels.shape[0] != expected_edge_count:
+        raise ValueError(
+            "Each predicted edge-label array must align with the decoded adjacency edge count; "
+            f"graph {graph_idx} received {edge_labels.shape[0]} labels for {expected_edge_count} edges."
+        )
+    return edge_labels
 
 
 def _decode_single_adjacency_job(
@@ -970,7 +741,20 @@ class ConditionalNodeFieldGraphDecoder(object):
     ) -> List[np.ndarray]:
         if predicted_node_labels_list is None:
             raise RuntimeError("decode_node_labels requires explicit node labels.")
-        return [np.asarray(node_labels, dtype=object) for node_labels in predicted_node_labels_list]
+        expected_graph_count = len(np.asarray(generated_nodes.node_presence_mask, dtype=bool))
+        if len(predicted_node_labels_list) != expected_graph_count:
+            raise ValueError(
+                "predicted_node_labels_list must align with generated_nodes "
+                f"(got {len(predicted_node_labels_list)} label arrays for {expected_graph_count} graphs)."
+            )
+        return [
+            _validate_node_label_array(
+                node_labels,
+                graph_idx=graph_idx,
+                n_slots=int(np.asarray(generated_nodes.node_presence_mask[graph_idx], dtype=bool).shape[0]),
+            )
+            for graph_idx, node_labels in enumerate(predicted_node_labels_list)
+        ]
 
     def decode_edge_labels(
         self,
@@ -985,7 +769,14 @@ class ConditionalNodeFieldGraphDecoder(object):
                     "predicted_edge_labels_list must align with adj_mtx_list "
                     f"(got {len(predicted_edge_labels_list)} label arrays for {len(adj_mtx_list)} graphs)."
                 )
-            return [np.asarray(edge_labels, dtype=object) for edge_labels in predicted_edge_labels_list]
+            return [
+                _validate_edge_label_array(
+                    edge_labels,
+                    graph_idx=graph_idx,
+                    expected_edge_count=int(np.sum(np.asarray(adj_mtx, dtype=float)) // 2),
+                )
+                for graph_idx, (adj_mtx, edge_labels) in enumerate(zip(adj_mtx_list, predicted_edge_labels_list))
+            ]
 
         if predicted_edge_label_matrices is not None:
             if len(predicted_edge_label_matrices) != len(adj_mtx_list):
@@ -1037,6 +828,24 @@ class ConditionalNodeFieldGraphDecoder(object):
                 ),
             )
             for graph_idx in range(len(adj_mtx_list))
+        ]
+        predicted_node_labels_list = [
+            _validate_node_label_array(
+                node_labels,
+                graph_idx=graph_idx,
+                n_slots=int(np.asarray(node_presence_mask, dtype=bool).shape[0]),
+            )
+            for graph_idx, (node_labels, node_presence_mask) in enumerate(
+                zip(predicted_node_labels_list, resolved_presence_masks)
+            )
+        ]
+        predicted_edge_labels_list = [
+            _validate_edge_label_array(
+                edge_labels,
+                graph_idx=graph_idx,
+                expected_edge_count=int(np.sum(np.asarray(adj_mtx, dtype=float)) // 2),
+            )
+            for graph_idx, (edge_labels, adj_mtx) in enumerate(zip(predicted_edge_labels_list, adj_mtx_list))
         ]
         jobs = [
             (
