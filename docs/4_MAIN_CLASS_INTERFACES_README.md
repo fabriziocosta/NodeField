@@ -1019,6 +1019,82 @@ Parameters:
   Provide a checkpoint path: resumes node-generator training from that checkpoint.
   Omit it: trains from scratch.
 
+#### `fit_from_stream(...)`
+
+```python
+fit_from_stream(
+    uri,
+    type,
+    reader=None,
+    warmup_size: int = 2048,
+    batch_size: int = 128,
+    limit=None,
+    random_state=None,
+    verbose: bool = False,
+    start_after_instance: int = 0,
+    train_node_generator: bool = True,
+    ckpt_path: Optional[str] = None,
+) -> ConditionalNodeFieldGraphGenerator
+```
+
+Parameters:
+
+- `uri`
+  Source location passed to the selected loader.
+
+- `type`
+  Source type identifier. This is dispatched through the streaming input-source layer.
+
+- `reader`
+  Optional custom reader for non-built-in sources.
+
+- `warmup_size`
+  Number of streamed graphs used to fit vectorizers, supervision metadata, the feasibility estimator, and the frozen node-generator schema.
+  Increase: more stable schema coverage, more warmup cost.
+  Decrease: cheaper warmup, but higher post-warmup rejection risk.
+
+- `batch_size`
+  Stream minibatch size.
+  It also defines the size of the fixed warmup validation subset.
+
+- `limit`
+  Optional stream limit.
+  Integer: take at most that many graphs after `start_after_instance`.
+  Float in `(0, 1)`: Bernoulli-sample each candidate graph with that keep probability.
+
+- `random_state`
+  Optional RNG seed or generator forwarded to the source sampler.
+  Fixed seed: deterministic replay of the same sampled stream.
+  `None`: replayed epochs may see different Bernoulli-sampled tails.
+
+- `verbose`
+  Enables streamed progress logging.
+  When enabled, `fit_from_stream(...)` prints one line per training batch with cumulative `seen`, `warmup`, `train_seen`, `accepted`, and `skipped` counters, and plots training curves at the end just like `fit(...)`.
+
+- `start_after_instance`
+  Skip this many raw source items before warmup begins.
+
+- `train_node_generator`
+  Whether to train the node generator after warmup.
+  Disable: fit only schema-defining components on warmup.
+
+- `ckpt_path`
+  Optional checkpoint path forwarded to the streamed node-generator training run.
+
+Streaming semantics:
+
+- warmup defines the frozen schema
+- the first `batch_size` warmup graphs form the fixed validation set
+- all warmup graphs are still reused as epoch-1 training batches
+- later epochs replay only the post-warmup tail
+- incompatible post-warmup graphs are skipped rather than adapting the schema
+- `maximum_epochs` on the node generator controls how many times the post-warmup stream is restarted
+
+Full-generator persistence during training:
+
+- regular `fit(...)`: if `model_name` is set, the full graph generator is snapshotted once per validation epoch
+- `fit_from_stream(...)`: if `model_name` is set, the full graph generator is snapshotted after each streamed training batch
+
 #### `encode(...)`
 
 ```python

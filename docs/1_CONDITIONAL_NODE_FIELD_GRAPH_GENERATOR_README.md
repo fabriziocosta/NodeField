@@ -219,6 +219,29 @@ flowchart TD
     class J,K model;
 ```
 
+## Streaming Fit Architecture
+
+`fit_from_stream(...)` uses a schema-frozen warmup and then trains from replayable streamed batches.
+
+The flow is:
+
+1. read `warmup_size` graphs from the selected source,
+2. fit vectorizers, supervision metadata, feasibility estimator, and model schema on warmup only,
+3. reserve the first streamed batch worth of warmup graphs as a fixed validation subset,
+4. still reuse all warmup graphs as epoch-1 training batches,
+5. continue training on the post-warmup stream, skipping incompatible graphs,
+6. when `maximum_epochs > 1`, restart only the post-warmup stream for later epochs.
+
+This means warmup plays three roles at once:
+
+- schema definition,
+- fixed validation support,
+- initial training data for epoch 1.
+
+The schema is never expanded after warmup. Post-warmup graphs are accepted only if they remain compatible with the warmup-defined node-count limit, label vocabularies, and transform/supervision assumptions.
+
+With float-valued `limit`, replayed epochs may naturally expose different Bernoulli-sampled tails when no fixed `random_state` is supplied. With a fixed `random_state`, replay is deterministic.
+
 ### Step 1. Fit External Encoders
 
 The generator first fits:

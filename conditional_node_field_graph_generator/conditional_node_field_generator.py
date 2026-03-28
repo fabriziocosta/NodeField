@@ -13,7 +13,11 @@ import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, Dataset, IterableDataset, TensorDataset
 
-from .metrics_collection import GraphGeneratorEpochSnapshotCallback, MetricsLogger
+from .metrics_collection import (
+    GraphGeneratorBatchSnapshotCallback,
+    GraphGeneratorEpochSnapshotCallback,
+    MetricsLogger,
+)
 from .metrics_visualization import plot_metrics
 from .runtime_utils import run_trainer_fit, verbose_log
 from .training_policy import (
@@ -1223,9 +1227,20 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         if self.use_node_label_head:
             self.log("train_node_label_ce", losses["label_ce"], on_step=False, on_epoch=True, batch_size=batch_size)
         if getattr(self, "log_train_every_batch", False):
+            progress_owner = getattr(self, "_stream_progress_owner", None)
+            progress_prefix = ""
+            if progress_owner is not None:
+                progress_prefix = (
+                    f"seen={int(getattr(progress_owner, 'stream_seen_', 0))} "
+                    f"warmup={int(getattr(progress_owner, 'stream_warmup_count_', 0))} "
+                    f"train_seen={int(getattr(progress_owner, 'stream_training_seen_', 0))} "
+                    f"accepted={int(getattr(progress_owner, 'stream_training_accepted_', 0))} "
+                    f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0))} | "
+                )
             print(
                 "train batch "
                 f"{batch_idx + 1}: "
+                f"{progress_prefix}"
                 f"total={float(total_loss.detach().cpu()):.4f} "
                 f"node_field={float(losses['node_field'].detach().cpu()):.4f} "
                 f"deg={float(losses['deg_ce'].detach().cpu()):.4f}"
@@ -2362,12 +2377,12 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         degree_target_array = np.asarray(node_batch.node_degree_targets, dtype=np.int64)
         encoded_node_label_targets = None
         encoded_edge_label_targets = None
-        if node_label_targets is not None and self.num_node_label_classes_ > 0:
+        if node_label_targets is not None and self.use_node_label_head and self.num_node_label_classes_ > 0:
             encoded_node_label_targets = self._encode_node_label_targets(
                 node_label_targets,
                 self.number_of_rows_per_example,
             )
-        if edge_label_targets is not None and self.edge_label_to_index_ is not None:
+        if edge_label_targets is not None and self.use_edge_label_head and self.edge_label_to_index_ is not None:
             encoded_edge_label_targets = self._encode_edge_label_targets(edge_label_targets)
         X_scaled, y_scaled = self._transform_data(X_array, y_array)
 
@@ -2451,15 +2466,14 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             targets=targets,
         )
         dataset = self._build_dataset_from_processed_payload(payload)
-        _, val_dataset = self._build_train_val_subsets(dataset)
         if isinstance(dataset, ConditionalNodeFieldGraphWithEdgesDataset):
             return DataLoader(
-                val_dataset,
+                dataset,
                 batch_size=self.batch_size,
                 shuffle=False,
                 collate_fn=collate_conditional_node_field_graph_with_edges,
             )
-        return DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
 
     def _run_training(
         self,
@@ -2470,12 +2484,16 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         context: str,
         train_loader_length: int,
         suppress_non_batch_output: bool = True,
+        snapshot_frequency: Optional[str] = "epoch",
     ) -> None:
         """Execute Lightning training and restore the best checkpoint when configured."""
         snapshot_callback = None
         snapshot_owner = getattr(self, "_graph_generator_snapshot_owner", None)
         if snapshot_owner is not None and getattr(snapshot_owner, "model_name", None) is not None:
-            snapshot_callback = GraphGeneratorEpochSnapshotCallback(snapshot_owner)
+            if snapshot_frequency == "batch":
+                snapshot_callback = GraphGeneratorBatchSnapshotCallback(snapshot_owner)
+            elif snapshot_frequency == "epoch":
+                snapshot_callback = GraphGeneratorEpochSnapshotCallback(snapshot_owner)
         callbacks, checkpoint_dir, checkpoint_callback = build_training_callbacks(
             generator_name=self.__class__.__name__,
             checkpoint_root_dir=self.checkpoint_root_dir,
@@ -2558,8 +2576,8 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
 
     def fit_from_prebuilt_batches(
         self,
-        warmup_node_batch: NodeGenerationBatch,
-        warmup_graph_conditioning: GraphConditioningBatch,
+        validation_node_batch: NodeGenerationBatch,
+        validation_graph_conditioning: GraphConditioningBatch,
         batch_iter_factory,
         ckpt_path: Optional[str] = None,
     ):
@@ -2569,8 +2587,8 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             if not os.path.isfile(ckpt_path):
                 raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
         val_loader = self._build_validation_loader(
-            node_batch=warmup_node_batch,
-            graph_conditioning=warmup_graph_conditioning,
+            node_batch=validation_node_batch,
+            graph_conditioning=validation_graph_conditioning,
             targets=None,
         )
         train_loader = DataLoader(
@@ -2578,7 +2596,9 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             batch_size=None,
         )
         previous_batch_logging = bool(getattr(self.model, "log_train_every_batch", False))
-        self.model.log_train_every_batch = True
+        previous_stream_progress_owner = getattr(self.model, "_stream_progress_owner", None)
+        self.model._stream_progress_owner = getattr(self, "_graph_generator_snapshot_owner", None)
+        self.model.log_train_every_batch = bool(self.verbose)
         try:
             self._run_training(
                 train_loader,
@@ -2587,9 +2607,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 context=f"{self.__class__.__name__}.fit_from_prebuilt_batches",
                 train_loader_length=1,
                 suppress_non_batch_output=False,
+                snapshot_frequency="batch",
             )
         finally:
             self.model.log_train_every_batch = previous_batch_logging
+            self.model._stream_progress_owner = previous_stream_progress_owner
         return self
 
     def fit(
@@ -2635,6 +2657,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             context=f"{self.__class__.__name__}.fit",
             train_loader_length=len(train_loader),
             suppress_non_batch_output=True,
+            snapshot_frequency="epoch",
         )
 
     def set_guidance_predictor(

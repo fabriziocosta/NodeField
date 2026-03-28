@@ -77,6 +77,10 @@ class _TrainableNodeModel(_Component):
 
 
 class _StreamTrainableNodeModel(_TrainableNodeModel):
+    def __init__(self, verbose=False, maximum_epochs=1):
+        super().__init__(verbose=verbose)
+        self.maximum_epochs = int(maximum_epochs)
+
     def setup(self, **kwargs):
         super().setup(**kwargs)
         node_batch = kwargs["node_batch"]
@@ -110,12 +114,13 @@ class _StreamTrainableNodeModel(_TrainableNodeModel):
     def _collate_processed_payload(self, payload):
         return payload
 
-    def fit_from_prebuilt_batches(self, warmup_node_batch, warmup_graph_conditioning, batch_iter_factory, ckpt_path=None):
+    def fit_from_prebuilt_batches(self, validation_node_batch, validation_graph_conditioning, batch_iter_factory, ckpt_path=None):
+        epoch_batches = [list(batch_iter_factory()) for _ in range(max(1, int(self.maximum_epochs)))]
         self.fit_from_prebuilt_batches_calls.append(
             {
-                "warmup_graphs": len(warmup_node_batch),
-                "warmup_conditioning": len(warmup_graph_conditioning),
-                "batches": list(batch_iter_factory()),
+                "validation_graphs": len(validation_node_batch),
+                "validation_conditioning": len(validation_graph_conditioning),
+                "batches": epoch_batches,
                 "ckpt_path": ckpt_path,
             }
         )
@@ -387,12 +392,79 @@ def test_fit_from_stream_uses_warmup_only_for_schema_and_trains_remaining_batche
     assert estimator.fit_graph_count == 2
     assert len(generator.training_graph_conditioning_) == 2
     assert node_model.setup_calls[0]["targets"] is None
-    assert node_model.fit_from_prebuilt_batches_calls[0]["warmup_graphs"] == 2
-    assert [batch["graphs"] for batch in node_model.fit_from_prebuilt_batches_calls[0]["batches"]] == [2, 1]
-    assert generator.stream_training_seen_ == 3
-    assert generator.stream_training_accepted_ == 3
+    assert node_model.fit_from_prebuilt_batches_calls[0]["validation_graphs"] == 2
+    assert [
+        batch["graphs"] for batch in node_model.fit_from_prebuilt_batches_calls[0]["batches"][0]
+    ] == [2, 2, 1]
+    assert generator.stream_training_seen_ == 5
+    assert generator.stream_training_accepted_ == 5
     assert generator.stream_training_skipped_ == 0
     assert generator.warmup_schema_frozen_ is True
+
+
+def test_fit_from_stream_restarts_post_warmup_stream_for_multiple_epochs():
+    node_model = _StreamTrainableNodeModel(maximum_epochs=2)
+    graphs = [
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+    ]
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=2,
+        batch_size=1,
+    )
+
+    epoch_batches = node_model.fit_from_prebuilt_batches_calls[0]["batches"]
+    assert len(epoch_batches) == 2
+    assert [[batch["graphs"] for batch in epoch] for epoch in epoch_batches] == [[1, 1, 1, 1], [1, 1]]
+    assert generator.stream_warmup_count_ == 2
+    assert generator.stream_training_seen_ == 6
+    assert generator.stream_training_accepted_ == 6
+
+
+def test_fit_from_stream_uses_batch_sized_validation_and_reuses_all_warmup_for_epoch_one():
+    node_model = _StreamTrainableNodeModel(maximum_epochs=1)
+    graphs = [
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+    ]
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=3,
+        batch_size=2,
+    )
+
+    fit_call = node_model.fit_from_prebuilt_batches_calls[0]
+    assert fit_call["validation_graphs"] == 2
+    assert [batch["graphs"] for batch in fit_call["batches"][0]] == [2, 1, 2]
+    assert generator.stream_warmup_count_ == 3
+    assert generator.stream_training_seen_ == 5
+    assert generator.stream_training_accepted_ == 5
 
 
 def test_fit_from_stream_skips_unknown_node_labels():
@@ -419,8 +491,8 @@ def test_fit_from_stream_skips_unknown_node_labels():
         batch_size=1,
     )
 
-    assert generator.stream_training_seen_ == 2
-    assert generator.stream_training_accepted_ == 1
+    assert generator.stream_training_seen_ == 4
+    assert generator.stream_training_accepted_ == 3
     assert generator.stream_training_skipped_ == 1
     assert generator.stream_skipped_unknown_node_label_ == 1
 
@@ -446,8 +518,8 @@ def test_fit_from_stream_skips_unknown_edge_labels_when_edge_labels_are_learned(
         batch_size=1,
     )
 
-    assert generator.stream_training_seen_ == 1
-    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_training_seen_ == 3
+    assert generator.stream_training_accepted_ == 2
     assert generator.stream_skipped_unknown_edge_label_ == 1
 
 
@@ -474,10 +546,10 @@ def test_fit_from_stream_skips_graphs_larger_than_warmup_schema():
         batch_size=1,
     )
 
-    assert generator.stream_training_seen_ == 1
-    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_training_seen_ == 3
+    assert generator.stream_training_accepted_ == 2
     assert generator.stream_skipped_too_large_ == 1
-    assert node_model.fit_from_prebuilt_batches_calls == []
+    assert node_model.fit_from_prebuilt_batches_calls != []
 
 
 def test_fit_from_stream_counts_transform_errors():
@@ -504,8 +576,8 @@ def test_fit_from_stream_counts_transform_errors():
         batch_size=1,
     )
 
-    assert generator.stream_training_seen_ == 1
-    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_training_seen_ == 3
+    assert generator.stream_training_accepted_ == 2
     assert generator.stream_skipped_transform_error_ == 1
 
 
@@ -533,8 +605,8 @@ def test_fit_from_stream_counts_supervision_errors():
         batch_size=1,
     )
 
-    assert generator.stream_training_seen_ == 1
-    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_training_seen_ == 3
+    assert generator.stream_training_accepted_ == 2
     assert generator.stream_skipped_supervision_error_ == 1
 
 
@@ -609,11 +681,11 @@ def test_fit_from_stream_accepts_smiles_csv_source(tmp_path):
     )
 
     assert generator.stream_warmup_count_ == 1
-    assert generator.stream_training_seen_ == 2
-    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_training_seen_ == 3
+    assert generator.stream_training_accepted_ == 1
     assert generator.stream_training_skipped_ == 2
     assert generator.stream_skipped_too_large_ == 2
-    assert node_model.fit_from_prebuilt_batches_calls == []
+    assert node_model.fit_from_prebuilt_batches_calls != []
 
 
 def test_graph_generator_logs_model_name_when_verbose(caplog):

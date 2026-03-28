@@ -2624,15 +2624,18 @@ class ConditionalNodeFieldGraphGenerator(object):
         try:
             if verbose:
                 self.verbose = verbose
-            source_iter = iter_selected_source_graphs(
-                uri,
-                type,
-                reader=reader,
-                limit=limit,
-                random_state=random_state,
-                verbose=bool(verbose),
-                start_after_instance=start_after_instance,
-            )
+            def _make_source_iter():
+                return iter_selected_source_graphs(
+                    uri,
+                    type,
+                    reader=reader,
+                    limit=limit,
+                    random_state=random_state,
+                    verbose=bool(verbose),
+                    start_after_instance=start_after_instance,
+                )
+
+            source_iter = _make_source_iter()
             warmup_graphs = []
             for graph in source_iter:
                 self.stream_seen_ += 1
@@ -2665,10 +2668,42 @@ class ConditionalNodeFieldGraphGenerator(object):
                 )
                 setattr(self.conditional_node_generator_model, "_graph_generator_snapshot_owner", self)
 
-                def _remaining_batch_iter():
+                validation_count = min(int(batch_size), len(warmup_graphs))
+                validation_graphs = warmup_graphs[:validation_count]
+                warmup_train_graphs = list(warmup_graphs)
+                validation_node_embeddings_list, validation_graph_conditioning = self.encode(validation_graphs)
+                validation_node_label_targets = self.graphs_to_node_label_targets(validation_graphs)
+                validation_edge_label_targets, validation_edge_label_pairs = self.graphs_to_edge_label_targets(
+                    validation_graphs
+                )
+                validation_node_batch = self._build_training_node_batch(
+                    validation_graphs,
+                    node_embeddings_list=validation_node_embeddings_list,
+                    node_label_targets=validation_node_label_targets,
+                    edge_label_targets=validation_edge_label_targets,
+                    edge_label_pairs=validation_edge_label_pairs,
+                    supervision_plan=artifacts["supervision_plan"],
+                )
+
+                warmup_train_batches = []
+                if warmup_train_graphs:
+                    for start_idx in range(0, len(warmup_train_graphs), int(batch_size)):
+                        warmup_train_batches.append(
+                            self._prepare_stream_training_batch(
+                                warmup_train_graphs[start_idx:start_idx + int(batch_size)]
+                            )
+                        )
+
+                def _remaining_batch_iter(epoch_index: int = 0):
+                    replay_iter = source_iter if epoch_index == 0 else _make_source_iter()
+                    skipped_warmup_graphs = 0
+                    warmup_skip_target = 0 if epoch_index == 0 else int(self.stream_warmup_count_)
                     active_batch = []
-                    for graph in source_iter:
+                    for graph in replay_iter:
                         self.stream_seen_ += 1
+                        if skipped_warmup_graphs < warmup_skip_target:
+                            skipped_warmup_graphs += 1
+                            continue
                         self.stream_training_seen_ += 1
                         rejection_reason = self._stream_rejection_reason(graph)
                         if rejection_reason is not None:
@@ -2714,34 +2749,28 @@ class ConditionalNodeFieldGraphGenerator(object):
                             self.stream_training_accepted_ += len(active_batch)
                             yield batch_payload
 
-                remaining_batches = _remaining_batch_iter()
-                try:
-                    first_batch = next(remaining_batches)
-                except StopIteration:
-                    verbose_log(self, "No streamed training batches were accepted after warmup; skipping node-model training.")
-                else:
-                    batch_state = {"first_emitted": False}
+                batch_state = {"epoch_call_count": 0}
 
-                    def _single_pass_batch_factory():
-                        if batch_state["first_emitted"]:
-                            return
-                        batch_state["first_emitted"] = True
-                        yield first_batch
-                        yield from remaining_batches
+                def _single_pass_batch_factory():
+                    epoch_index = batch_state["epoch_call_count"]
+                    batch_state["epoch_call_count"] += 1
+                    if epoch_index == 0:
+                        for warmup_train_batch_index, warmup_train_batch in enumerate(warmup_train_batches):
+                            batch_graph_count = len(warmup_train_graphs[
+                                warmup_train_batch_index * int(batch_size):
+                                (warmup_train_batch_index + 1) * int(batch_size)
+                            ])
+                            self.stream_training_seen_ += batch_graph_count
+                            self.stream_training_accepted_ += batch_graph_count
+                            yield warmup_train_batch
+                    yield from _remaining_batch_iter(epoch_index=epoch_index)
 
-                    original_maximum_epochs = getattr(self.conditional_node_generator_model, "maximum_epochs", None)
-                    if original_maximum_epochs is not None:
-                        self.conditional_node_generator_model.maximum_epochs = 1
-                    try:
-                        self.conditional_node_generator_model.fit_from_prebuilt_batches(
-                            warmup_node_batch=warmup_node_batch,
-                            warmup_graph_conditioning=artifacts["graph_conditioning"],
-                            batch_iter_factory=_single_pass_batch_factory,
-                            ckpt_path=ckpt_path,
-                        )
-                    finally:
-                        if original_maximum_epochs is not None:
-                            self.conditional_node_generator_model.maximum_epochs = original_maximum_epochs
+                self.conditional_node_generator_model.fit_from_prebuilt_batches(
+                    validation_node_batch=validation_node_batch,
+                    validation_graph_conditioning=validation_graph_conditioning,
+                    batch_iter_factory=_single_pass_batch_factory,
+                    ckpt_path=ckpt_path,
+                )
             self.is_fitted_ = True
             self._finalize_stream_fit_stats()
             return self

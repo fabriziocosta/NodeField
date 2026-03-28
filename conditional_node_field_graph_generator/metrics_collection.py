@@ -281,3 +281,33 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
             )
         finally:
             owner.is_fitted_ = previous_fit_state
+
+
+class GraphGeneratorBatchSnapshotCallback(pl.callbacks.Callback):
+    """Persist a usable full graph-generator snapshot after each completed train batch."""
+
+    def __init__(self, owner_graph_generator):
+        self.owner_graph_generator = owner_graph_generator
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if getattr(trainer, "sanity_checking", False):
+            return
+        if hasattr(trainer, "is_global_zero") and not bool(trainer.is_global_zero):
+            return
+        owner = self.owner_graph_generator
+        model_name = getattr(owner, "model_name", None)
+        if model_name is None:
+            return
+        from .persistence import save_graph_generator
+
+        previous_fit_state = bool(getattr(owner, "is_fitted_", False))
+        owner.is_fitted_ = True
+        try:
+            save_graph_generator(
+                owner,
+                model_name=model_name,
+                model_dir=getattr(owner, "model_dir", None),
+                log=False,
+            )
+        finally:
+            owner.is_fitted_ = previous_fit_state
