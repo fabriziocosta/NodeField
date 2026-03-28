@@ -106,6 +106,8 @@ def load_graph_generator(model_name, model_dir=None):
         names_to_try = {requested}
         if not requested.endswith(".pkl"):
             names_to_try.add(f"{requested}.pkl")
+        sanitized_stem = _sanitize_model_token(requested[:-4] if requested.endswith(".pkl") else requested)
+        names_to_try.add(f"{sanitized_stem}.pkl")
         for candidate_name in names_to_try:
             candidate_path = model_root / candidate_name
             if candidate_path.is_file():
@@ -113,9 +115,21 @@ def load_graph_generator(model_name, model_dir=None):
         if not candidates:
             pattern = requested[:-4] if requested.endswith(".pkl") else requested
             matches = sorted(model_root.glob(f"{pattern}*.pkl"))
+            if not matches and sanitized_stem != pattern:
+                matches = sorted(model_root.glob(f"{sanitized_stem}*.pkl"))
             candidates = [path.resolve() for path in matches]
     if not candidates:
-        raise FileNotFoundError(f"Could not find a saved graph generator matching {requested!r} in {model_root}.")
+        available = sorted(path.name for path in model_root.glob("*.pkl"))
+        available_suffix = ""
+        if available:
+            preview = ", ".join(available[:5])
+            if len(available) > 5:
+                preview += ", ..."
+            available_suffix = f" Available saved generators: {preview}"
+        raise FileNotFoundError(
+            f"Could not find a saved graph generator matching {requested!r} in {model_root}."
+            f"{available_suffix}"
+        )
     if len(candidates) > 1:
         raise ValueError(
             f"Multiple saved graph generators match {requested!r}: "

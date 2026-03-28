@@ -85,3 +85,15 @@ def update_oracle_edge_memory(
     if np.isfinite(float(clip_value)):
         np.clip(updated_prior, 0.0, float(clip_value), out=updated_prior)
     return updated_prior
+
+
+__all__ = [
+    "Edge",
+    "NodeSet",
+    "ForbiddenNodeLabelAssignment",
+    "ForbiddenEdgeLabelAssignment",
+    "_ORACLE_PROBABILITY_EPS",
+    "normalize_violating_node_sets",
+    "apply_oracle_edge_memory_penalty",
+    "update_oracle_edge_memory",
+]

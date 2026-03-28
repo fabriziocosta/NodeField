@@ -49,6 +49,7 @@ from .oracle_utils import (
     ForbiddenEdgeLabelAssignment,
     ForbiddenNodeLabelAssignment,
     NodeSet,
+    _ORACLE_PROBABILITY_EPS,
     apply_oracle_edge_memory_penalty as _apply_oracle_edge_memory_penalty,
     normalize_violating_node_sets as _normalize_violating_node_sets,
     update_oracle_edge_memory as _update_oracle_edge_memory,
