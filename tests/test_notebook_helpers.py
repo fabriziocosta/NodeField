@@ -10,10 +10,9 @@ MAINTAINED_NOTEBOOKS = [
     NOTEBOOK_ROOT / "demo.ipynb",
     NOTEBOOK_ROOT / "demo_chem.ipynb",
     NOTEBOOK_ROOT / "demo_optimization.ipynb",
-    NOTEBOOK_ROOT / "demo_zinc.ipynb",
+    NOTEBOOK_ROOT / "demo_zinc_non_streaming.ipynb",
     NOTEBOOK_ROOT / "demo_zinc_guidance_bootstrap.ipynb",
     NOTEBOOK_ROOT / "demo_zinc_hyperparameter_search.ipynb",
-    NOTEBOOK_ROOT / "demo_zinc_oracle_study.ipynb",
 ]
 
 

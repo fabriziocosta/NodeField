@@ -35,6 +35,26 @@ def test_decode_pipeline_accepts_feasible_candidates_by_slot(monkeypatch):
     assert accepted_graphs_by_slot == ["s0_b", "s1_b"]
 
 
+def test_decode_pipeline_accepts_feasible_candidates_by_slot_with_rng():
+    accepted_graphs_by_slot = [None, None]
+    decoded_graphs = ["s0_a", "s0_b", "s1_a", "s1_b"]
+    feasibility_mask = [True, True, False, True]
+    candidate_slot_indices = [0, 0, 1, 1]
+    rng = np.random.default_rng(0)
+
+    feasible_count, filled_now = accept_feasible_candidates_by_slot(
+        decoded_graphs=decoded_graphs,
+        feasibility_mask=feasibility_mask,
+        candidate_slot_indices=candidate_slot_indices,
+        accepted_graphs_by_slot=accepted_graphs_by_slot,
+        rng=rng,
+    )
+
+    assert feasible_count == 3
+    assert filled_now == 2
+    assert accepted_graphs_by_slot == ["s0_b", "s1_b"]
+
+
 def test_should_apply_feasibility_filtering_uses_override():
     owner = types.SimpleNamespace(use_feasibility_filtering=True)
 

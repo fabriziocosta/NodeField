@@ -3,6 +3,7 @@ import pickle
 
 import numpy as np
 import pandas as pd
+import pytest
 from abstractgraph_graphicalizer.chem import (
     PubChemAssayLoader,
     SupervisedDataSetLoader,
@@ -15,6 +16,11 @@ from abstractgraph_graphicalizer.chem import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PUBCHEM_DATA_ROOT = PROJECT_ROOT / "notebooks" / "datasets" / "PUBCHEM"
+
+
+def _require_pubchem_bundle() -> None:
+    if not PUBCHEM_DATA_ROOT.exists():
+        pytest.skip(f"Bundled PubChem fixtures not available at {PUBCHEM_DATA_ROOT}.")
 
 
 def test_smiles_round_trip_to_rdkit():
@@ -32,6 +38,7 @@ def test_smiles_round_trip_to_rdkit():
 
 
 def test_local_pubchem_loader_reads_bundled_sdf_files():
+    _require_pubchem_bundle()
     loader = PubChemAssayLoader(PUBCHEM_DATA_ROOT)
 
     graphs, targets = loader.load("651610")
@@ -42,6 +49,7 @@ def test_local_pubchem_loader_reads_bundled_sdf_files():
 
 
 def test_supervised_dataset_loader_equalizes_and_resizes():
+    _require_pubchem_bundle()
     loader = PubChemAssayLoader(PUBCHEM_DATA_ROOT)
 
     def load_func():

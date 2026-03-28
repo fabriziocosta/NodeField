@@ -30,6 +30,7 @@ def accept_feasible_candidates_by_slot(
     feasibility_mask: Sequence[bool],
     candidate_slot_indices: Sequence[int],
     accepted_graphs_by_slot: list[Optional[nx.Graph]],
+    rng: Optional[np.random.Generator] = None,
 ) -> tuple[int, int]:
     """Count feasible candidates and fill each open slot with one random feasible graph."""
     feasible_candidates_by_slot: dict[int, list[nx.Graph]] = {}
@@ -45,7 +46,11 @@ def accept_feasible_candidates_by_slot(
     for slot_idx, graphs_for_slot in feasible_candidates_by_slot.items():
         if not graphs_for_slot or accepted_graphs_by_slot[slot_idx] is not None:
             continue
-        selected_idx = int(np.random.randint(len(graphs_for_slot)))
+        selected_idx = (
+            int(rng.integers(len(graphs_for_slot)))
+            if rng is not None
+            else int(np.random.randint(len(graphs_for_slot)))
+        )
         accepted_graphs_by_slot[slot_idx] = graphs_for_slot[selected_idx]
         filled_now += 1
     return feasible_candidate_count, filled_now

@@ -22,8 +22,17 @@ from .conditional_node_field_graph_decoder import (
     _assemble_graph_job,
     _assemble_graph_job_star,
     _build_masked_prob_matrix,
+    _edge_label_list_to_matrix,
+    _edge_label_matrix_to_list,
     _decode_single_adjacency_job,
     _decode_single_adjacency_job_star,
+    build_single_generated_node_batch as _build_single_generated_node_batch,
+    decode_generated_nodes as _decode_generated_nodes,
+    decode_generated_nodes_with_oracle as _decode_generated_nodes_with_oracle,
+    resolve_predicted_edge_labels as _resolve_predicted_edge_labels,
+    resolve_predicted_node_labels as _resolve_predicted_node_labels,
+    sample_oracle_cuts_for_iteration as _sample_oracle_cuts_for_iteration,
+    solve_oracle_relaxed_adjacency as _solve_oracle_relaxed_adjacency,
 )
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
@@ -42,17 +51,6 @@ from .decode_pipeline import (
     log_feasibility_summary as _log_feasibility_summary,
     score_feasible_rate as _score_feasible_rate,
     should_apply_feasibility_filtering as _should_apply_feasibility_filtering,
-)
-from .oracle_decode import (
-    decode_generated_nodes_with_oracle as _decode_generated_nodes_with_oracle,
-    sample_oracle_cuts_for_iteration as _sample_oracle_cuts_for_iteration,
-    solve_oracle_relaxed_adjacency as _solve_oracle_relaxed_adjacency,
-)
-from .decode_preparation import (
-    build_single_generated_node_batch as _build_single_generated_node_batch,
-    decode_generated_nodes as _decode_generated_nodes,
-    resolve_predicted_edge_labels as _resolve_predicted_edge_labels,
-    resolve_predicted_node_labels as _resolve_predicted_node_labels,
 )
 from .interpolation_utils import (
     interpolate_integer_series as _interpolate_integer_series,
@@ -109,31 +107,6 @@ class _StreamTransformError(RuntimeError):
 
 class _StreamSupervisionError(RuntimeError):
     pass
-
-
-def _edge_label_matrix_to_list(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
-    edge_labels = []
-    for i in range(adj_mtx.shape[0]):
-        for j in range(i + 1, adj_mtx.shape[1]):
-            if adj_mtx[i, j] != 0:
-                edge_labels.append(edge_label_matrix[i, j])
-    return np.asarray(edge_labels, dtype=object)
-
-
-def _edge_label_list_to_matrix(
-    adj_mtx: np.ndarray,
-    edge_labels: Sequence[Any],
-) -> np.ndarray:
-    edge_label_matrix = np.full(adj_mtx.shape, None, dtype=object)
-    edge_idx = 0
-    for i in range(adj_mtx.shape[0]):
-        for j in range(i + 1, adj_mtx.shape[1]):
-            if adj_mtx[i, j] != 0:
-                edge_label = edge_labels[edge_idx] if edge_idx < len(edge_labels) else None
-                edge_label_matrix[i, j] = edge_label
-                edge_label_matrix[j, i] = edge_label
-                edge_idx += 1
-    return edge_label_matrix
 
 
 @dataclass(frozen=True)
@@ -2285,6 +2258,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         feasibility_mask: Sequence[bool],
         candidate_slot_indices: Sequence[int],
         accepted_graphs_by_slot: List[Optional[nx.Graph]],
+        rng: Optional[np.random.Generator] = None,
     ) -> Tuple[int, int]:
         """Count all feasible candidates, then fill each empty slot with one random feasible graph."""
         return _accept_feasible_candidates_by_slot(
@@ -2292,6 +2266,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_mask=feasibility_mask,
             candidate_slot_indices=candidate_slot_indices,
             accepted_graphs_by_slot=accepted_graphs_by_slot,
+            rng=rng,
         )
 
     def _decode_generated_nodes(

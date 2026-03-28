@@ -1,6 +1,8 @@
 import re
 import time
 
+import logging
+
 from conditional_node_field_graph_generator.runtime_utils import _verbosity_level, timeit
 
 
@@ -25,14 +27,14 @@ def test_verbosity_level_handles_bool_and_int_and_missing():
     assert _verbosity_level(_Worker(verbose="3")) == 3
 
 
-def test_timeit_prints_only_at_verbose_level_3(capfd):
+def test_timeit_logs_only_at_verbose_level_3(caplog):
     quiet = _Worker(verbose=2)
-    assert quiet.compute(4) == 5
-    quiet_out = capfd.readouterr().out
-    assert quiet_out == ""
+    with caplog.at_level(logging.INFO):
+        assert quiet.compute(4) == 5
+    assert caplog.text == ""
 
     loud = _Worker(verbose=3)
-    assert loud.compute(9) == 10
-    loud_out = capfd.readouterr().out
-    assert "Function 'compute' executed in" in loud_out
-    assert re.search(r"Class '_Worker', Function 'compute' executed in", loud_out)
+    with caplog.at_level(logging.INFO):
+        assert loud.compute(9) == 10
+    assert "Function 'compute' executed in" in caplog.text
+    assert re.search(r"Class '_Worker', Function 'compute' executed in", caplog.text)

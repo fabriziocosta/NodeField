@@ -1,5 +1,7 @@
 """Node-level Conditional Node Field engine."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 import math
 from typing import List, Any, Optional, Tuple, Sequence, Union, Dict
@@ -1235,9 +1237,20 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                     f"accepted={int(getattr(progress_owner, 'stream_training_accepted_', 0)):>7d} "
                     f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0)):>7d} | "
                 )
+            trainer = getattr(self, "trainer", None)
+            current_epoch = int(getattr(trainer, "current_epoch", -1)) + 1 if trainer is not None else None
+            max_epochs = getattr(trainer, "max_epochs", None) if trainer is not None else None
+            epoch_prefix = ""
+            if current_epoch is not None and current_epoch > 0:
+                epoch_prefix = (
+                    f"epoch {current_epoch}/{max_epochs} | "
+                    if isinstance(max_epochs, int) and max_epochs > 0
+                    else f"epoch {current_epoch} | "
+                )
             verbose_log(
                 self,
-                "train batch "
+                epoch_prefix
+                + "train batch "
                 f"{batch_idx + 1:>4d}: "
                 f"{progress_prefix}"
                 f"total={float(total_loss.detach().cpu()):>10.4f} "
@@ -1375,34 +1388,6 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             if self.use_node_label_head:
                 self.log("val_node_label_ce", losses["label_ce"], on_step=False, on_epoch=True, batch_size=batch_size)
         return total_loss.detach()
-
-    def on_train_end(self):
-        if not self.verbose:
-            return
-        plot_metrics(
-            train_metrics={
-                "total": self.train_losses,
-                "deg_ce": self.train_deg_ce,
-                "node_field": self.train_node_field,
-                **({"exist": self.train_exist} if self.use_existence_head else {}),
-                **({"node_label_ce": self.train_node_label_ce} if self.use_node_label_head else {}),
-                **({"edge_label_ce": self.train_edge_label_ce} if self.use_edge_label_head else {}),
-                **({"edge_ce": self.train_edge_loss} if self.use_locality_supervision else {}),
-                **({"aux_locality": self.train_aux_edge_loss} if self.use_auxiliary_locality_supervision else {}),
-            },
-            val_metrics={
-                "total": self.val_losses,
-                "deg_ce": self.val_deg_ce,
-                "node_field": self.val_node_field,
-                **({"exist": self.val_exist} if self.use_existence_head else {}),
-                **({"node_label_ce": self.val_node_label_ce} if self.use_node_label_head else {}),
-                **({"edge_label_ce": self.val_edge_label_ce} if self.use_edge_label_head else {}),
-                **({"edge_ce": self.val_edge_loss} if self.use_locality_supervision else {}),
-                **({"aux_locality": self.val_aux_edge_loss} if self.use_auxiliary_locality_supervision else {}),
-            },
-            window=10,
-            alpha=0.3,
-        )
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.learning_rate)
@@ -3194,3 +3179,23 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             window=window,
             alpha=alpha,
         )
+
+
+def __getattr__(name: str):
+    """Lazily expose the graph generator from the node-generator module."""
+    if name == "ConditionalNodeFieldGraphGenerator":
+        from .conditional_node_field_graph_generator import ConditionalNodeFieldGraphGenerator
+
+        return ConditionalNodeFieldGraphGenerator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "ConditionalNodeGeneratorBase",
+    "ConditionalNodeFieldGenerator",
+    "ConditionalNodeFieldGraphGenerator",
+    "GeneratedNodeBatch",
+    "GraphConditioningBatch",
+    "GuidancePredictorMLP",
+    "NodeGenerationBatch",
+]
