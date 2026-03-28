@@ -2036,7 +2036,7 @@ def test_load_graph_generator_accepts_unsanitized_model_name(tmp_path):
     restored = load_graph_generator(generator.model_name, model_dir=tmp_path)
 
     assert isinstance(restored, ConditionalNodeFieldGraphGenerator)
-    assert restored.model_name == generator.model_name
+    assert restored.model_name == "zinc-streaming-n64-s0-05-w2048-b256-e5"
 
 
 def test_adj_mtx_to_targets_preserves_expected_locality_pairs():

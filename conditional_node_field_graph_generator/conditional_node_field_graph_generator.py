@@ -37,6 +37,7 @@ from .conditional_node_field_graph_decoder import (
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .input_sources import iter_selected_source_graphs
+from .naming_utils import sanitize_model_token
 from .graph_generator_state import (
     DecodePolicy,
     FeasibilityConfig,
@@ -360,7 +361,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.max_feasibility_attempts = int(max_feasibility_attempts)
         self.feasibility_candidates_per_attempt = int(feasibility_candidates_per_attempt)
         self.feasibility_failure_mode = str(feasibility_failure_mode)
-        self.model_name = model_name
+        self.model_name = None if model_name is None else sanitize_model_token(model_name)
         self.model_dir = model_dir
         self.warmup_schema_frozen_ = False
         if int(self.verbose) >= 1 and self.model_name is not None:

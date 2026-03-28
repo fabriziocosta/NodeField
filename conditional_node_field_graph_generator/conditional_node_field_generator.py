@@ -19,6 +19,7 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, Dataset, IterableDataset, TensorDataset
 
 from .metrics_visualization import plot_metrics
+from .naming_utils import sanitize_model_token
 from .runtime_utils import get_runtime_logger, verbose_log
 from .graph_generator_state import CheckpointPolicy, MetricsPolicy, TrainingPolicy
 from .training_coordinator import TrainingCoordinator
@@ -1692,7 +1693,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps if sampling_steps is not None else total_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
-        self.model_name = model_name
+        self.model_name = None if model_name is None else sanitize_model_token(model_name)
         self.model_dir = model_dir
         self.cfg_target_mode = self._normalize_cfg_target_mode(cfg_target_mode)
         self.cfg_condition_dropout_prob = float(cfg_condition_dropout_prob)

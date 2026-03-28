@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-import re
 
 import dill as pickle
 import pandas as pd
 
+from .naming_utils import sanitize_model_token
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
 from .runtime_utils import get_runtime_logger
 
@@ -25,12 +25,6 @@ except Exception:  # pragma: no cover
 
 def resolve_saved_generator_dir(model_dir=None):
     return _resolve_saved_generator_dir(model_dir=model_dir)
-
-
-def _sanitize_model_token(value: str) -> str:
-    token = re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
-    return token or "gg"
-
 
 def _restore_loaded_vectorizer_fit_state(graph_generator) -> None:
     """Repair legacy NSPPK-style fitted flags on trusted loaded generators."""
@@ -59,6 +53,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.oracle_use_edge_label_cuts = False
     if not hasattr(graph_generator, "stream_prefetch_batches"):
         graph_generator.stream_prefetch_batches = 2
+    if getattr(graph_generator, "model_name", None) is not None:
+        graph_generator.model_name = sanitize_model_token(graph_generator.model_name)
 
 
 def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
@@ -69,7 +65,7 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=T
     resolved_model_dir = model_dir if model_dir is not None else getattr(graph_generator, "model_dir", None)
     model_root = resolve_saved_generator_dir(model_dir=resolved_model_dir)
     graph_generator._persistence_schema_version = GRAPH_GENERATOR_PERSISTENCE_VERSION
-    stem = _sanitize_model_token(resolved_model_name)
+    stem = sanitize_model_token(resolved_model_name)
     filename = f"{stem}.pkl"
     path = model_root / filename
     with open(path, "wb") as handle:
@@ -110,7 +106,7 @@ def load_graph_generator(model_name, model_dir=None):
         names_to_try = {requested}
         if not requested.endswith(".pkl"):
             names_to_try.add(f"{requested}.pkl")
-        sanitized_stem = _sanitize_model_token(requested[:-4] if requested.endswith(".pkl") else requested)
+        sanitized_stem = sanitize_model_token(requested[:-4] if requested.endswith(".pkl") else requested)
         names_to_try.add(f"{sanitized_stem}.pkl")
         for candidate_name in names_to_try:
             candidate_path = model_root / candidate_name
