@@ -40,15 +40,19 @@ from .interpolation_utils import (
     scaled_slerp,
     scaled_slerp_average,
 )
+from .oracle_utils import (
+    Edge,
+    ForbiddenEdgeLabelAssignment,
+    ForbiddenNodeLabelAssignment,
+    NodeSet,
+    apply_oracle_edge_memory_penalty as _apply_oracle_edge_memory_penalty,
+    normalize_violating_node_sets as _normalize_violating_node_sets,
+    update_oracle_edge_memory as _update_oracle_edge_memory,
+)
 from .parallel_utils import _normalize_n_jobs, _parallel_map
 
 DEFAULT_DUMMY_NODE_LABEL = "__dummy_node_label__"
 logger = get_runtime_logger(__name__)
-Edge = Tuple[int, int]
-NodeSet = Tuple[int, ...]
-ForbiddenNodeLabelAssignment = Tuple[NodeSet, Tuple[Any, ...]]
-ForbiddenEdgeLabelAssignment = Tuple[Tuple[Edge, ...], Tuple[Any, ...]]
-_ORACLE_PROBABILITY_EPS = 1e-6
 _ORACLE_EDGE_EXISTENCE_WEIGHT = 1.0
 _ORACLE_NODE_LABEL_WEIGHT = 1.0
 _ORACLE_EDGE_LABEL_WEIGHT = 1.0
@@ -126,77 +130,6 @@ def _format_feasibility_attempt_status(
         f"attempt_time={_format_elapsed_seconds(attempt_elapsed_seconds):>8} | "
         f"eta={_format_elapsed_seconds(eta_seconds):>8}"
     )
-
-
-def _normalize_violating_node_sets(
-    node_sets: Iterable[Iterable[Any]],
-    *,
-    n_nodes: Optional[int] = None,
-) -> List[NodeSet]:
-    normalized: List[NodeSet] = []
-    seen: set[NodeSet] = set()
-    for node_set in node_sets:
-        canonical_nodes = []
-        for node in node_set:
-            try:
-                node_idx = int(node)
-            except (TypeError, ValueError):
-                continue
-            if n_nodes is not None and (node_idx < 0 or node_idx >= int(n_nodes)):
-                continue
-            canonical_nodes.append(node_idx)
-        canonical = tuple(sorted(set(canonical_nodes)))
-        if not canonical or canonical in seen:
-            continue
-        seen.add(canonical)
-        normalized.append(canonical)
-    return normalized
-
-
-def _apply_oracle_edge_memory_penalty(
-    prob_matrix: np.ndarray,
-    edge_violation_prior: np.ndarray,
-    penalty_weight: float,
-) -> np.ndarray:
-    """Penalize repeatedly violating edges in logit space for one decode trace."""
-    base_prob = np.clip(
-        np.asarray(prob_matrix, dtype=float),
-        _ORACLE_PROBABILITY_EPS,
-        1.0 - _ORACLE_PROBABILITY_EPS,
-    )
-    prior = np.maximum(np.asarray(edge_violation_prior, dtype=float), 0.0)
-    adjusted_logit = np.log(base_prob) - np.log1p(-base_prob) - float(penalty_weight) * prior
-    adjusted_prob = 1.0 / (1.0 + np.exp(-adjusted_logit))
-    adjusted_prob = np.asarray(adjusted_prob, dtype=float)
-    np.fill_diagonal(adjusted_prob, 0.0)
-    return np.clip(adjusted_prob, 0.0, 1.0)
-
-
-def _update_oracle_edge_memory(
-    edge_violation_prior: np.ndarray,
-    violating_edge_sets: Sequence[FrozenSet[Edge]],
-    *,
-    update_weight: float,
-    decay: float,
-    clip_value: float,
-) -> np.ndarray:
-    """Update one graph's temporary violation memory from newly observed bad edges."""
-    updated_prior = np.asarray(edge_violation_prior, dtype=float).copy()
-    updated_prior *= float(decay)
-    for edge_set in violating_edge_sets:
-        for edge in edge_set:
-            canonical_edge = _canonicalize_edge(edge)
-            if canonical_edge is None:
-                continue
-            i, j = canonical_edge
-            if i >= updated_prior.shape[0] or j >= updated_prior.shape[1]:
-                continue
-            updated_prior[i, j] += float(update_weight)
-            updated_prior[j, i] += float(update_weight)
-    np.fill_diagonal(updated_prior, 0.0)
-    if np.isfinite(float(clip_value)):
-        np.clip(updated_prior, 0.0, float(clip_value), out=updated_prior)
-    return updated_prior
 
 
 def _edge_label_matrix_to_list(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
