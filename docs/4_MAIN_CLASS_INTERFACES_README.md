@@ -1054,8 +1054,8 @@ Parameters:
   Decrease: cheaper warmup, but higher post-warmup rejection risk.
 
 - `batch_size`
-  Stream minibatch size.
-  It also defines the size of the fixed warmup validation subset.
+  Unified training batch size.
+  In `fit_from_stream(...)`, this same `batch_size` controls how many streamed graphs are grouped into each training batch, and it also defines the size of the fixed post-warmup validation subset.
 
 - `limit`
   Optional stream limit.

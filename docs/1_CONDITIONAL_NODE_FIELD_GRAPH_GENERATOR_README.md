@@ -252,6 +252,8 @@ flowchart TD
 
 `fit_from_stream(...)` uses a schema-frozen warmup and then trains from replayable streamed batches.
 
+`batch_size` keeps the same meaning as in the regular in-memory training path: it is the training batch size. In the streamed path, it is simply the number of compatible streamed graphs grouped into each optimization batch, and it also sets the size of the reserved validation batch.
+
 The flow is:
 
 1. read `warmup_size` graphs from the selected source,
