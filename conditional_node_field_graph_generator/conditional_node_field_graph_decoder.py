@@ -417,8 +417,10 @@ class ConditionalNodeFieldGraphDecoder(object):
         for g_idx, (adj_mtx, encodings) in enumerate(zip(adj_mtx_list, node_encodings_list)):
             n_nodes = adj_mtx.shape[0]
             graph = nx.from_numpy_array(adj_mtx, create_using=nx.Graph)
+            shortest_paths = dict(nx.all_pairs_shortest_path_length(graph, cutoff=horizon))
+            encodings = np.asarray(encodings, dtype=float)
             for i in range(n_nodes):
-                lengths = nx.single_source_shortest_path_length(graph, i, cutoff=horizon)
+                lengths = shortest_paths.get(i, {i: 0})
                 pos_neighbors = [j for j, dist in lengths.items() if j != i and dist <= horizon]
                 for j in pos_neighbors:
                     all_targets.append(1)
@@ -430,13 +432,18 @@ class ConditionalNodeFieldGraphDecoder(object):
                 num_neg_samples = int(round(negative_sample_factor * num_pos))
                 if num_neg_samples <= 0:
                     continue
-                candidate_indices = [k for k in range(n_nodes) if k != i and k not in lengths]
-                if not candidate_indices:
+                candidate_mask = np.ones(n_nodes, dtype=bool)
+                candidate_mask[i] = False
+                candidate_mask[list(lengths.keys())] = False
+                candidate_indices = np.flatnonzero(candidate_mask)
+                if candidate_indices.size == 0:
                     continue
-                distances = np.array([np.linalg.norm(encodings[i] - encodings[k]) for k in candidate_indices])
-                sorted_candidate_indices = np.argsort(distances)
-                selected_negatives = [candidate_indices[idx] for idx in sorted_candidate_indices[:num_neg_samples]]
+                candidate_vectors = encodings[candidate_indices]
+                distances = np.linalg.norm(candidate_vectors - encodings[i], axis=1)
+                sorted_candidate_indices = np.argsort(distances, kind="stable")
+                selected_negatives = candidate_indices[sorted_candidate_indices[:num_neg_samples]]
                 for k in selected_negatives:
+                    k = int(k)
                     all_targets.append(0)
                     all_pairs.append((g_idx, i, k))
                     if force_bi_directional_edges:

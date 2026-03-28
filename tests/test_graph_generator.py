@@ -2022,6 +2022,29 @@ def test_decoder_load_supports_legacy_dill_artifact(tmp_path):
     assert restored.degree_slack_penalty == pytest.approx(321.0)
 
 
+def test_adj_mtx_to_targets_preserves_expected_locality_pairs():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+    adj = [np.asarray([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=int)]
+    encodings = [np.asarray([[0.0], [1.0], [2.0]], dtype=float)]
+
+    targets, pairs = decoder.adj_mtx_to_targets(
+        adj,
+        encodings,
+        locality_sample_fraction=1.0,
+        negative_sample_factor=1,
+        force_bi_directional_edges=True,
+        is_training=False,
+        horizon=1,
+    )
+
+    assert targets.tolist().count(1) == 8
+    assert targets.tolist().count(0) == 4
+    assert pairs.count((0, 0, 1)) == 2
+    assert pairs.count((0, 0, 2)) == 2
+    assert pairs.count((0, 1, 0)) == 2
+    assert pairs.count((0, 1, 2)) == 2
+
+
 def test_optimize_adjacency_matrix_applies_forbidden_edge_set_cuts():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True)
     prob_matrix = np.asarray(
