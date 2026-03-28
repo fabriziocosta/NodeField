@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
@@ -149,8 +149,8 @@ class TrainingCoordinator:
                 ckpt_path=ckpt_path,
                 context=f"{owner.__class__.__name__}.fit_from_prebuilt_batches",
                 train_loader_length=1,
-                training_policy=replace(owner.training_policy_, suppress_non_batch_output=False),
-                checkpoint_policy=owner.checkpoint_policy_,
+                training_policy=owner._current_training_policy(suppress_non_batch_output=False),
+                checkpoint_policy=owner._current_checkpoint_policy(),
                 metrics_policy=owner.metrics_policy_,
                 snapshot_frequency="batch",
             )
@@ -197,8 +197,8 @@ class TrainingCoordinator:
             ckpt_path=ckpt_path,
             context=f"{owner.__class__.__name__}.fit",
             train_loader_length=len(train_loader),
-            training_policy=owner.training_policy_,
-            checkpoint_policy=owner.checkpoint_policy_,
+            training_policy=owner._current_training_policy(),
+            checkpoint_policy=owner._current_checkpoint_policy(),
             metrics_policy=owner.metrics_policy_,
             snapshot_frequency="epoch",
         )

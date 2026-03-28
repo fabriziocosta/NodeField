@@ -584,19 +584,8 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         if checkpoint_root_dir is None:
             checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "node_field")
         self.checkpoint_root_dir = str(checkpoint_root_dir)
-        self.training_policy_ = TrainingPolicy(
-            maximum_epochs=int(self.maximum_epochs),
-            early_stopping_monitor=self.early_stopping_monitor,
-            early_stopping_mode=self.early_stopping_mode,
-            enable_early_stopping=bool(self.enable_early_stopping),
-            early_stopping_patience=int(self.early_stopping_patience),
-            early_stopping_min_delta=float(self.early_stopping_min_delta),
-            suppress_non_batch_output=True,
-        )
-        self.checkpoint_policy_ = CheckpointPolicy(
-            restore_best_checkpoint=bool(self.restore_best_checkpoint),
-            checkpoint_root_dir=self.checkpoint_root_dir,
-        )
+        self.training_policy_ = self._current_training_policy()
+        self.checkpoint_policy_ = self._current_checkpoint_policy()
         self.metrics_policy_ = MetricsPolicy(plot_on_train_end=True)
         self.training_coordinator_ = TrainingCoordinator(self)
         self.important_feature_index = important_feature_index
@@ -1541,6 +1530,23 @@ class ConditionalNodeFieldModule(pl.LightningModule):
 
 class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
     """Scikit-learn friendly facade for a conditional node-field generator."""
+
+    def _current_training_policy(self, *, suppress_non_batch_output: bool = True) -> TrainingPolicy:
+        return TrainingPolicy(
+            maximum_epochs=int(self.maximum_epochs),
+            early_stopping_monitor=str(self.early_stopping_monitor),
+            early_stopping_mode=str(self.early_stopping_mode),
+            enable_early_stopping=bool(self.enable_early_stopping),
+            early_stopping_patience=int(self.early_stopping_patience),
+            early_stopping_min_delta=float(self.early_stopping_min_delta),
+            suppress_non_batch_output=bool(suppress_non_batch_output),
+        )
+
+    def _current_checkpoint_policy(self) -> CheckpointPolicy:
+        return CheckpointPolicy(
+            restore_best_checkpoint=bool(self.restore_best_checkpoint),
+            checkpoint_root_dir=str(self.checkpoint_root_dir),
+        )
 
     def __init__(
         self,
@@ -2502,19 +2508,10 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             ckpt_path=ckpt_path,
             context=context,
             train_loader_length=train_loader_length,
-            training_policy=TrainingPolicy(
-                maximum_epochs=int(self.maximum_epochs),
-                early_stopping_monitor=self.early_stopping_monitor,
-                early_stopping_mode=self.early_stopping_mode,
-                enable_early_stopping=bool(self.enable_early_stopping),
-                early_stopping_patience=int(self.early_stopping_patience),
-                early_stopping_min_delta=float(self.early_stopping_min_delta),
-                suppress_non_batch_output=bool(suppress_non_batch_output),
+            training_policy=self._current_training_policy(
+                suppress_non_batch_output=suppress_non_batch_output,
             ),
-            checkpoint_policy=CheckpointPolicy(
-                restore_best_checkpoint=bool(self.restore_best_checkpoint),
-                checkpoint_root_dir=self.checkpoint_root_dir,
-            ),
+            checkpoint_policy=self._current_checkpoint_policy(),
             metrics_policy=self.metrics_policy_,
             snapshot_frequency=snapshot_frequency,
         )
