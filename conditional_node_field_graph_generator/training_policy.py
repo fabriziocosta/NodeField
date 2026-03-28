@@ -12,6 +12,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 
 _LITLOGGER_TIP_SNIPPET = "For seamless cloud logging and experiment tracking"
+_SIGTERM_SNIPPET = "Received SIGTERM"
 
 
 class _SuppressLitLoggerTipFilter(logging.Filter):
@@ -23,12 +24,27 @@ class _SuppressLitLoggerTipFilter(logging.Filter):
         return _LITLOGGER_TIP_SNIPPET not in message
 
 
+class _SuppressLightningSigtermFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        return _SIGTERM_SNIPPET not in message
+
+
 def _install_lightning_log_filters() -> None:
-    logger = logging.getLogger("pytorch_lightning.utilities.rank_zero")
-    for existing_filter in logger.filters:
-        if isinstance(existing_filter, _SuppressLitLoggerTipFilter):
-            return
-    logger.addFilter(_SuppressLitLoggerTipFilter())
+    rank_zero_logger = logging.getLogger("pytorch_lightning.utilities.rank_zero")
+    signal_logger = logging.getLogger("pytorch_lightning.trainer.connectors.signal_connector")
+    for logger, filter_type in (
+        (rank_zero_logger, _SuppressLitLoggerTipFilter),
+        (signal_logger, _SuppressLightningSigtermFilter),
+    ):
+        for existing_filter in logger.filters:
+            if isinstance(existing_filter, filter_type):
+                break
+        else:
+            logger.addFilter(filter_type())
 
 
 @contextlib.contextmanager

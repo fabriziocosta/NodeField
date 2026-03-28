@@ -1231,19 +1231,19 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             progress_prefix = ""
             if progress_owner is not None:
                 progress_prefix = (
-                    f"seen={int(getattr(progress_owner, 'stream_seen_', 0))} "
-                    f"warmup={int(getattr(progress_owner, 'stream_warmup_count_', 0))} "
-                    f"train_seen={int(getattr(progress_owner, 'stream_training_seen_', 0))} "
-                    f"accepted={int(getattr(progress_owner, 'stream_training_accepted_', 0))} "
-                    f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0))} | "
+                    f"seen={int(getattr(progress_owner, 'stream_seen_', 0)):>7d} "
+                    f"warmup={int(getattr(progress_owner, 'stream_warmup_count_', 0)):>6d} "
+                    f"train_seen={int(getattr(progress_owner, 'stream_training_seen_', 0)):>7d} "
+                    f"accepted={int(getattr(progress_owner, 'stream_training_accepted_', 0)):>7d} "
+                    f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0)):>7d} | "
                 )
             print(
                 "train batch "
-                f"{batch_idx + 1}: "
+                f"{batch_idx + 1:>4d}: "
                 f"{progress_prefix}"
-                f"total={float(total_loss.detach().cpu()):.4f} "
-                f"node_field={float(losses['node_field'].detach().cpu()):.4f} "
-                f"deg={float(losses['deg_ce'].detach().cpu()):.4f}"
+                f"total={float(total_loss.detach().cpu()):>10.4f} "
+                f"node_field={float(losses['node_field'].detach().cpu()):>10.4f} "
+                f"deg={float(losses['deg_ce'].detach().cpu()):>8.4f}"
             )
         return total_loss
 
