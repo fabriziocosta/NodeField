@@ -715,9 +715,16 @@ Returns:
 
 This class reconstructs final `networkx.Graph` objects from node-level predictions.
 
-Primary implementation:
+Canonical implementation and export:
 
-- [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py)
+- [`../conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py)
+- re-exported from [`../conditional_node_field_graph_generator/__init__.py`](../conditional_node_field_graph_generator/__init__.py)
+
+Preferred import:
+
+```python
+from conditional_node_field_graph_generator import ConditionalNodeFieldGraphDecoder
+```
 
 ### Constructor
 

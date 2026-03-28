@@ -430,7 +430,14 @@ def _decode_single_adjacency_job_star(args) -> np.ndarray:
 
 
 class ConditionalNodeFieldGraphDecoder(object):
-    """Graph decoder that turns generator outputs into final NetworkX graphs."""
+    """Decode node-field predictions into final ``networkx.Graph`` objects.
+
+    This is the canonical decoder implementation exported by
+    ``conditional_node_field_graph_generator``. It owns the structural MILP
+    projection, optional connectivity enforcement, locality-supervision helpers,
+    and the final node/edge label attachment used by
+    ``ConditionalNodeFieldGraphGenerator``.
+    """
 
     def __init__(
         self,

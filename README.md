@@ -165,6 +165,10 @@ from conditional_node_field_graph_generator import (
 )
 ```
 
+`ConditionalNodeFieldGraphDecoder` is the standalone decoder implementation in
+[`conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py`](conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py)
+and is re-exported from the package root for normal use.
+
 Typical high-level workflow:
 1. Prepare graphs (`networkx.Graph`) with node/edge labels as needed.
 2. Build vectorizers for graph-level and node-level embeddings.

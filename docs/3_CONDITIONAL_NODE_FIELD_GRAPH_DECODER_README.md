@@ -12,12 +12,21 @@ The key idea is:
     `violating_edge_sets(...)`,
   - after decode as a post-hoc accept or reject filter through `predict(...)`.
 
-The implementation lives mainly in
+The canonical decoder implementation lives in
+[`../conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py).
+
+The graph generator orchestrates around that decoder in
 [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py),
-inside:
+mainly through:
 
 - `ConditionalNodeFieldGraphDecoder`
 - `ConditionalNodeFieldGraphGenerator._decode_*`
+
+Public imports should therefore use:
+
+```python
+from conditional_node_field_graph_generator import ConditionalNodeFieldGraphDecoder
+```
 
 For the full interface reference, see
 [`4_MAIN_CLASS_INTERFACES_README.md`](4_MAIN_CLASS_INTERFACES_README.md).
