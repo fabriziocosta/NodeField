@@ -1121,12 +1121,31 @@ class ConditionalNodeFieldGraphGenerator(object):
                     else np.asarray([], dtype=object),
                 )
             )
-            single_adj_mtx = self.graph_decoder.decode_adjacency_matrix(
-                single_generated_nodes,
-                predicted_edge_probability_matrices=[predicted_edge_probability_matrices[graph_idx]],
-                desired_node_counts=None if desired_node_count is None else [desired_node_count],
-                desired_edge_counts=None if desired_edge_count is None else [desired_edge_count],
-            )[0]
+            try:
+                single_adj_mtx = self.graph_decoder.decode_adjacency_matrix(
+                    single_generated_nodes,
+                    predicted_edge_probability_matrices=[predicted_edge_probability_matrices[graph_idx]],
+                    desired_node_counts=None if desired_node_count is None else [desired_node_count],
+                    desired_edge_counts=None if desired_edge_count is None else [desired_edge_count],
+                )[0]
+            except RuntimeError as exc:
+                if int(self.verbose) >= 1:
+                    verbose_log(
+                        self,
+                        "Oracle initial adjacency decode failed under connectivity constraints; "
+                        "retrying with connectivity disabled for the seed solve.",
+                    )
+                try:
+                    single_adj_mtx = self.graph_decoder.optimize_adjacency_matrix(
+                        masked_prob_matrix,
+                        target_degrees,
+                        target_edge_count=desired_edge_count,
+                        connectivity=False,
+                    )
+                except Exception as fallback_exc:
+                    raise RuntimeError(
+                        "Oracle initial adjacency decode failed before any oracle cuts could be applied."
+                    ) from fallback_exc
             accumulated_structural_cuts: List[FrozenSet[Edge]] = []
             accumulated_node_label_forbidden: List[ForbiddenNodeLabelAssignment] = []
             accumulated_edge_label_forbidden: List[ForbiddenEdgeLabelAssignment] = []

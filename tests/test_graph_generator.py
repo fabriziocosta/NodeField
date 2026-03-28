@@ -12,6 +12,10 @@ from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
 import conditional_node_field_graph_generator.parallel_utils as parallel_utils
+from conditional_node_field_graph_generator.persistence import (
+    load_graph_generator,
+    save_graph_generator,
+)
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
@@ -2022,6 +2026,19 @@ def test_decoder_load_supports_legacy_dill_artifact(tmp_path):
     assert restored.degree_slack_penalty == pytest.approx(321.0)
 
 
+def test_load_graph_generator_accepts_unsanitized_model_name(tmp_path):
+    generator = _make_fitted_sampling_generator()
+    generator.model_name = "zinc-streaming-n64-s0.05-w2048-b256-e5"
+
+    filename = save_graph_generator(generator, model_dir=tmp_path, log=False)
+    assert filename == "zinc-streaming-n64-s0-05-w2048-b256-e5.pkl"
+
+    restored = load_graph_generator(generator.model_name, model_dir=tmp_path)
+
+    assert isinstance(restored, ConditionalNodeFieldGraphGenerator)
+    assert restored.model_name == generator.model_name
+
+
 def test_adj_mtx_to_targets_preserves_expected_locality_pairs():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
     adj = [np.asarray([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=int)]
@@ -2374,6 +2391,80 @@ def test_oracle_candidate_score_prefers_higher_probability_feasible_labels():
     )
 
     assert score_high > score_low
+
+
+def test_oracle_candidate_score_components_smoke_uses_probability_eps_after_refactor():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.node_label_to_index_ = {"C": 0}
+    generator.edge_label_to_index_ = {"-": 0}
+
+    total, edge_score, node_score, edge_label_score = generator._oracle_candidate_score_components(
+        existence_mask=np.asarray([True, True], dtype=bool),
+        adj_mtx=np.asarray([[0, 1], [1, 0]], dtype=float),
+        node_labels=np.asarray(["C", "C"], dtype=object),
+        edge_label_matrix=np.asarray([[None, "-"], ["-", None]], dtype=object),
+        edge_probability_matrix=np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=float),
+        node_label_probabilities=np.asarray([[1.0], [1.0]], dtype=float),
+        edge_label_probabilities=np.asarray(
+            [
+                [[1.0], [1.0]],
+                [[1.0], [1.0]],
+            ],
+            dtype=float,
+        ),
+    )
+
+    assert np.isfinite(total)
+    assert np.isfinite(edge_score)
+    assert np.isfinite(node_score)
+    assert np.isfinite(edge_label_score)
+
+
+def test_decode_generated_nodes_with_oracle_falls_back_when_initial_seed_decode_fails(monkeypatch):
+    estimator = _OracleOnceEstimator([[]])
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True)
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_decoder=decoder,
+        feasibility_estimator=estimator,
+        verbose=False,
+    )
+
+    def _fail_initial_decode(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("initial connected seed solve failed")
+
+    optimize_calls = []
+
+    def _fake_optimize(
+        self,
+        prob_matrix,
+        target_degrees,
+        target_edge_count=None,
+        timeLimit=60,
+        verbose=False,
+        alpha=0.7,
+        connectivity=None,
+        forbidden_edge_sets=None,
+    ):
+        del self, target_degrees, target_edge_count, timeLimit, verbose, alpha, forbidden_edge_sets
+        optimize_calls.append(connectivity)
+        n = prob_matrix.shape[0]
+        adj = np.zeros((n, n), dtype=int)
+        if n >= 2:
+            for i in range(n - 1):
+                adj[i, i + 1] = 1
+                adj[i + 1, i] = 1
+        return adj
+
+    monkeypatch.setattr(decoder, "decode_adjacency_matrix", _fail_initial_decode)
+    monkeypatch.setattr(ConditionalNodeFieldGraphDecoder, "optimize_adjacency_matrix", _fake_optimize)
+
+    decoded = generator._decode_generated_nodes(_oracle_generated_batch())
+
+    assert len(decoded) == 1
+    assert decoded[0].number_of_nodes() > 0
+    assert optimize_calls
+    assert optimize_calls[0] is False
 
 
 def test_decode_generated_nodes_reruns_joint_label_repair_after_structural_change(monkeypatch):
