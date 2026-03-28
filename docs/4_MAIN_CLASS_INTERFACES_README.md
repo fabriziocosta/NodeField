@@ -1096,6 +1096,10 @@ Full-generator persistence during training:
 - regular `fit(...)`: if `model_name` is set, the full graph generator is snapshotted once per validation epoch
 - `fit_from_stream(...)`: if `model_name` is set, the full graph generator is snapshotted after each streamed training batch
 
+Persistence note:
+
+- `conditional_node_field_graph_generator.persistence.load_graph_generator(...)` resolves both the persisted filename and the original unsanitized `model_name` form used during save time, so notebook code does not need to manually mirror filename sanitization.
+
 #### `encode(...)`
 
 ```python

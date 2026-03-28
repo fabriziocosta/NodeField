@@ -66,7 +66,13 @@ The repository includes:
 NodeField/
 ├── conditional_node_field_graph_generator/
 │   ├── conditional_node_field_generator.py
+│   ├── conditional_node_field_graph_decoder.py
 │   ├── conditional_node_field_graph_generator.py
+│   ├── feasibility_utils.py
+│   ├── graph_generator_state.py
+│   ├── interpolation_utils.py
+│   ├── oracle_utils.py
+│   ├── persistence.py
 │   ├── extensions/
 │   ├── metrics_collection.py
 │   ├── metrics_visualization.py
@@ -104,7 +110,25 @@ Key paths:
   Node-level generator implementation, batch dataclasses, sampling logic, and support for CFG and separate post-hoc guidance.
 
 - `conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`
-  High-level graph generator, supervision assembly, decode orchestration, and graph-level sampling helpers.
+  High-level graph generator and orchestration layer. It coordinates vectorizers, supervision planning, node-model training and inference, feasibility retries, and decoder calls.
+
+- `conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py`
+  Decoder implementation responsible for structural reconstruction, adjacency ILP solves, node and edge label attachment, and edge-supervision helpers.
+
+- `conditional_node_field_graph_generator/interpolation_utils.py`
+  Shared interpolation helpers used by graph-conditioning sampling and notebook-facing interpolation workflows.
+
+- `conditional_node_field_graph_generator/oracle_utils.py`
+  Shared oracle helper types and functions for oracle-guided decode traces, violation-set normalization, and temporary edge-memory penalties.
+
+- `conditional_node_field_graph_generator/graph_generator_state.py`
+  Dataclasses for grouped graph-generator configuration and mutable streaming-fit state.
+
+- `conditional_node_field_graph_generator/feasibility_utils.py`
+  Small formatting helpers used by the feasibility retry loop and logging path.
+
+- `conditional_node_field_graph_generator/persistence.py`
+  Save/load helpers for full fitted graph generators, including schema validation and saved-generator name resolution.
 
 - `conditional_node_field_graph_generator/extensions/`
   Optional extension layers for demo workflows and synthetic/artificial graph utilities.
@@ -180,6 +204,8 @@ Typical high-level workflow:
 If training is interrupted, you can resume the training state by passing `ckpt_path=...` to `.fit(...)`, provided you point to a compatible Lightning checkpoint written under the configured checkpoint root. Incompatible checkpoints now fail explicitly instead of silently restarting from scratch.
 
 By default, `.sample(...)` reuses cached graph-level conditioning rows from the training set. It can also be configured to stochastically interpolate between pairs of cached training embeddings in graph-conditioning space, with the same interpolation coefficient applied to graph embeddings, node counts, and edge counts.
+
+Full-generator persistence lives in `conditional_node_field_graph_generator.persistence`. `load_graph_generator(...)` accepts either the persisted filename or the original unsanitized `model_name` used during saving, so names containing characters such as `.` still resolve correctly after filename sanitization.
 
 When guidance targets are available, sampling can also use classifier-free conditioning through
 `desired_target` and `guidance_scale`. The detailed mechanics are documented in

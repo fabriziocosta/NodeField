@@ -5,6 +5,11 @@ This document explains the architecture of `ConditionalNodeFieldGraphGenerator`,
 Implementation anchors:
 
 - [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py)
+- [`../conditional_node_field_graph_generator/graph_generator_state.py`](../conditional_node_field_graph_generator/graph_generator_state.py)
+- [`../conditional_node_field_graph_generator/interpolation_utils.py`](../conditional_node_field_graph_generator/interpolation_utils.py)
+- [`../conditional_node_field_graph_generator/oracle_utils.py`](../conditional_node_field_graph_generator/oracle_utils.py)
+- [`../conditional_node_field_graph_generator/feasibility_utils.py`](../conditional_node_field_graph_generator/feasibility_utils.py)
+- [`../conditional_node_field_graph_generator/persistence.py`](../conditional_node_field_graph_generator/persistence.py)
 - [`../conditional_node_field_graph_generator/conditional_node_field_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_generator.py)
 - [`3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md`](3_CONDITIONAL_NODE_FIELD_GRAPH_DECODER_README.md)
 - [`2_CONDITIONAL_NODE_FIELD_README.md`](2_CONDITIONAL_NODE_FIELD_README.md)
@@ -28,6 +33,30 @@ It is responsible for:
 7. optionally filtering decoded graphs with a feasibility estimator.
 
 It is not itself the neural model and it is not itself the combinatorial decoder. It is the layer that binds those parts into one end-to-end graph pipeline.
+
+## Current Module Split
+
+The maintained implementation is no longer just one monolithic orchestration file.
+
+- `conditional_node_field_graph_generator.py`
+  owns the public `ConditionalNodeFieldGraphGenerator` class and the end-to-end orchestration flow.
+
+- `graph_generator_state.py`
+  groups long-lived generator configuration and mutable streamed-fit counters into dedicated dataclasses.
+
+- `interpolation_utils.py`
+  owns graph-conditioning interpolation primitives such as magnitude-aware spherical interpolation and integer count interpolation.
+
+- `oracle_utils.py`
+  owns oracle-specific helper types and pure functions such as violating-node-set normalization and temporary edge-memory penalties.
+
+- `feasibility_utils.py`
+  owns retry-loop formatting helpers used only for feasibility-attempt reporting.
+
+- `persistence.py`
+  owns full-generator save/load behavior, schema checks, and saved-generator name resolution.
+
+The class is still large, but the support logic is now split into smaller modules with clearer ownership.
 
 ## Main Components
 
@@ -501,6 +530,10 @@ upgraded on load when possible so older demo feasibility-estimator composites
 pick up the masked interface and the default adaptive oracle-cut policy without
 requiring notebook changes.
 
+When resolving a saved generator, the persistence helper also accepts the
+original unsanitized model name used at save time. This matters for names that
+contain characters such as `.` which are normalized in persisted filenames.
+
 ### `sample(n_samples, ...)`
 
 Sample graph-level conditions from cached training conditioning, then decode them.
@@ -611,6 +644,8 @@ The main tradeoffs are also clear.
 - how the node generator should be configured.
 
 That makes it powerful, but also means it is not yet a thin orchestration layer.
+That remains true even after extracting helper, state, and persistence support
+into smaller modules.
 
 ### Structural Quality Depends On Two Models
 
