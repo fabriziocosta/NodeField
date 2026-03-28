@@ -3122,11 +3122,27 @@ class ConditionalNodeFieldGraphGenerator(object):
         Returns:
             NodeGenerationBatch: Computed result.
         """
-        max_num_rows = max(emb.shape[0] for emb in node_embeddings_list)
+        frozen_num_rows = None
+        if self.conditional_node_generator_model is not None:
+            frozen_num_rows = getattr(
+                self.conditional_node_generator_model,
+                "number_of_rows_per_example",
+                None,
+            )
+        max_num_rows = (
+            int(frozen_num_rows)
+            if frozen_num_rows is not None
+            else max(emb.shape[0] for emb in node_embeddings_list)
+        )
         node_presence_mask = np.zeros((len(graphs), max_num_rows), dtype=bool)
         node_degree_targets = np.zeros((len(graphs), max_num_rows), dtype=np.int64)
         for graph_idx, graph in enumerate(graphs):
             nodes = list(graph.nodes())
+            if len(nodes) > max_num_rows:
+                raise ValueError(
+                    "Graph exceeds the configured number_of_rows_per_example "
+                    f"({len(nodes)} > {max_num_rows})."
+                )
             node_presence_mask[graph_idx, :len(nodes)] = True
             node_degree_targets[graph_idx, :len(nodes)] = np.asarray(
                 [graph.degree(node) for node in nodes],

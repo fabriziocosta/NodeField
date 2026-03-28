@@ -610,8 +610,10 @@ def test_fit_from_stream_accepts_smiles_csv_source(tmp_path):
 
     assert generator.stream_warmup_count_ == 1
     assert generator.stream_training_seen_ == 2
-    assert generator.stream_training_accepted_ == 2
-    assert node_model.fit_from_prebuilt_batches_calls[0]["warmup_graphs"] == 1
+    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_training_skipped_ == 2
+    assert generator.stream_skipped_too_large_ == 2
+    assert node_model.fit_from_prebuilt_batches_calls == []
 
 
 def test_graph_generator_logs_model_name_when_verbose(caplog):
