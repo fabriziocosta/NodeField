@@ -48,6 +48,12 @@ from .oracle_decode import (
     sample_oracle_cuts_for_iteration as _sample_oracle_cuts_for_iteration,
     solve_oracle_relaxed_adjacency as _solve_oracle_relaxed_adjacency,
 )
+from .decode_preparation import (
+    build_single_generated_node_batch as _build_single_generated_node_batch,
+    decode_generated_nodes as _decode_generated_nodes,
+    resolve_predicted_edge_labels as _resolve_predicted_edge_labels,
+    resolve_predicted_node_labels as _resolve_predicted_node_labels,
+)
 from .interpolation_utils import (
     interpolate_integer_series as _interpolate_integer_series,
     scaled_slerp,
@@ -549,57 +555,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         return hasattr(self.feasibility_estimator, "violating_edge_sets")
 
     def _build_single_generated_node_batch(self, generated_nodes: GeneratedNodeBatch, graph_idx: int) -> GeneratedNodeBatch:
-        node_embeddings_list = None if generated_nodes.node_embeddings_list is None else [
-            np.asarray(generated_nodes.node_embeddings_list[graph_idx])
-        ]
-        node_presence_mask = None if generated_nodes.node_presence_mask is None else np.asarray(
-            [generated_nodes.node_presence_mask[graph_idx]]
-        )
-        node_existence_probabilities = None if generated_nodes.node_existence_probabilities is None else np.asarray(
-            [generated_nodes.node_existence_probabilities[graph_idx]],
-            dtype=float,
-        )
-        node_degree_predictions = None if generated_nodes.node_degree_predictions is None else np.asarray(
-            [generated_nodes.node_degree_predictions[graph_idx]]
-        )
-        node_labels = None if generated_nodes.node_labels is None else [
-            np.asarray(generated_nodes.node_labels[graph_idx], dtype=object)
-        ]
-        edge_probability_matrices = None if generated_nodes.edge_probability_matrices is None else [
-            np.asarray(generated_nodes.edge_probability_matrices[graph_idx], dtype=float)
-        ]
-        edge_label_matrices = None if generated_nodes.edge_label_matrices is None else [
-            np.asarray(generated_nodes.edge_label_matrices[graph_idx], dtype=object)
-        ]
-        node_label_logits = None if generated_nodes.node_label_logits is None else [
-            np.asarray(generated_nodes.node_label_logits[graph_idx], dtype=float)
-        ]
-        node_label_probabilities = None if generated_nodes.node_label_probabilities is None else [
-            np.asarray(generated_nodes.node_label_probabilities[graph_idx], dtype=float)
-        ]
-        edge_existence_probabilities = None if generated_nodes.edge_existence_probabilities is None else [
-            np.asarray(generated_nodes.edge_existence_probabilities[graph_idx], dtype=float)
-        ]
-        edge_label_logits = None if generated_nodes.edge_label_logits is None else [
-            np.asarray(generated_nodes.edge_label_logits[graph_idx], dtype=float)
-        ]
-        edge_label_probabilities = None if generated_nodes.edge_label_probabilities is None else [
-            np.asarray(generated_nodes.edge_label_probabilities[graph_idx], dtype=float)
-        ]
-        return GeneratedNodeBatch(
-            node_embeddings_list=node_embeddings_list,
-            node_presence_mask=node_presence_mask,
-            node_degree_predictions=node_degree_predictions,
-            node_labels=node_labels,
-            node_existence_probabilities=node_existence_probabilities,
-            edge_probability_matrices=edge_probability_matrices,
-            edge_label_matrices=edge_label_matrices,
-            node_label_logits=node_label_logits,
-            node_label_probabilities=node_label_probabilities,
-            edge_existence_probabilities=edge_existence_probabilities,
-            edge_label_logits=edge_label_logits,
-            edge_label_probabilities=edge_label_probabilities,
-        )
+        return _build_single_generated_node_batch(generated_nodes, graph_idx)
 
     def _oracle_candidate_score_components(
         self,
@@ -1187,27 +1143,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         generated_nodes: GeneratedNodeBatch,
     ) -> List[np.ndarray]:
         """Resolve node labels from explicit predictions or orchestration policy."""
-        node_label_plan = self._plan_channel("node_labels")
-        if generated_nodes.node_labels is not None:
-            return [np.asarray(node_labels, dtype=object) for node_labels in generated_nodes.node_labels]
-        if generated_nodes.node_presence_mask is None:
-            raise RuntimeError("Node-label resolution requires node_presence_mask predictions.")
-        if node_label_plan is None:
-            return [
-                np.asarray([None] * len(node_presence_mask), dtype=object)
-                for node_presence_mask in generated_nodes.node_presence_mask
-            ]
-        if node_label_plan.mode == "constant":
-            return [
-                np.asarray([node_label_plan.constant_value] * len(node_presence_mask), dtype=object)
-                for node_presence_mask in generated_nodes.node_presence_mask
-            ]
-        if node_label_plan.mode == "disabled":
-            return [
-                np.asarray([None] * len(node_presence_mask), dtype=object)
-                for node_presence_mask in generated_nodes.node_presence_mask
-            ]
-        raise RuntimeError("Node-label channel is configured as learned, but the generator returned no node labels.")
+        return _resolve_predicted_node_labels(self, generated_nodes)
 
     def _resolve_predicted_edge_labels(
         self,
@@ -1215,29 +1151,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         predicted_edge_probability_matrices: Optional[List[np.ndarray]],
     ) -> Tuple[Optional[List[np.ndarray]], Optional[List[np.ndarray]]]:
         """Resolve edge labels from explicit predictions or orchestration policy."""
-        edge_label_plan = self._plan_channel("edge_labels")
-        if generated_nodes.edge_label_matrices is not None:
-            return None, [np.asarray(edge_label_matrix, dtype=object) for edge_label_matrix in generated_nodes.edge_label_matrices]
-        if predicted_edge_probability_matrices is None:
-            raise RuntimeError("Edge-label resolution requires edge probabilities to determine decoded edge counts.")
-        if edge_label_plan is None:
-            return [np.asarray([], dtype=object) for _ in predicted_edge_probability_matrices], None
-        if edge_label_plan.mode == "constant":
-            predicted_edge_label_matrices = []
-            for prob_matrix in predicted_edge_probability_matrices:
-                prob_matrix = np.asarray(prob_matrix)
-                if prob_matrix.ndim != 2 or prob_matrix.shape[0] != prob_matrix.shape[1]:
-                    raise ValueError(
-                        "Constant edge-label resolution expects square edge-probability matrices "
-                        f"(got shape={prob_matrix.shape})."
-                    )
-                edge_label_matrix = np.full(prob_matrix.shape, edge_label_plan.constant_value, dtype=object)
-                np.fill_diagonal(edge_label_matrix, None)
-                predicted_edge_label_matrices.append(edge_label_matrix)
-            return None, predicted_edge_label_matrices
-        if edge_label_plan.mode == "disabled":
-            return [np.asarray([], dtype=object) for _ in predicted_edge_probability_matrices], None
-        raise RuntimeError("Edge-label channel is configured as learned, but the generator returned no edge labels.")
+        return _resolve_predicted_edge_labels(
+            self,
+            generated_nodes,
+            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+        )
 
     def toggle_verbose(self) -> None:
         """Flip verbosity for this instance and any nested generators.
@@ -2383,32 +2301,12 @@ class ConditionalNodeFieldGraphGenerator(object):
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
     ) -> List[nx.Graph]:
-        if self._can_use_feasibility_oracle(
+        return _decode_generated_nodes(
+            self,
+            generated_nodes,
+            graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
-        ):
-            return self._decode_generated_nodes_with_oracle(
-                generated_nodes,
-                graph_conditioning=graph_conditioning,
-            )
-        predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
-        if predicted_edge_probability_matrices is None:
-            raise RuntimeError(
-                "Graph decoding requires explicit edge-probability matrices from the conditional node generator."
-            )
-        predicted_node_labels_list = self._resolve_predicted_node_labels(generated_nodes)
-        predicted_edge_labels_list, predicted_edge_label_matrices = self._resolve_predicted_edge_labels(
-            generated_nodes,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-        )
-        return self.graph_decoder.decode(
-            generated_nodes,
-            predicted_node_labels_list=predicted_node_labels_list,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-            predicted_edge_labels_list=predicted_edge_labels_list,
-            predicted_edge_label_matrices=predicted_edge_label_matrices,
-            desired_node_counts=None if graph_conditioning is None else np.asarray(graph_conditioning.node_counts, dtype=int),
-            desired_edge_counts=None if graph_conditioning is None else np.asarray(graph_conditioning.edge_counts, dtype=int),
         )
 
     def _predict_generated_nodes(
