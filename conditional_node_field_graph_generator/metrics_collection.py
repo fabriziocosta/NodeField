@@ -6,6 +6,10 @@ import time
 import pytorch_lightning as pl
 import torch
 
+from .runtime_utils import get_runtime_logger
+
+logger = get_runtime_logger(__name__)
+
 
 class MetricsLogger(pl.callbacks.Callback):
     """Collect end-of-epoch metrics into the module's history lists."""
@@ -241,15 +245,15 @@ class MetricsLogger(pl.callbacks.Callback):
                         rows[-1] += f" | dominant={dominant_label} [{_format_share(dominant_share)}]"
                     return rows
 
-                print(f"{epoch_label}:")
+                logger.info("%s:", epoch_label)
                 train_rows = _format_row("train", train_total, train_map, train_dominant, train_dominant_share)
                 val_rows = _format_row("val", val_total, val_map, val_dominant, val_dominant_share)
                 block_count = max(len(train_rows), len(val_rows))
                 for block_index in range(block_count):
                     if block_index < len(train_rows):
-                        print("  " + train_rows[block_index])
+                        logger.info("  %s", train_rows[block_index])
                     if block_index < len(val_rows):
-                        print("  " + val_rows[block_index])
+                        logger.info("  %s", val_rows[block_index])
 
 
 class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):

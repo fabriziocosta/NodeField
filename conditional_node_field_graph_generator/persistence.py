@@ -20,7 +20,7 @@ try:
     from IPython.display import display
 except Exception:  # pragma: no cover
     def display(obj):  # type: ignore
-        print(obj)
+        logger.info("%s", obj)
 
 
 def resolve_saved_generator_dir(model_dir=None):

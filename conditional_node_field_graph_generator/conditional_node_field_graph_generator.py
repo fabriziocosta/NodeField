@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 import inspect
 import logging
-import time
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -35,9 +34,14 @@ from .graph_generator_state import (
     OracleConfig,
     StreamFitStats,
 )
-from .feasibility_utils import (
-    format_elapsed_seconds as _format_elapsed_seconds,
-    format_feasibility_attempt_status as _format_feasibility_attempt_status,
+from .decode_pipeline import (
+    accept_feasible_candidates_by_slot as _accept_feasible_candidates_by_slot,
+    decode_with_feasibility_slots_core as _decode_with_feasibility_slots_core,
+    finalize_feasibility_graphs as _finalize_feasibility_graphs,
+    log_feasibility_attempt as _log_feasibility_attempt,
+    log_feasibility_summary as _log_feasibility_summary,
+    score_feasible_rate as _score_feasible_rate,
+    should_apply_feasibility_filtering as _should_apply_feasibility_filtering,
 )
 from .interpolation_utils import (
     interpolate_integer_series as _interpolate_integer_series,
@@ -2850,23 +2854,12 @@ class ConditionalNodeFieldGraphGenerator(object):
         accepted_graphs_by_slot: List[Optional[nx.Graph]],
     ) -> Tuple[int, int]:
         """Count all feasible candidates, then fill each empty slot with one random feasible graph."""
-        feasible_candidates_by_slot: Dict[int, List[nx.Graph]] = {}
-        feasible_candidate_count = 0
-        for graph, is_feasible, slot_idx in zip(decoded_graphs, feasibility_mask, candidate_slot_indices):
-            if not is_feasible:
-                continue
-            feasible_candidate_count += 1
-            if accepted_graphs_by_slot[slot_idx] is None:
-                feasible_candidates_by_slot.setdefault(slot_idx, []).append(graph)
-
-        filled_now = 0
-        for slot_idx, graphs_for_slot in feasible_candidates_by_slot.items():
-            if not graphs_for_slot or accepted_graphs_by_slot[slot_idx] is not None:
-                continue
-            selected_idx = int(np.random.randint(len(graphs_for_slot)))
-            accepted_graphs_by_slot[slot_idx] = graphs_for_slot[selected_idx]
-            filled_now += 1
-        return feasible_candidate_count, filled_now
+        return _accept_feasible_candidates_by_slot(
+            decoded_graphs=decoded_graphs,
+            feasibility_mask=feasibility_mask,
+            candidate_slot_indices=candidate_slot_indices,
+            accepted_graphs_by_slot=accepted_graphs_by_slot,
+        )
 
     def _decode_generated_nodes(
         self,
@@ -3364,11 +3357,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self,
         apply_feasibility_filtering: Optional[bool],
     ) -> bool:
-        return (
-            self.use_feasibility_filtering
-            if apply_feasibility_filtering is None
-            else bool(apply_feasibility_filtering)
-        )
+        return _should_apply_feasibility_filtering(self, apply_feasibility_filtering)
 
     def _log_feasibility_attempt(
         self,
@@ -3383,31 +3372,17 @@ class ConditionalNodeFieldGraphGenerator(object):
         attempt_started_at: float,
         feasibility_started_at: float,
     ) -> None:
-        if int(self.verbose) < 1:
-            return
-        pending_now = len(rejected_slot_indices)
-        filled_total = sum(graph is not None for graph in accepted_graphs_by_slot)
-        missing_total = len(graph_conditioning) - filled_total
-        attempted_total = len(decoded_graphs)
-        acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
-        attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
-        total_elapsed_seconds = time.perf_counter() - feasibility_started_at
-        verbose_log(
+        _log_feasibility_attempt(
             self,
-            _format_feasibility_attempt_status(
-                attempt=attempt,
-                max_attempts=self.max_feasibility_attempts,
-                attempted_total=attempted_total,
-                feasible_now=feasible_now,
-                filled_now=filled_now,
-                pending_now=pending_now,
-                acceptance_rate=acceptance_rate,
-                filled_total=filled_total,
-                missing_total=missing_total,
-                attempt_elapsed_seconds=attempt_elapsed_seconds,
-                total_elapsed_seconds=total_elapsed_seconds,
-            ),
-            level=1,
+            graph_conditioning=graph_conditioning,
+            accepted_graphs_by_slot=accepted_graphs_by_slot,
+            rejected_slot_indices=rejected_slot_indices,
+            decoded_graphs=decoded_graphs,
+            feasible_now=feasible_now,
+            filled_now=filled_now,
+            attempt=attempt,
+            attempt_started_at=attempt_started_at,
+            feasibility_started_at=feasibility_started_at,
         )
 
     def _log_feasibility_summary(
@@ -3418,17 +3393,12 @@ class ConditionalNodeFieldGraphGenerator(object):
         total_generated: int,
         total_feasible: int,
     ) -> None:
-        if int(self.verbose) < 1:
-            return
-        accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
-        overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
-        verbose_log(
+        _log_feasibility_summary(
             self,
-            "Feasibility filtering summary: "
-            f"generated={total_generated}, feasible_candidates={total_feasible}, "
-            f"feasible_rate={overall_rate:.1%}, "
-            f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}.",
-            level=1,
+            graph_conditioning=graph_conditioning,
+            accepted_graphs_by_slot=accepted_graphs_by_slot,
+            total_generated=total_generated,
+            total_feasible=total_feasible,
         )
 
     def _decode_with_feasibility_slots_core(
@@ -3437,93 +3407,18 @@ class ConditionalNodeFieldGraphGenerator(object):
         *,
         decode_attempt_fn: Callable[[GraphConditioningBatch, int], List[nx.Graph]],
     ) -> List[Optional[nx.Graph]]:
-        accepted_graphs_by_slot: List[Optional[nx.Graph]] = [None] * len(graph_conditioning)
-        pending_conditioning = graph_conditioning
-        pending_slot_indices = list(range(len(graph_conditioning)))
-        attempt = 0
-        total_generated = 0
-        total_feasible = 0
-        feasibility_started_at = time.perf_counter()
-        while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
-            attempt += 1
-            attempt_started_at = time.perf_counter()
-            candidate_conditioning = self._repeat_graph_conditioning(
-                pending_conditioning,
-                repeats=self.feasibility_candidates_per_attempt,
-            )
-            candidate_slot_indices = [
-                slot_idx
-                for slot_idx in pending_slot_indices
-                for _ in range(self.feasibility_candidates_per_attempt)
-            ]
-            decoded_graphs = decode_attempt_fn(candidate_conditioning, attempt - 1)
-            total_generated += len(decoded_graphs)
-            feasibility_mask = np.asarray(
-                self.feasibility_estimator.predict(decoded_graphs),
-                dtype=bool,
-            )
-            if feasibility_mask.shape[0] != len(decoded_graphs):
-                raise RuntimeError(
-                    "Feasibility estimator returned a mask of unexpected length "
-                    f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
-                )
-            feasible_now, filled_now = self._accept_feasible_candidates_by_slot(
-                decoded_graphs=decoded_graphs,
-                feasibility_mask=feasibility_mask.tolist(),
-                candidate_slot_indices=candidate_slot_indices,
-                accepted_graphs_by_slot=accepted_graphs_by_slot,
-            )
-            total_feasible += feasible_now
-            rejected_slot_indices = [
-                slot_idx for slot_idx in pending_slot_indices if accepted_graphs_by_slot[slot_idx] is None
-            ]
-            self._log_feasibility_attempt(
-                attempt=attempt,
-                graph_conditioning=graph_conditioning,
-                accepted_graphs_by_slot=accepted_graphs_by_slot,
-                rejected_slot_indices=rejected_slot_indices,
-                decoded_graphs=decoded_graphs,
-                feasible_now=feasible_now,
-                filled_now=filled_now,
-                attempt_started_at=attempt_started_at,
-                feasibility_started_at=feasibility_started_at,
-            )
-            if not rejected_slot_indices:
-                break
-            pending_slot_indices = rejected_slot_indices
-            pending_conditioning = self._slice_graph_conditioning(
-                graph_conditioning,
-                pending_slot_indices,
-            )
-        self._log_feasibility_summary(
-            graph_conditioning=graph_conditioning,
-            accepted_graphs_by_slot=accepted_graphs_by_slot,
-            total_generated=total_generated,
-            total_feasible=total_feasible,
+        return _decode_with_feasibility_slots_core(
+            self,
+            graph_conditioning,
+            decode_attempt_fn=decode_attempt_fn,
         )
-        return accepted_graphs_by_slot
 
     def _finalize_feasibility_graphs(
         self,
         accepted_graphs_by_slot: List[Optional[nx.Graph]],
         expected_count: int,
     ) -> List[nx.Graph]:
-        accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
-        if accepted_count != expected_count:
-            if self.feasibility_failure_mode == "raise":
-                raise RuntimeError(
-                    "Feasibility filtering did not recover enough graphs: "
-                    f"accepted {accepted_count} of {expected_count} after "
-                    f"{self.max_feasibility_attempts} attempts."
-                )
-            if int(self.verbose) >= 1:
-                verbose_log(
-                    self,
-                    "Feasibility filtering exhausted retries; returning only feasible graphs: "
-                    f"accepted {accepted_count} of {expected_count}.",
-                    level=1,
-                )
-        return [graph for graph in accepted_graphs_by_slot if graph is not None]
+        return _finalize_feasibility_graphs(self, accepted_graphs_by_slot, expected_count)
 
     def _decode_with_feasibility_slots(
         self,
@@ -3816,131 +3711,17 @@ class ConditionalNodeFieldGraphGenerator(object):
         verbose: bool = False,
     ) -> Dict[str, Any]:
         """Score generation quality using the fraction of feasible decoded candidates."""
-        if int(n_samples) < 1:
-            raise ValueError("n_samples must be >= 1")
-
-        self._require_fitted_for_generation()
-
-        original_attempts = self.max_feasibility_attempts
-        original_candidates = self.feasibility_candidates_per_attempt
-        original_oracle_candidates = getattr(self, "feasibility_oracle_candidates_per_attempt", 0)
-        original_verbose = self.verbose
-
-        if max_feasibility_attempts is not None:
-            self.max_feasibility_attempts = int(max_feasibility_attempts)
-        if feasibility_candidates_per_attempt is not None:
-            self.feasibility_candidates_per_attempt = int(feasibility_candidates_per_attempt)
-        if feasibility_oracle_candidates_per_attempt is not None:
-            self.feasibility_oracle_candidates_per_attempt = int(feasibility_oracle_candidates_per_attempt)
-        self.verbose = original_verbose if verbose else 0
-
-        try:
-            graph_conditioning = self._sample_conditions(
-                int(n_samples),
-                interpolate_between_n_samples=interpolate_between_n_samples,
-            )
-
-            if self.feasibility_estimator is None:
-                decoded_graphs = self._decode_conditioning_batch(
-                    graph_conditioning,
-                    desired_target=desired_target,
-                    guidance_scale=guidance_scale,
-                )
-                accepted_slots = len(decoded_graphs)
-                total_generated = len(decoded_graphs)
-                total_feasible = len(decoded_graphs)
-            elif not self.use_feasibility_filtering:
-                decoded_graphs = self._decode_conditioning_batch(
-                    graph_conditioning,
-                    desired_target=desired_target,
-                    guidance_scale=guidance_scale,
-                )
-                feasibility_mask = np.asarray(self.feasibility_estimator.predict(decoded_graphs), dtype=bool)
-                if feasibility_mask.shape[0] != len(decoded_graphs):
-                    raise RuntimeError(
-                        "Feasibility estimator returned a mask of unexpected length "
-                        f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
-                    )
-                accepted_slots = len(decoded_graphs)
-                total_generated = len(decoded_graphs)
-                total_feasible = int(feasibility_mask.sum())
-            else:
-                accepted_graphs_by_slot: List[Optional[nx.Graph]] = [None] * len(graph_conditioning)
-                pending_conditioning = graph_conditioning
-                pending_slot_indices = list(range(len(graph_conditioning)))
-                total_generated = 0
-                total_feasible = 0
-                attempt = 0
-
-                while len(pending_conditioning) > 0 and attempt < self.max_feasibility_attempts:
-                    attempt += 1
-                    candidate_conditioning = self._repeat_graph_conditioning(
-                        pending_conditioning,
-                        repeats=self.feasibility_candidates_per_attempt,
-                    )
-                    candidate_slot_indices = [
-                        slot_idx
-                        for slot_idx in pending_slot_indices
-                        for _ in range(self.feasibility_candidates_per_attempt)
-                    ]
-                    try:
-                        decoded_graphs = self._decode_conditioning_batch(
-                            candidate_conditioning,
-                            desired_target=desired_target,
-                            guidance_scale=guidance_scale,
-                            attempt_idx=attempt - 1,
-                        )
-                    except TypeError:
-                        decoded_graphs = self._decode_conditioning_batch(
-                            candidate_conditioning,
-                            desired_target=desired_target,
-                            guidance_scale=guidance_scale,
-                        )
-                    feasibility_mask = np.asarray(self.feasibility_estimator.predict(decoded_graphs), dtype=bool)
-                    if feasibility_mask.shape[0] != len(decoded_graphs):
-                        raise RuntimeError(
-                            "Feasibility estimator returned a mask of unexpected length "
-                            f"({feasibility_mask.shape[0]} for {len(decoded_graphs)} graphs)."
-                        )
-                    total_generated += len(decoded_graphs)
-                    feasible_now, _ = self._accept_feasible_candidates_by_slot(
-                        decoded_graphs=decoded_graphs,
-                        feasibility_mask=feasibility_mask.tolist(),
-                        candidate_slot_indices=candidate_slot_indices,
-                        accepted_graphs_by_slot=accepted_graphs_by_slot,
-                    )
-                    total_feasible += feasible_now
-                    pending_slot_indices = [
-                        slot_idx for slot_idx in pending_slot_indices if accepted_graphs_by_slot[slot_idx] is None
-                    ]
-                    if pending_slot_indices:
-                        pending_conditioning = self._slice_graph_conditioning(
-                            graph_conditioning,
-                            pending_slot_indices,
-                        )
-                accepted_slots = sum(graph is not None for graph in accepted_graphs_by_slot)
-
-            feasible_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
-            fulfilled_rate = accepted_slots / int(n_samples)
-            return {
-                "score": feasible_rate,
-                "feasible_rate": feasible_rate,
-                "fulfilled_rate": fulfilled_rate,
-                "accepted_slots": accepted_slots,
-                "n_samples": int(n_samples),
-                "generated_candidates": total_generated,
-                "feasible_candidates": total_feasible,
-                "max_feasibility_attempts": int(self.max_feasibility_attempts),
-                "feasibility_candidates_per_attempt": int(self.feasibility_candidates_per_attempt),
-                "feasibility_oracle_candidates_per_attempt": int(
-                    getattr(self, "feasibility_oracle_candidates_per_attempt", original_oracle_candidates)
-                ),
-            }
-        finally:
-            self.max_feasibility_attempts = original_attempts
-            self.feasibility_candidates_per_attempt = original_candidates
-            self.feasibility_oracle_candidates_per_attempt = original_oracle_candidates
-            self.verbose = original_verbose
+        return _score_feasible_rate(
+            self,
+            n_samples=n_samples,
+            max_feasibility_attempts=max_feasibility_attempts,
+            feasibility_candidates_per_attempt=feasibility_candidates_per_attempt,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            interpolate_between_n_samples=interpolate_between_n_samples,
+            desired_target=desired_target,
+            guidance_scale=guidance_scale,
+            verbose=verbose,
+        )
 
     @timeit
     def conditional_sample(
