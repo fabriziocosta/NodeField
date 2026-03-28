@@ -135,13 +135,19 @@ class TrainingCoordinator:
             targets=None,
         )
         train_loader = DataLoader(
-            PrebuiltBatchIterableDataset(batch_iter_factory),
+            PrebuiltBatchIterableDataset(
+                batch_iter_factory,
+                prefetch_batches=int(getattr(owner, "stream_prefetch_batches", 2)),
+            ),
             batch_size=None,
         )
         previous_batch_logging = bool(getattr(owner.model, "log_train_every_batch", False))
         previous_stream_progress_owner = getattr(owner.model, "_stream_progress_owner", None)
-        owner.model._stream_progress_owner = getattr(owner, "_graph_generator_snapshot_owner", None)
-        owner.model.log_train_every_batch = bool(owner.verbose)
+        stream_progress_owner = getattr(owner, "_graph_generator_snapshot_owner", None)
+        owner.model._stream_progress_owner = stream_progress_owner
+        owner.model.log_train_every_batch = bool(
+            getattr(stream_progress_owner, "verbose", owner.verbose)
+        )
         try:
             self.run_training(
                 train_loader,

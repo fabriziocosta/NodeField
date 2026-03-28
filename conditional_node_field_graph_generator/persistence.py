@@ -57,6 +57,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.oracle_use_node_label_cuts = False
     if not hasattr(graph_generator, "oracle_use_edge_label_cuts"):
         graph_generator.oracle_use_edge_label_cuts = False
+    if not hasattr(graph_generator, "stream_prefetch_batches"):
+        graph_generator.stream_prefetch_batches = 2
 
 
 def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):

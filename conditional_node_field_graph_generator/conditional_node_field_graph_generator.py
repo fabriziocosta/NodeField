@@ -336,6 +336,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.supervision_plan_: Optional[SupervisionPlan] = None
         self.training_graph_conditioning_: Optional[GraphConditioningBatch] = None
         self.stream_fit_stats_ = StreamFitStats()
+        self.stream_prefetch_batches = 2
         self.is_fitted_ = False
         if not 0.0 < locality_sample_fraction <= 1.0:
             raise ValueError("locality_sample_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
@@ -1719,23 +1720,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                     batch_state = {"epoch_call_count": 0}
 
                     def _single_pass_batch_factory():
-                        epoch_index = batch_state["epoch_call_count"]
                         batch_state["epoch_call_count"] += 1
-                        if epoch_index == 0:
-                            for warmup_train_batch_index, warmup_train_batch in enumerate(warmup_train_batches):
-                                batch_graph_count = len(
-                                    warmup_train_graphs[
-                                        warmup_train_batch_index * int(batch_size):
-                                        (warmup_train_batch_index + 1) * int(batch_size)
-                                    ]
-                                )
-                                self.stream_training_seen_ += batch_graph_count
-                                self.stream_training_accepted_ += batch_graph_count
-                                yield warmup_train_batch
-                            yield from _iter_training_batches(source_iter)
-                            return
-
-                        replay_iter = _make_source_iter()
+                        replay_iter = source_iter if batch_state["epoch_call_count"] == 1 else _make_source_iter()
                         skipped_warmup = 0
                         for graph in replay_iter:
                             self.stream_seen_ += 1
@@ -1745,9 +1731,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                             break
                         else:
                             return
+
                         def _replay_tail_iter(first_graph):
                             yield first_graph
                             yield from replay_iter
+
                         replay_tail_iter = _replay_tail_iter(graph)
                         reserved_validation = _consume_validation_batch(replay_tail_iter)
                         if reserved_validation is None:

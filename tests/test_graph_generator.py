@@ -401,9 +401,9 @@ def test_fit_from_stream_uses_warmup_only_for_schema_and_trains_remaining_batche
     assert node_model.fit_from_prebuilt_batches_calls[0]["validation_graphs"] == 2
     assert [
         batch["graphs"] for batch in node_model.fit_from_prebuilt_batches_calls[0]["batches"][0]
-    ] == [2, 1]
-    assert generator.stream_training_seen_ == 3
-    assert generator.stream_training_accepted_ == 3
+    ] == [1]
+    assert generator.stream_training_seen_ == 1
+    assert generator.stream_training_accepted_ == 1
     assert generator.stream_training_skipped_ == 0
     assert generator.warmup_schema_frozen_ is True
 
@@ -434,10 +434,10 @@ def test_fit_from_stream_restarts_post_warmup_stream_for_multiple_epochs():
 
     epoch_batches = node_model.fit_from_prebuilt_batches_calls[0]["batches"]
     assert len(epoch_batches) == 2
-    assert [[batch["graphs"] for batch in epoch] for epoch in epoch_batches] == [[1, 1, 1], [1]]
+    assert [[batch["graphs"] for batch in epoch] for epoch in epoch_batches] == [[1], [1]]
     assert generator.stream_warmup_count_ == 2
-    assert generator.stream_training_seen_ == 4
-    assert generator.stream_training_accepted_ == 4
+    assert generator.stream_training_seen_ == 2
+    assert generator.stream_training_accepted_ == 2
 
 
 def test_fit_from_stream_uses_first_post_warmup_batch_for_validation():
@@ -467,10 +467,10 @@ def test_fit_from_stream_uses_first_post_warmup_batch_for_validation():
 
     fit_call = node_model.fit_from_prebuilt_batches_calls[0]
     assert fit_call["validation_graphs"] == 2
-    assert [batch["graphs"] for batch in fit_call["batches"][0]] == [2, 1]
+    assert [batch["graphs"] for batch in fit_call["batches"][0]] == []
     assert generator.stream_warmup_count_ == 3
-    assert generator.stream_training_seen_ == 3
-    assert generator.stream_training_accepted_ == 3
+    assert generator.stream_training_seen_ == 0
+    assert generator.stream_training_accepted_ == 0
 
 
 def test_fit_from_stream_skips_unknown_node_labels():

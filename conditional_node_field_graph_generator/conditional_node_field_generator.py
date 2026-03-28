@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import queue
+import time
+import threading
 from typing import List, Any, Optional, Tuple, Sequence, Union, Dict
 import os
 
@@ -464,12 +467,38 @@ def collate_conditional_node_field_graph_with_edges(batch):
 class PrebuiltBatchIterableDataset(IterableDataset):
     """Iterable dataset yielding already-collated training batches."""
 
-    def __init__(self, batch_iter_factory):
+    def __init__(self, batch_iter_factory, prefetch_batches: int = 0):
         super().__init__()
         self.batch_iter_factory = batch_iter_factory
+        self.prefetch_batches = max(0, int(prefetch_batches))
 
     def __iter__(self):
-        yield from self.batch_iter_factory()
+        if self.prefetch_batches <= 0:
+            yield from self.batch_iter_factory()
+            return
+
+        sentinel = object()
+        error_sentinel = object()
+        batch_queue: queue.Queue[Any] = queue.Queue(maxsize=self.prefetch_batches)
+
+        def _producer() -> None:
+            try:
+                for batch in self.batch_iter_factory():
+                    batch_queue.put(batch)
+            except Exception as exc:  # pragma: no cover
+                batch_queue.put((error_sentinel, exc))
+            finally:
+                batch_queue.put(sentinel)
+
+        producer = threading.Thread(target=_producer, daemon=True)
+        producer.start()
+        while True:
+            item = batch_queue.get()
+            if item is sentinel:
+                break
+            if isinstance(item, tuple) and len(item) == 2 and item[0] is error_sentinel:
+                raise item[1]
+            yield item
 
 
 class ConditionalNodeFieldModule(pl.LightningModule):
@@ -1096,6 +1125,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
+        batch_started_at = time.perf_counter()
         uses_pairwise_supervision = (
             self.use_locality_supervision
             or self.use_edge_label_head
@@ -1235,6 +1265,22 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             trainer = getattr(self, "trainer", None)
             current_epoch = int(getattr(trainer, "current_epoch", -1)) + 1 if trainer is not None else None
             max_epochs = getattr(trainer, "max_epochs", None) if trainer is not None else None
+            epoch_index = int(getattr(trainer, "current_epoch", -1)) if trainer is not None else -1
+            if getattr(self, "_batch_timing_epoch_index", None) != epoch_index:
+                self._batch_timing_epoch_index = epoch_index
+                self._batch_timing_total_seconds = 0.0
+                self._batch_timing_count = 0
+            batch_elapsed_seconds = max(0.0, time.perf_counter() - batch_started_at)
+            self._batch_timing_total_seconds = float(
+                getattr(self, "_batch_timing_total_seconds", 0.0)
+            ) + batch_elapsed_seconds
+            self._batch_timing_count = int(getattr(self, "_batch_timing_count", 0)) + 1
+            average_batch_seconds = self._batch_timing_total_seconds / max(1, self._batch_timing_count)
+            eta_suffix = ""
+            num_training_batches = getattr(trainer, "num_training_batches", None) if trainer is not None else None
+            if isinstance(num_training_batches, int) and num_training_batches > 0:
+                remaining_batches = max(0, num_training_batches - int(batch_idx) - 1)
+                eta_suffix = f" ETA {self._format_duration(average_batch_seconds * remaining_batches)}"
             epoch_prefix = ""
             if current_epoch is not None and current_epoch > 0:
                 epoch_prefix = (
@@ -1250,7 +1296,9 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                 f"{progress_prefix}"
                 f"total={float(total_loss.detach().cpu()):>10.4f} "
                 f"node_field={float(losses['node_field'].detach().cpu()):>10.4f} "
-                f"deg={float(losses['deg_ce'].detach().cpu()):>8.4f}",
+                f"deg={float(losses['deg_ce'].detach().cpu()):>8.4f} "
+                f"batch_time={batch_elapsed_seconds:>5.2f}s"
+                f"{eta_suffix}",
                 level=1,
             )
         return total_loss
@@ -1530,6 +1578,15 @@ class ConditionalNodeFieldModule(pl.LightningModule):
 
 class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
     """Scikit-learn friendly facade for a conditional node-field generator."""
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        total_seconds = max(0, int(round(float(seconds))))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours > 0:
+            return f"{hours:d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
 
     def _current_training_policy(self, *, suppress_non_batch_output: bool = True) -> TrainingPolicy:
         return TrainingPolicy(

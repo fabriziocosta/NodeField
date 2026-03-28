@@ -74,3 +74,78 @@ def test_training_coordinator_restores_best_checkpoint_and_plots(monkeypatch):
     assert owner.best_checkpoint_score_ == 1.5
     assert owner.best_checkpoint_epoch_ == 1
     assert owner.plot_calls == 1
+
+
+def test_training_coordinator_stream_batch_logging_uses_snapshot_owner_verbose(monkeypatch):
+    owner = _Owner()
+    owner.verbose = False
+    owner.stream_prefetch_batches = 2
+    owner.model.log_train_every_batch = False
+    owner.model._stream_progress_owner = None
+    owner._graph_generator_snapshot_owner = types.SimpleNamespace(verbose=True, model_name=None)
+    owner._build_validation_loader = lambda **kwargs: []
+
+    monkeypatch.setattr(
+        tc_module,
+        "DataLoader",
+        lambda dataset, batch_size=None: dataset if batch_size is None else [dataset],
+    )
+
+    called = {}
+
+    def _fake_run_training(self, train_loader, val_loader, **kwargs):
+        del train_loader, val_loader, kwargs
+        called["log_train_every_batch"] = owner.model.log_train_every_batch
+        called["stream_progress_owner"] = owner.model._stream_progress_owner
+
+    monkeypatch.setattr(TrainingCoordinator, "run_training", _fake_run_training)
+
+    coordinator = TrainingCoordinator(owner)
+    coordinator.fit_from_prebuilt_batches(
+        validation_node_batch=[],
+        validation_graph_conditioning=[],
+        batch_iter_factory=lambda: iter(()),
+        ckpt_path=None,
+    )
+
+    assert called["log_train_every_batch"] is True
+    assert called["stream_progress_owner"] is owner._graph_generator_snapshot_owner
+
+
+def test_training_coordinator_uses_prefetch_for_streamed_batches(monkeypatch):
+    owner = _Owner()
+    owner.stream_prefetch_batches = 5
+    owner.verbose = False
+    owner.model.log_train_every_batch = False
+    owner.model._stream_progress_owner = None
+    owner._graph_generator_snapshot_owner = None
+    owner._build_validation_loader = lambda **kwargs: []
+
+    created = {}
+
+    class _FakeIterableDataset:
+        def __init__(self, batch_iter_factory, prefetch_batches=0):
+            created["prefetch_batches"] = prefetch_batches
+            self.batch_iter_factory = batch_iter_factory
+
+    monkeypatch.setattr(
+        __import__("conditional_node_field_graph_generator.conditional_node_field_generator", fromlist=["PrebuiltBatchIterableDataset"]),
+        "PrebuiltBatchIterableDataset",
+        _FakeIterableDataset,
+    )
+    monkeypatch.setattr(
+        tc_module,
+        "DataLoader",
+        lambda dataset, batch_size=None: dataset if batch_size is None else [dataset],
+    )
+    monkeypatch.setattr(TrainingCoordinator, "run_training", lambda *args, **kwargs: None)
+
+    coordinator = TrainingCoordinator(owner)
+    coordinator.fit_from_prebuilt_batches(
+        validation_node_batch=[],
+        validation_graph_conditioning=[],
+        batch_iter_factory=lambda: iter(()),
+        ckpt_path=None,
+    )
+
+    assert created["prefetch_batches"] == 5
