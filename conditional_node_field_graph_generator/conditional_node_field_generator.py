@@ -1231,9 +1231,6 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             progress_prefix = ""
             if progress_owner is not None:
                 progress_prefix = (
-                    f"seen={int(getattr(progress_owner, 'stream_seen_', 0)):>7d} "
-                    f"warmup={int(getattr(progress_owner, 'stream_warmup_count_', 0)):>6d} "
-                    f"train_seen={int(getattr(progress_owner, 'stream_training_seen_', 0)):>7d} "
                     f"accepted={int(getattr(progress_owner, 'stream_training_accepted_', 0)):>7d} "
                     f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0)):>7d} | "
                 )
