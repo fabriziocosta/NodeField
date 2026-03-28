@@ -29,6 +29,12 @@ from .conditional_node_field_graph_decoder import (
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .input_sources import iter_selected_source_graphs
+from .graph_generator_state import (
+    FeasibilityConfig,
+    LocalityConfig,
+    OracleConfig,
+    StreamFitStats,
+)
 from .interpolation_utils import (
     interpolate_integer_series as _interpolate_integer_series,
     scaled_slerp,
@@ -271,6 +277,101 @@ class ConditionalNodeFieldGraphGenerator(object):
     """End-to-end manager that vectorises graphs, trains generators, and rebuilds structures."""
     _DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT = 2
 
+    def _ensure_stream_fit_stats(self) -> StreamFitStats:
+        stats = getattr(self, "stream_fit_stats_", None)
+        if stats is None:
+            stats = StreamFitStats()
+            self.stream_fit_stats_ = stats
+        return stats
+
+    @property
+    def stream_seen_(self) -> int:
+        return int(self._ensure_stream_fit_stats().seen)
+
+    @stream_seen_.setter
+    def stream_seen_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().seen = int(value)
+
+    @property
+    def stream_warmup_count_(self) -> int:
+        return int(self._ensure_stream_fit_stats().warmup_count)
+
+    @stream_warmup_count_.setter
+    def stream_warmup_count_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().warmup_count = int(value)
+
+    @property
+    def stream_training_seen_(self) -> int:
+        return int(self._ensure_stream_fit_stats().training_seen)
+
+    @stream_training_seen_.setter
+    def stream_training_seen_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().training_seen = int(value)
+
+    @property
+    def stream_training_accepted_(self) -> int:
+        return int(self._ensure_stream_fit_stats().training_accepted)
+
+    @stream_training_accepted_.setter
+    def stream_training_accepted_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().training_accepted = int(value)
+
+    @property
+    def stream_training_skipped_(self) -> int:
+        return int(self._ensure_stream_fit_stats().training_skipped)
+
+    @stream_training_skipped_.setter
+    def stream_training_skipped_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().training_skipped = int(value)
+
+    @property
+    def stream_skipped_too_large_(self) -> int:
+        return int(self._ensure_stream_fit_stats().skipped_too_large)
+
+    @stream_skipped_too_large_.setter
+    def stream_skipped_too_large_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().skipped_too_large = int(value)
+
+    @property
+    def stream_skipped_unknown_node_label_(self) -> int:
+        return int(self._ensure_stream_fit_stats().skipped_unknown_node_label)
+
+    @stream_skipped_unknown_node_label_.setter
+    def stream_skipped_unknown_node_label_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().skipped_unknown_node_label = int(value)
+
+    @property
+    def stream_skipped_unknown_edge_label_(self) -> int:
+        return int(self._ensure_stream_fit_stats().skipped_unknown_edge_label)
+
+    @stream_skipped_unknown_edge_label_.setter
+    def stream_skipped_unknown_edge_label_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().skipped_unknown_edge_label = int(value)
+
+    @property
+    def stream_skipped_transform_error_(self) -> int:
+        return int(self._ensure_stream_fit_stats().skipped_transform_error)
+
+    @stream_skipped_transform_error_.setter
+    def stream_skipped_transform_error_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().skipped_transform_error = int(value)
+
+    @property
+    def stream_skipped_supervision_error_(self) -> int:
+        return int(self._ensure_stream_fit_stats().skipped_supervision_error)
+
+    @stream_skipped_supervision_error_.setter
+    def stream_skipped_supervision_error_(self, value: int) -> None:
+        self._ensure_stream_fit_stats().skipped_supervision_error = int(value)
+
+    @property
+    def stream_acceptance_rate_(self) -> float:
+        return float(self._ensure_stream_fit_stats().acceptance_rate)
+
+    @stream_acceptance_rate_.setter
+    def stream_acceptance_rate_(self, value: float) -> None:
+        self._ensure_stream_fit_stats().acceptance_rate = float(value)
+
     def __init__(
             self,
             graph_vectorizer: Any = None,
@@ -335,6 +436,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.verbose = verbose
         self.supervision_plan_: Optional[SupervisionPlan] = None
         self.training_graph_conditioning_: Optional[GraphConditioningBatch] = None
+        self.stream_fit_stats_ = StreamFitStats()
         self.is_fitted_ = False
         if not 0.0 < locality_sample_fraction <= 1.0:
             raise ValueError("locality_sample_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
@@ -360,17 +462,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.feasibility_failure_mode = str(feasibility_failure_mode)
         self.model_name = model_name
         self.model_dir = model_dir
-        self.stream_seen_ = 0
-        self.stream_warmup_count_ = 0
-        self.stream_training_seen_ = 0
-        self.stream_training_accepted_ = 0
-        self.stream_training_skipped_ = 0
-        self.stream_skipped_too_large_ = 0
-        self.stream_skipped_unknown_node_label_ = 0
-        self.stream_skipped_unknown_edge_label_ = 0
-        self.stream_skipped_transform_error_ = 0
-        self.stream_skipped_supervision_error_ = 0
-        self.stream_acceptance_rate_ = 0.0
         self.warmup_schema_frozen_ = False
         if int(self.verbose) >= 1 and self.model_name is not None:
             verbose_log(
@@ -407,6 +498,30 @@ class ConditionalNodeFieldGraphGenerator(object):
                 f"feasibility_failure_mode must be one of {sorted(valid_feasibility_failure_modes)} "
                 f"(got {self.feasibility_failure_mode!r})."
             )
+        self.locality_config_ = LocalityConfig(
+            sample_fraction=float(self.locality_sample_fraction),
+            horizon=int(self.locality_horizon),
+            negative_sample_factor=int(self.negative_sample_factor),
+            sampling_strategy=str(self.locality_sampling_strategy),
+            target_positive_ratio=self.locality_target_positive_ratio,
+        )
+        self.feasibility_config_ = FeasibilityConfig(
+            estimator=self.feasibility_estimator,
+            use_filtering=bool(self.use_feasibility_filtering),
+            max_attempts=int(self.max_feasibility_attempts),
+            candidates_per_attempt=int(self.feasibility_candidates_per_attempt),
+            failure_mode=str(self.feasibility_failure_mode),
+        )
+        self.oracle_config_ = OracleConfig(
+            candidates_per_attempt=int(self.feasibility_oracle_candidates_per_attempt),
+            max_iterations=int(self.max_oracle_iterations),
+            use_node_label_cuts=bool(self.oracle_use_node_label_cuts),
+            use_edge_label_cuts=bool(self.oracle_use_edge_label_cuts),
+            edge_memory_penalty=float(self.oracle_edge_memory_penalty),
+            edge_memory_update=float(self.oracle_edge_memory_update),
+            edge_memory_decay=float(self.oracle_edge_memory_decay),
+            edge_memory_clip=float(self.oracle_edge_memory_clip),
+        )
 
     def _restore_label_vocab_metadata_from_node_model(self) -> None:
         node_model = getattr(self, "conditional_node_generator_model", None)
