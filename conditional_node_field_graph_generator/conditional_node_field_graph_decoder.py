@@ -12,6 +12,7 @@ from .conditional_node_field_generator import GeneratedNodeBatch
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .parallel_utils import _normalize_n_jobs, _parallel_map
+from .runtime_utils import verbose_log
 
 Edge = Tuple[int, int]
 _DECODER_PROBABILITY_EPS = 1e-6
@@ -444,14 +445,16 @@ class ConditionalNodeFieldGraphDecoder(object):
             num_pairs = len(all_pairs)
             num_pairs_to_use = int(round(num_pairs * locality_sample_fraction))
             if self.verbose and num_pairs > 0:
-                print(
+                verbose_log(
+                    self,
                     f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
                     f"sampling {num_pairs_to_use} pairs ({locality_sample_fraction:.2%}) "
                     f"from {num_pairs} total pairs "
                     f"(pos={pos_before}, neg={neg_before}, "
                     f"negative_sample_factor={negative_sample_factor}, "
                     f"sampling_strategy={locality_sampling_strategy}"
-                    f"{'' if locality_target_positive_ratio is None else f', target_positive_ratio={locality_target_positive_ratio:.3f}'})."
+                    f"{'' if locality_target_positive_ratio is None else f', target_positive_ratio={locality_target_positive_ratio:.3f}'}).",
+                    level=1,
                 )
             if 0 < num_pairs_to_use < num_pairs:
                 indices = self._sample_pair_indices(
@@ -464,10 +467,12 @@ class ConditionalNodeFieldGraphDecoder(object):
                 all_pairs = [all_pairs[i] for i in indices]
             elif num_pairs_to_use == 0 and num_pairs > 0:
                 if self.verbose:
-                    print(
+                    verbose_log(
+                        self,
                         f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
                         f"warning - num_pairs_to_use is 0 with locality_sample_fraction="
-                        f"{locality_sample_fraction} and num_pairs={num_pairs}. No pairs will be used."
+                        f"{locality_sample_fraction} and num_pairs={num_pairs}. No pairs will be used.",
+                        level=1,
                     )
                 return np.array([]), []
             elif num_pairs_to_use == 0 and num_pairs == 0:
@@ -476,9 +481,11 @@ class ConditionalNodeFieldGraphDecoder(object):
         if self.verbose and len(all_targets) > 0:
             pos_after, neg_after = self._target_stats(all_targets)
             ratio_after = pos_after / float(pos_after + neg_after)
-            print(
+            verbose_log(
+                self,
                 f"adj_mtx_to_targets[{supervision_name}, horizon={horizon}]: "
-                f"using pos={pos_after}, neg={neg_after}, positive_ratio={ratio_after:.3f}."
+                f"using pos={pos_after}, neg={neg_after}, positive_ratio={ratio_after:.3f}.",
+                level=1,
             )
 
         return np.array(all_targets), all_pairs
@@ -729,7 +736,11 @@ class ConditionalNodeFieldGraphDecoder(object):
             for graph_idx in range(len(predicted_probs_list))
         ]
         if int(self.verbose) >= 4 and self.n_jobs != 1 and len(jobs) > 1:
-            print("Decoder plots for verbose>=4 are only shown when n_jobs=1; skipping plots during parallel adjacency decode.")
+            verbose_log(
+                self,
+                "Decoder plots for verbose>=4 are only shown when n_jobs=1; skipping plots during parallel adjacency decode.",
+                level=4,
+            )
         if self.n_jobs == 1 or len(jobs) <= 1:
             return [_decode_single_adjacency_job(*job) for job in jobs]
         return _parallel_map(_decode_single_adjacency_job_star, jobs, self.n_jobs, verbose=bool(self.verbose))

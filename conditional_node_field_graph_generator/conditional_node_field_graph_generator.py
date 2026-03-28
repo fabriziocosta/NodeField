@@ -2712,7 +2712,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             List[np.ndarray]: Computed result.
         """
         if int(self.verbose) >= 3:
-            print(f"Node encoding {len(graphs)} graphs")
+            verbose_log(self, f"Node encoding {len(graphs)} graphs", level=3)
         return self.node_graph_vectorizer.transform(graphs)
 
     @timeit
@@ -2726,7 +2726,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             GraphConditioningBatch: Computed result.
         """
         if int(self.verbose) >= 3:
-            print(f"Encoding {len(graphs)} graphs")
+            verbose_log(self, f"Encoding {len(graphs)} graphs", level=3)
         graph_embeddings = np.asarray(self.graph_vectorizer.transform(graphs))
         node_counts = np.asarray([graph.number_of_nodes() for graph in graphs], dtype=np.int64)
         edge_counts = np.asarray([graph.number_of_edges() for graph in graphs], dtype=np.int64)
@@ -2814,7 +2814,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         """
         if not self._graphs_have_usable_edge_labels(graphs):
             if self.verbose:
-                print("Edge-label channel disabled at graph inspection time: no usable edge labels were found.")
+                verbose_log(
+                    self,
+                    "Edge-label channel disabled at graph inspection time: no usable edge labels were found.",
+                    level=1,
+                )
             return None, None
         edge_label_targets = []
         edge_label_pairs = []
@@ -2971,7 +2975,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         f", mean_edge_prob={float(np.mean(off_diag)):.3f}, "
                         f"max_edge_prob={float(np.max(off_diag)):.3f}"
                     )
-            print(message)
+            verbose_log(self, message, level=3)
             if generated_nodes.node_labels is not None:
                 labels = np.asarray(generated_nodes.node_labels[graph_idx], dtype=object)
                 if generated_nodes.node_presence_mask is not None:
@@ -2983,7 +2987,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                 if labels.size > 0:
                     unique_labels, counts = np.unique(labels, return_counts=True)
                     label_summary = {label: int(count) for label, count in zip(unique_labels.tolist(), counts.tolist())}
-                    print(f"  node_labels={label_summary}")
+                    verbose_log(self, f"  node_labels={label_summary}", level=3)
 
     @staticmethod
     def _slice_graph_conditioning(
@@ -3536,7 +3540,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             List[nx.Graph]: Computed result.
         """
         if int(self.verbose) >= 3:
-            print(f"Predicting node matrices for {len(graph_conditioning)} graphs...")
+            verbose_log(self, f"Predicting node matrices for {len(graph_conditioning)} graphs...", level=3)
         generated_nodes = self._predict_generated_nodes(
             graph_conditioning,
             sampling_mode="unguided",
@@ -3638,7 +3642,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                 acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
                 attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
                 total_elapsed_seconds = time.perf_counter() - feasibility_started_at
-                print(
+                verbose_log(
+                    self,
                     _format_feasibility_attempt_status(
                         attempt=attempt,
                         max_attempts=self.max_feasibility_attempts,
@@ -3651,7 +3656,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                         missing_total=missing_total,
                         attempt_elapsed_seconds=attempt_elapsed_seconds,
                         total_elapsed_seconds=total_elapsed_seconds,
-                    )
+                    ),
+                    level=1,
                 )
             if not rejected_slot_indices:
                 break
@@ -3664,11 +3670,13 @@ class ConditionalNodeFieldGraphGenerator(object):
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if int(self.verbose) >= 1:
             overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
-            print(
+            verbose_log(
+                self,
                 "Feasibility filtering summary: "
                 f"generated={total_generated}, feasible_candidates={total_feasible}, "
                 f"feasible_rate={overall_rate:.1%}, "
-                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
+                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}.",
+                level=1,
             )
         return accepted_graphs_by_slot
 
@@ -3707,9 +3715,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     f"{self.max_feasibility_attempts} attempts."
                 )
             if int(self.verbose) >= 1:
-                print(
+                verbose_log(
+                    self,
                     "Feasibility filtering exhausted retries; returning only feasible graphs: "
-                    f"accepted {accepted_count} of {len(graph_conditioning)}."
+                    f"accepted {accepted_count} of {len(graph_conditioning)}.",
+                    level=1,
                 )
         return [graph for graph in accepted_graphs_by_slot if graph is not None]
 
@@ -3734,9 +3744,9 @@ class ConditionalNodeFieldGraphGenerator(object):
         """
         self._require_fitted_for_generation()
         if self.verbose:
-            print(f"Decoding {len(graph_conditioning)} conditioning vectors")
+            verbose_log(self, f"Decoding {len(graph_conditioning)} conditioning vectors", level=1)
             if desired_target is not None:
-                print(f"Using CFG target guidance: {desired_target} (scale={guidance_scale})")
+                verbose_log(self, f"Using CFG target guidance: {desired_target} (scale={guidance_scale})", level=1)
         return self._decode_with_feasibility(
             graph_conditioning,
             desired_target=desired_target,
@@ -3754,7 +3764,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         attempt_idx: int = 0,
     ) -> List[nx.Graph]:
         if int(self.verbose) >= 3:
-            print(f"Predicting classifier-guided node matrices for {len(graph_conditioning)} graphs...")
+            verbose_log(self, f"Predicting classifier-guided node matrices for {len(graph_conditioning)} graphs...", level=3)
         generated_nodes = self.conditional_node_generator_model.predict_classifier_guided(
             graph_conditioning,
             desired_class=desired_class,
@@ -3845,7 +3855,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                 acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
                 attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
                 total_elapsed_seconds = time.perf_counter() - feasibility_started_at
-                print(
+                verbose_log(
+                    self,
                     _format_feasibility_attempt_status(
                         attempt=attempt,
                         max_attempts=self.max_feasibility_attempts,
@@ -3858,7 +3869,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                         missing_total=missing_total,
                         attempt_elapsed_seconds=attempt_elapsed_seconds,
                         total_elapsed_seconds=total_elapsed_seconds,
-                    )
+                    ),
+                    level=1,
                 )
             if not rejected_slot_indices:
                 break
@@ -3871,11 +3883,13 @@ class ConditionalNodeFieldGraphGenerator(object):
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if int(self.verbose) >= 1:
             overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
-            print(
+            verbose_log(
+                self,
                 "Feasibility filtering summary: "
                 f"generated={total_generated}, feasible_candidates={total_feasible}, "
                 f"feasible_rate={overall_rate:.1%}, "
-                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
+                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}.",
+                level=1,
             )
         return accepted_graphs_by_slot
 
@@ -3889,8 +3903,12 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
-            print(f"Decoding {len(graph_conditioning)} conditioning vectors")
-            print(f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})")
+            verbose_log(self, f"Decoding {len(graph_conditioning)} conditioning vectors", level=1)
+            verbose_log(
+                self,
+                f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})",
+                level=1,
+            )
         accepted_graphs_by_slot = self._decode_with_feasibility_slots_classifier_guided(
             graph_conditioning,
             desired_class=desired_class,
@@ -3907,9 +3925,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     f"{self.max_feasibility_attempts} attempts."
                 )
             if int(self.verbose) >= 1:
-                print(
+                verbose_log(
+                    self,
                     "Feasibility filtering exhausted retries; returning only feasible graphs: "
-                    f"accepted {accepted_count} of {len(graph_conditioning)}."
+                    f"accepted {accepted_count} of {len(graph_conditioning)}.",
+                    level=1,
                 )
         return [graph for graph in accepted_graphs_by_slot if graph is not None]
 
@@ -3922,7 +3942,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         attempt_idx: int = 0,
     ) -> List[nx.Graph]:
         if int(self.verbose) >= 3:
-            print(f"Predicting regression-guided node matrices for {len(graph_conditioning)} graphs...")
+            verbose_log(self, f"Predicting regression-guided node matrices for {len(graph_conditioning)} graphs...", level=3)
         generated_nodes = self._predict_generated_nodes(
             graph_conditioning,
             sampling_mode="regression_guided",
@@ -4013,7 +4033,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                 acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
                 attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
                 total_elapsed_seconds = time.perf_counter() - feasibility_started_at
-                print(
+                verbose_log(
+                    self,
                     _format_feasibility_attempt_status(
                         attempt=attempt,
                         max_attempts=self.max_feasibility_attempts,
@@ -4026,7 +4047,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                         missing_total=missing_total,
                         attempt_elapsed_seconds=attempt_elapsed_seconds,
                         total_elapsed_seconds=total_elapsed_seconds,
-                    )
+                    ),
+                    level=1,
                 )
             if not rejected_slot_indices:
                 break
@@ -4039,11 +4061,13 @@ class ConditionalNodeFieldGraphGenerator(object):
         accepted_count = sum(graph is not None for graph in accepted_graphs_by_slot)
         if int(self.verbose) >= 1:
             overall_rate = (total_feasible / total_generated) if total_generated > 0 else 0.0
-            print(
+            verbose_log(
+                self,
                 "Feasibility filtering summary: "
                 f"generated={total_generated}, feasible_candidates={total_feasible}, "
                 f"feasible_rate={overall_rate:.1%}, "
-                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}."
+                f"fulfilled_slots={accepted_count}/{len(graph_conditioning)}.",
+                level=1,
             )
         return accepted_graphs_by_slot
 
@@ -4057,8 +4081,12 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
-            print(f"Decoding {len(graph_conditioning)} conditioning vectors")
-            print(f"Using regression guidance toward target(s): {desired_target} (scale={predictor_scale})")
+            verbose_log(self, f"Decoding {len(graph_conditioning)} conditioning vectors", level=1)
+            verbose_log(
+                self,
+                f"Using regression guidance toward target(s): {desired_target} (scale={predictor_scale})",
+                level=1,
+            )
         accepted_graphs_by_slot = self._decode_with_feasibility_slots_regression_guided(
             graph_conditioning,
             desired_target=desired_target,
@@ -4075,9 +4103,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     f"{self.max_feasibility_attempts} attempts."
                 )
             if int(self.verbose) >= 1:
-                print(
+                verbose_log(
+                    self,
                     "Feasibility filtering exhausted retries; returning only feasible graphs: "
-                    f"accepted {accepted_count} of {len(graph_conditioning)}."
+                    f"accepted {accepted_count} of {len(graph_conditioning)}.",
+                    level=1,
                 )
         return [graph for graph in accepted_graphs_by_slot if graph is not None]
 
@@ -4105,14 +4135,16 @@ class ConditionalNodeFieldGraphGenerator(object):
         """
         self._require_fitted_for_generation()
         if self.verbose:
-            print(f"Sampling {n_samples} graphs")
+            verbose_log(self, f"Sampling {n_samples} graphs", level=1)
             if interpolate_between_n_samples is not None:
-                print(
+                verbose_log(
+                    self,
                     "Sampling conditioning via stochastic interpolation over "
-                    f"{interpolate_between_n_samples} cached training embeddings per output."
+                    f"{interpolate_between_n_samples} cached training embeddings per output.",
+                    level=1,
                 )
             if desired_target is not None:
-                print(f"Using CFG target guidance: {desired_target} (scale={guidance_scale})")
+                verbose_log(self, f"Using CFG target guidance: {desired_target} (scale={guidance_scale})", level=1)
         sampled_conditioning = self._sample_conditions(
             n_samples,
             interpolate_between_n_samples=interpolate_between_n_samples,
@@ -4319,13 +4351,19 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
-            print(f"Sampling {n_samples} graphs")
+            verbose_log(self, f"Sampling {n_samples} graphs", level=1)
             if interpolate_between_n_samples is not None:
-                print(
+                verbose_log(
+                    self,
                     "Sampling conditioning via stochastic interpolation over "
-                    f"{interpolate_between_n_samples} cached training embeddings per output."
+                    f"{interpolate_between_n_samples} cached training embeddings per output.",
+                    level=1,
                 )
-            print(f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})")
+            verbose_log(
+                self,
+                f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})",
+                level=1,
+            )
         sampled_conditioning = self._sample_conditions(
             n_samples,
             interpolate_between_n_samples=interpolate_between_n_samples,
@@ -4382,13 +4420,19 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
-            print(f"Sampling {n_samples} graphs")
+            verbose_log(self, f"Sampling {n_samples} graphs", level=1)
             if interpolate_between_n_samples is not None:
-                print(
+                verbose_log(
+                    self,
                     "Sampling conditioning via stochastic interpolation over "
-                    f"{interpolate_between_n_samples} cached training embeddings per output."
+                    f"{interpolate_between_n_samples} cached training embeddings per output.",
+                    level=1,
                 )
-            print(f"Using regression guidance toward target(s): {desired_target} (scale={predictor_scale})")
+            verbose_log(
+                self,
+                f"Using regression guidance toward target(s): {desired_target} (scale={predictor_scale})",
+                level=1,
+            )
         sampled_conditioning = self._sample_conditions(
             n_samples,
             interpolate_between_n_samples=interpolate_between_n_samples,
