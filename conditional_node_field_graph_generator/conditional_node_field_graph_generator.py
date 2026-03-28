@@ -18,7 +18,14 @@ from .conditional_node_field_generator import (
     GraphConditioningBatch,
     NodeGenerationBatch,
 )
-from .conditional_node_field_graph_decoder import ConditionalNodeFieldGraphDecoder
+from .conditional_node_field_graph_decoder import (
+    ConditionalNodeFieldGraphDecoder,
+    _assemble_graph_job,
+    _assemble_graph_job_star,
+    _build_masked_prob_matrix,
+    _decode_single_adjacency_job,
+    _decode_single_adjacency_job_star,
+)
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .input_sources import iter_selected_source_graphs
@@ -320,116 +327,6 @@ def scaled_slerp_average(vectors: np.ndarray) -> np.ndarray:
     return avg_dir * avg_mag                         # (D,)
 
 
-
-
-def _build_masked_prob_matrix(
-    existence_mask: np.ndarray,
-    degree_prediction: np.ndarray,
-    prob_matrix: np.ndarray,
-) -> np.ndarray:
-    n_nodes = min(len(existence_mask), len(degree_prediction))
-    masked_prob_matrix = np.asarray(prob_matrix, dtype=float)[:n_nodes, :n_nodes].copy()
-    existent = np.asarray(existence_mask[:n_nodes], dtype=bool)
-    for i in range(n_nodes):
-        for j in range(n_nodes):
-            if i == j or not (existent[i] and existent[j]):
-                masked_prob_matrix[i, j] = 0.0
-    return (masked_prob_matrix + masked_prob_matrix.T) / 2.0
-
-
-def _decode_single_adjacency_job(
-    prob_list: np.ndarray,
-    existence_mask: np.ndarray,
-    existence_scores: Optional[np.ndarray],
-    degree_prediction: np.ndarray,
-    desired_node_count: Optional[int],
-    desired_edge_count: Optional[int],
-    degree_slack_penalty: float,
-    enforce_connectivity: bool,
-    warm_start_mst: bool,
-    verbose: int,
-    diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
-) -> np.ndarray:
-    decoder = ConditionalNodeFieldGraphDecoder(
-        verbose=bool(verbose),
-        degree_slack_penalty=degree_slack_penalty,
-        enforce_connectivity=enforce_connectivity,
-        warm_start_mst=warm_start_mst,
-        diagnostic_graph_renderer=diagnostic_graph_renderer,
-    )
-    n_nodes = min(len(existence_mask), len(degree_prediction))
-    prob_matrix = np.zeros((n_nodes, n_nodes))
-    idx = 0
-    for i in range(n_nodes):
-        for j in range(n_nodes):
-            if i != j:
-                prob_matrix[i, j] = prob_list[idx]
-                idx += 1
-    existent = decoder.resolve_node_presence_mask(
-        np.asarray(existence_mask[:n_nodes], dtype=bool),
-        desired_node_count=desired_node_count,
-        node_existence_scores=None if existence_scores is None else np.asarray(existence_scores[:n_nodes], dtype=float),
-    )
-    for i in range(n_nodes):
-        for j in range(n_nodes):
-            if not (existent[i] and existent[j]):
-                prob_matrix[i, j] = 0
-    prob_matrix = (prob_matrix + prob_matrix.T) / 2
-    target_degrees = decoder.get_degree_targets(
-        np.asarray(degree_prediction[:n_nodes], dtype=float),
-        existent,
-        desired_edge_count=desired_edge_count,
-    )
-    adj_mtx = decoder.optimize_adjacency_matrix(
-        prob_matrix,
-        target_degrees,
-        target_edge_count=desired_edge_count,
-    )
-    if int(verbose) >= 4 and diagnostic_graph_renderer is None:
-        _plot_decoder_diagnostics(
-            prob_matrix=prob_matrix,
-            adj_mtx=adj_mtx,
-            target_degrees=target_degrees,
-            title="Decoder solve",
-            graph_renderer=decoder.diagnostic_graph_renderer,
-            existence_mask=existent,
-        )
-    return adj_mtx
-
-
-def _decode_single_adjacency_job_star(args) -> np.ndarray:
-    return _decode_single_adjacency_job(*args)
-
-
-def _assemble_graph_job(
-    node_presence_mask: np.ndarray,
-    node_labels: np.ndarray,
-    edge_labels: np.ndarray,
-    adj_mtx: np.ndarray,
-) -> nx.Graph:
-    graph = nx.from_numpy_array(adj_mtx)
-
-    if len(node_labels) > 0 and not all(label is None for label in node_labels):
-        node_label_map = {i: label for i, label in enumerate(node_labels)}
-        nx.set_node_attributes(graph, node_label_map, "label")
-
-    if np.sum(adj_mtx) > 0 and len(edge_labels) > 0:
-        n_nodes = graph.number_of_nodes()
-        edge_idx = 0
-        edge_attr = {}
-        for i in range(n_nodes):
-            for j in range(i + 1, n_nodes):
-                if adj_mtx[i, j] != 0:
-                    edge_attr[(i, j)] = edge_labels[edge_idx]
-                    edge_idx += 1
-        nx.set_edge_attributes(graph, edge_attr, "label")
-
-    existent_indices = np.where(np.asarray(node_presence_mask[:adj_mtx.shape[0]], dtype=bool))[0]
-    return graph.subgraph(existent_indices).copy()
-
-
-def _assemble_graph_job_star(args) -> nx.Graph:
-    return _assemble_graph_job(*args)
 
 
 # =============================================================================
