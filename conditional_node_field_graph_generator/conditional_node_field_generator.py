@@ -19,7 +19,7 @@ from .metrics_collection import (
     MetricsLogger,
 )
 from .metrics_visualization import plot_metrics
-from .runtime_utils import run_trainer_fit, verbose_log
+from .runtime_utils import get_runtime_logger, run_trainer_fit, verbose_log
 from .training_policy import (
     build_training_callbacks,
     create_trainer,
@@ -28,6 +28,7 @@ from .training_policy import (
 )
 
 _EDGE_COUNT_GRAPH_SIZE_EXPONENT = math.log2(3.0)
+logger = get_runtime_logger(__name__)
 
 @dataclass
 class GraphConditioningBatch:
@@ -1234,13 +1235,15 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                     f"accepted={int(getattr(progress_owner, 'stream_training_accepted_', 0)):>7d} "
                     f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0)):>7d} | "
                 )
-            print(
+            verbose_log(
+                self,
                 "train batch "
                 f"{batch_idx + 1:>4d}: "
                 f"{progress_prefix}"
                 f"total={float(total_loss.detach().cpu()):>10.4f} "
                 f"node_field={float(losses['node_field'].detach().cpu()):>10.4f} "
-                f"deg={float(losses['deg_ce'].detach().cpu()):>8.4f}"
+                f"deg={float(losses['deg_ce'].detach().cpu()):>8.4f}",
+                level=1,
             )
         return total_loss
 
@@ -2082,11 +2085,23 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             auxiliary_edge_targets,
         )
         if planned_direct_edges and not effective_locality and self.verbose:
-            print("Direct-edge channel planned as learned, but usable edge_pairs/edge_targets were not supplied.")
+            verbose_log(
+                self,
+                "Direct-edge channel planned as learned, but usable edge_pairs/edge_targets were not supplied.",
+                level=1,
+            )
         if planned_aux_locality and not effective_auxiliary_locality and self.verbose:
-            print("Auxiliary-locality channel planned as learned, but usable auxiliary_edge_pairs/auxiliary_edge_targets were not supplied.")
+            verbose_log(
+                self,
+                "Auxiliary-locality channel planned as learned, but usable auxiliary_edge_pairs/auxiliary_edge_targets were not supplied.",
+                level=1,
+            )
         if planned_learned_edge_labels and not effective_edge_labels and self.verbose:
-            print("Edge-label channel planned as learned, but usable edge_label_pairs/edge_label_targets were not supplied.")
+            verbose_log(
+                self,
+                "Edge-label channel planned as learned, but usable edge_label_pairs/edge_label_targets were not supplied.",
+                level=1,
+            )
         if not effective_locality:
             edge_pairs = None
             edge_targets = None
@@ -2328,10 +2343,12 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             trainable_parameter_count = sum(
                 param.numel() for param in self.model.parameters() if param.requires_grad
             )
-            print(
+            verbose_log(
+                self,
                 "ANN size: "
                 f"parameters={parameter_count:,}, "
-                f"trainable={trainable_parameter_count:,}."
+                f"trainable={trainable_parameter_count:,}.",
+                level=1,
             )
         self.is_setup_ = True
 
@@ -2358,7 +2375,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         if self.guidance_enabled_:
             if targets is None:
                 if int(self.verbose) >= 1:
-                    print("Guidance targets were not provided at fit time; using unconditional (null) targets.")
+                    verbose_log(
+                        self,
+                        "Guidance targets were not provided at fit time; using unconditional (null) targets.",
+                        level=1,
+                    )
                 target_condition_array = np.zeros((len(base_condition_array), self.target_condition_dim_), dtype=float)
             else:
                 if len(targets) != len(base_condition_array):
@@ -2555,21 +2576,23 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                     raw_best_val_node_field_loss = float(
                         self.model.val_node_field[self.best_checkpoint_epoch_]
                     )
-                print(
+                verbose_log(
+                    self,
                     format_restored_checkpoint_summary(
                         early_stopping_monitor=self.early_stopping_monitor,
                         best_checkpoint_score=self.best_checkpoint_score_,
                         best_checkpoint_epoch=self.best_checkpoint_epoch_,
                         raw_best_val_node_field_loss=raw_best_val_node_field_loss,
                         stopped_epoch=stopped_epoch,
-                    )
+                    ),
+                    level=1,
                 )
-                print(f"  path={self.best_checkpoint_path_}")
+                verbose_log(self, f"  path={self.best_checkpoint_path_}", level=1)
         if int(self.verbose) >= 1:
             try:
                 self.plot_metrics()
             except Exception as exc:
-                print(f"Unable to plot training metrics: {exc}")
+                logger.warning("Unable to plot training metrics: %s", exc)
 
     def fit_from_prebuilt_batches(
         self,
@@ -2618,6 +2641,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         targets: Optional[Sequence[Any]] = None,
         ckpt_path: Optional[str] = None,
     ):
+        """Train the node-field model on a prepared batch and optional guidance targets."""
         if ckpt_path is not None:
             ckpt_path = os.path.expanduser(str(ckpt_path))
             if not os.path.isfile(ckpt_path):
@@ -3004,6 +3028,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
     ) -> GeneratedNodeBatch:
+        """Generate node-field predictions from graph conditioning, optionally with CFG guidance."""
         if guidance_scale < 0:
             raise ValueError(f"guidance_scale must be >= 0 (got {guidance_scale}).")
         self._require_fitted_for_prediction()
@@ -3020,7 +3045,9 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             cond_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
         else:
             if desired_targets is not None and int(self.verbose) >= 1:
-                print("desired_target was provided, but guidance conditioning is not available; falling back to unguided generation.")
+                logger.warning(
+                    "desired_target was provided, but guidance conditioning is not available; falling back to unguided generation."
+                )
             cond_array = base_condition_array
         cond_scaled = self.y_scaler.transform(cond_array)
         cond_tensor = torch.tensor(cond_scaled, dtype=torch.float32, device=self.device)
@@ -3049,6 +3076,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         desired_class: Union[int, Sequence[Any]],
         classifier_scale: float = 1.0,
     ) -> GeneratedNodeBatch:
+        """Generate node-field predictions using a separately trained classifier guidance head."""
         if classifier_scale < 0:
             raise ValueError(f"classifier_scale must be >= 0 (got {classifier_scale}).")
         return self._predict_with_guidance_predictor(
@@ -3064,6 +3092,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         desired_target: Union[float, Sequence[Any]],
         predictor_scale: float = 1.0,
     ) -> GeneratedNodeBatch:
+        """Generate node-field predictions using a separately trained regression guidance head."""
         if predictor_scale < 0:
             raise ValueError(f"predictor_scale must be >= 0 (got {predictor_scale}).")
         return self._predict_with_guidance_predictor(
@@ -3137,8 +3166,9 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         return self._build_generated_node_batch(gen_orig)
 
     def plot_metrics(self, window: int = 10, alpha: float = 0.3):
+        """Plot the recorded training and validation metric histories for the fitted model."""
         if self.model is None:
-            print("Model is not fitted yet.")
+            logger.info("Model is not fitted yet.")
             return
         plot_metrics(
             train_metrics={

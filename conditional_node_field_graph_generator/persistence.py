@@ -10,9 +10,11 @@ import dill as pickle
 import pandas as pd
 
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
+from .runtime_utils import get_runtime_logger
 
 
 GRAPH_GENERATOR_PERSISTENCE_VERSION = 3
+logger = get_runtime_logger(__name__)
 
 try:
     from IPython.display import display
@@ -60,7 +62,7 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
 def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
     resolved_model_name = model_name if model_name is not None else getattr(graph_generator, "model_name", None)
     if resolved_model_name is None:
-        print("Skipping graph generator save because model_name is None.")
+        logger.info("Skipping graph generator save because model_name is None.")
         return None
     resolved_model_dir = model_dir if model_dir is not None else getattr(graph_generator, "model_dir", None)
     model_root = resolve_saved_generator_dir(model_dir=resolved_model_dir)
@@ -71,8 +73,8 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=T
     with open(path, "wb") as handle:
         pickle.dump(graph_generator, handle)
     if log:
-        print(f"Saved graph generator as: {filename}")
-        print(path)
+        logger.info("Saved graph generator as: %s", filename)
+        logger.info("%s", path)
     return filename
 
 
@@ -80,7 +82,7 @@ def list_saved_graph_generators(model_dir=None):
     model_root = resolve_saved_generator_dir(model_dir=model_dir)
     files = sorted(model_root.glob("*.pkl"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not files:
-        print(f"No saved graph generators found in {model_root}")
+        logger.info("No saved graph generators found in %s", model_root)
         return []
     rows = [
         {
@@ -144,8 +146,8 @@ def load_graph_generator(model_name, model_dir=None):
             "Saved graph generator schema is incompatible with this NodeField version. "
             f"Expected schema v{GRAPH_GENERATOR_PERSISTENCE_VERSION}, found v{schema_version}: {path}"
         )
-    print(f"Loaded graph generator: {path.name}")
-    print(path)
+    logger.info("Loaded graph generator: %s", path.name)
+    logger.info("%s", path)
     _restore_loaded_vectorizer_fit_state(graph_generator)
     _restore_loaded_generator_runtime_defaults(graph_generator)
     try:

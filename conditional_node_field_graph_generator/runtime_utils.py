@@ -43,7 +43,7 @@ def verbose_log(instance, message: str, level: int = 1, logger_name: str | None 
 
 
 def timeit(func):
-    """Time a method and print timing info when verbose>=3."""
+    """Time a method and emit timing info through the package logger when verbose>=3."""
 
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -62,7 +62,6 @@ def timeit(func):
                 f"Class '{class_name}', Function '{func.__name__}' executed in "
                 f"{elapsed_time:.2f} seconds ({elapsed_minutes:.2f} minutes, {elapsed_hours:.2f} hours)."
             )
-            print(message)
             verbose_log(instance, message, level=3)
 
         return result

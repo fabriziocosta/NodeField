@@ -2355,6 +2355,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         targets: Optional[Sequence[Any]] = None,
         ckpt_path: Optional[str] = None,
     ) -> 'ConditionalNodeFieldGraphGenerator':
+        """Fit vectorizers, derive supervision, and optionally train the node generator."""
         if self.model_name is not None:
             verbose_log(
                 self,
@@ -2565,28 +2566,14 @@ class ConditionalNodeFieldGraphGenerator(object):
 
     @timeit
     def node_encode(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
-        """Transform graphs into per-node embedding matrices.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-
-        Returns:
-            List[np.ndarray]: Computed result.
-        """
+        """Encode each input graph into a per-node embedding matrix."""
         if int(self.verbose) >= 3:
             verbose_log(self, f"Node encoding {len(graphs)} graphs", level=3)
         return self.node_graph_vectorizer.transform(graphs)
 
     @timeit
     def graph_encode(self, graphs: List[nx.Graph]) -> GraphConditioningBatch:
-        """Transform graphs into explicit graph-level conditioning signals.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-
-        Returns:
-            GraphConditioningBatch: Computed result.
-        """
+        """Encode graphs into graph-level conditioning vectors plus node and edge counts."""
         if int(self.verbose) >= 3:
             verbose_log(self, f"Encoding {len(graphs)} graphs", level=3)
         graph_embeddings = np.asarray(self.graph_vectorizer.transform(graphs))
@@ -2599,25 +2586,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         )
 
     def encode(self, graphs: List[nx.Graph]) -> Tuple[List[np.ndarray], GraphConditioningBatch]:
-        """Produce both node-level embeddings and explicit graph-level conditioning.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-
-        Returns:
-            Tuple[List[np.ndarray], GraphConditioningBatch]: Computed result.
-        """
+        """Return both node embeddings and graph-level conditioning for the same graph batch."""
         return self.node_encode(graphs), self.graph_encode(graphs)
 
     def graphs_to_node_label_targets(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
-        """Extract per-node categorical labels in the node ordering used elsewhere.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-
-        Returns:
-            List[np.ndarray]: Computed result.
-        """
+        """Extract node labels in graph iteration order, or emit a shared dummy label when unlabeled."""
         saw_any_node_label = False
         saw_missing_node_label = False
         node_label_targets = []
@@ -2646,14 +2619,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         return node_label_targets
 
     def _graphs_have_usable_edge_labels(self, graphs: List[nx.Graph]) -> bool:
-        """Return True only when every observed edge carries a label and at least one labelled edge exists.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-
-        Returns:
-            bool: Computed result.
-        """
+        """Return ``True`` only when at least one edge exists and every observed edge is labeled."""
         saw_any_edge = False
         for graph in graphs:
             for u, v, attrs in graph.edges(data=True):
@@ -2666,14 +2632,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self,
         graphs: List[nx.Graph],
     ) -> Tuple[Optional[np.ndarray], Optional[List[Tuple[int, int, int]]]]:
-        """Extract per-edge categorical labels in the ordered node-pair convention used elsewhere.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-
-        Returns:
-            Tuple[Optional[np.ndarray], Optional[List[Tuple[int, int, int]]]]: Computed result.
-        """
+        """Extract edge-label targets and graph-local node-pair indices for decoder supervision."""
         if not self._graphs_have_usable_edge_labels(graphs):
             if self.verbose:
                 verbose_log(
@@ -2709,22 +2668,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         auxiliary_edge_targets: Optional[np.ndarray] = None,
     ) -> NodeGenerationBatch:
-        """Assemble explicit node-level supervision tensors from graphs.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-            node_embeddings_list (List[np.ndarray]): Input value.
-            node_label_targets (Optional[List[np.ndarray]]): Optional input value.
-            edge_pairs (Optional[List[Tuple[int, int, int]]]): Optional input value.
-            edge_targets (Optional[np.ndarray]): Optional input value.
-            edge_label_pairs (Optional[List[Tuple[int, int, int]]]): Optional input value.
-            edge_label_targets (Optional[np.ndarray]): Optional input value.
-            auxiliary_edge_pairs (Optional[List[Tuple[int, int, int]]]): Optional input value.
-            auxiliary_edge_targets (Optional[np.ndarray]): Optional input value.
-
-        Returns:
-            NodeGenerationBatch: Computed result.
-        """
+        """Assemble a padded node-generation batch from embeddings and any enabled supervision signals."""
         frozen_num_rows = None
         if self.conditional_node_generator_model is not None:
             frozen_num_rows = getattr(
@@ -3657,17 +3601,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
-        """Decode conditioning vectors into reconstructed graphs.
-
-        Args:
-            graph_conditioning (GraphConditioningBatch): Input value.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
-            guidance_scale (float): Optional input value.
-            apply_feasibility_filtering (Optional[bool]): Optional input value.
-
-        Returns:
-            List[nx.Graph]: Computed result.
-        """
+        """Decode graph conditioning into concrete graphs, optionally using CFG and feasibility filtering."""
         self._require_fitted_for_generation()
         if self.verbose:
             verbose_log(self, f"Decoding {len(graph_conditioning)} conditioning vectors", level=1)
@@ -3845,18 +3779,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[nx.Graph]:
-        """Generate random graphs by sampling conditioning vectors from the prior.
-
-        Args:
-            n_samples (int): Optional input value.
-            interpolate_between_n_samples (Optional[int]): Optional input value.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
-            guidance_scale (float): Optional input value.
-            apply_feasibility_filtering (Optional[bool]): Optional input value.
-
-        Returns:
-            List[nx.Graph]: Computed result.
-        """
+        """Sample random graph-conditioning vectors and decode them into graphs."""
         self._require_fitted_for_generation()
         if self.verbose:
             verbose_log(self, f"Sampling {n_samples} graphs", level=1)
@@ -4029,18 +3952,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[List[nx.Graph]]:
-        """Sample multiple graphs per input by conditioning on each graph's encoding.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-            n_samples (int): Optional input value.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
-            guidance_scale (float): Optional input value.
-            apply_feasibility_filtering (Optional[bool]): Optional input value.
-
-        Returns:
-            List[List[nx.Graph]]: Computed result.
-        """
+        """Encode each input graph and sample one or more decoded variations per conditioning vector."""
         self._require_fitted_for_generation()
         _, graph_conditioning = self.encode(graphs)
         repeated_conditioning = self._repeat_graph_conditioning(

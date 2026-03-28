@@ -5,6 +5,10 @@ from concurrent.futures.process import BrokenProcessPool
 import os
 from typing import Optional
 
+from .runtime_utils import get_runtime_logger
+
+logger = get_runtime_logger(__name__)
+
 
 def _normalize_n_jobs(n_jobs: Optional[int]) -> int:
     if n_jobs is None:
@@ -28,7 +32,7 @@ def _parallel_map(func, jobs, max_workers: int, verbose: bool = False):
         if not _should_fallback_to_threads(exc):
             raise
         if verbose:
-            print("Process-based decode parallelism unavailable; falling back to threads.")
+            logger.warning("Process-based decode parallelism unavailable; falling back to threads.")
         with ThreadPoolExecutor(max_workers=min(max_workers, len(jobs))) as executor:
             return list(executor.map(func, jobs))
 
