@@ -15,19 +15,10 @@ import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, Dataset, IterableDataset, TensorDataset
 
-from .metrics_collection import (
-    GraphGeneratorBatchSnapshotCallback,
-    GraphGeneratorEpochSnapshotCallback,
-    MetricsLogger,
-)
 from .metrics_visualization import plot_metrics
-from .runtime_utils import get_runtime_logger, run_trainer_fit, verbose_log
-from .training_policy import (
-    build_training_callbacks,
-    create_trainer,
-    format_restored_checkpoint_summary,
-    suppress_output,
-)
+from .runtime_utils import get_runtime_logger, verbose_log
+from .graph_generator_state import CheckpointPolicy, MetricsPolicy, TrainingPolicy
+from .training_coordinator import TrainingCoordinator
 
 _EDGE_COUNT_GRAPH_SIZE_EXPONENT = math.log2(3.0)
 logger = get_runtime_logger(__name__)
@@ -593,6 +584,21 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         if checkpoint_root_dir is None:
             checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "node_field")
         self.checkpoint_root_dir = str(checkpoint_root_dir)
+        self.training_policy_ = TrainingPolicy(
+            maximum_epochs=int(self.maximum_epochs),
+            early_stopping_monitor=self.early_stopping_monitor,
+            early_stopping_mode=self.early_stopping_mode,
+            enable_early_stopping=bool(self.enable_early_stopping),
+            early_stopping_patience=int(self.early_stopping_patience),
+            early_stopping_min_delta=float(self.early_stopping_min_delta),
+            suppress_non_batch_output=True,
+        )
+        self.checkpoint_policy_ = CheckpointPolicy(
+            restore_best_checkpoint=bool(self.restore_best_checkpoint),
+            checkpoint_root_dir=self.checkpoint_root_dir,
+        )
+        self.metrics_policy_ = MetricsPolicy(plot_on_train_end=True)
+        self.training_coordinator_ = TrainingCoordinator(self)
         self.important_feature_index = important_feature_index
         self.max_degree = int(max_degree)
         self.lambda_degree_importance = lambda_degree_importance
@@ -2490,94 +2496,28 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         snapshot_frequency: Optional[str] = "epoch",
     ) -> None:
         """Execute Lightning training and restore the best checkpoint when configured."""
-        snapshot_callback = None
-        snapshot_owner = getattr(self, "_graph_generator_snapshot_owner", None)
-        if snapshot_owner is not None and getattr(snapshot_owner, "model_name", None) is not None:
-            if snapshot_frequency == "batch":
-                snapshot_callback = GraphGeneratorBatchSnapshotCallback(snapshot_owner)
-            elif snapshot_frequency == "epoch":
-                snapshot_callback = GraphGeneratorEpochSnapshotCallback(snapshot_owner)
-        callbacks, checkpoint_dir, checkpoint_callback = build_training_callbacks(
-            generator_name=self.__class__.__name__,
-            checkpoint_root_dir=self.checkpoint_root_dir,
-            early_stopping_monitor=self.early_stopping_monitor,
-            early_stopping_mode=self.early_stopping_mode,
-            enable_early_stopping=self.enable_early_stopping,
-            early_stopping_patience=self.early_stopping_patience,
-            early_stopping_min_delta=self.early_stopping_min_delta,
-            metrics_logger=MetricsLogger(),
-            epoch_snapshot_callback=snapshot_callback,
+        self.training_coordinator_.run_training(
+            train_loader,
+            val_loader,
+            ckpt_path=ckpt_path,
+            context=context,
+            train_loader_length=train_loader_length,
+            training_policy=TrainingPolicy(
+                maximum_epochs=int(self.maximum_epochs),
+                early_stopping_monitor=self.early_stopping_monitor,
+                early_stopping_mode=self.early_stopping_mode,
+                enable_early_stopping=bool(self.enable_early_stopping),
+                early_stopping_patience=int(self.early_stopping_patience),
+                early_stopping_min_delta=float(self.early_stopping_min_delta),
+                suppress_non_batch_output=bool(suppress_non_batch_output),
+            ),
+            checkpoint_policy=CheckpointPolicy(
+                restore_best_checkpoint=bool(self.restore_best_checkpoint),
+                checkpoint_root_dir=self.checkpoint_root_dir,
+            ),
+            metrics_policy=self.metrics_policy_,
+            snapshot_frequency=snapshot_frequency,
         )
-        if self.model_name is not None:
-            verbose_log(self, f"Save target model_name={self.model_name} model_dir={self.model_dir}")
-        verbose_log(self, f"Writing checkpoints to {checkpoint_dir}")
-        trainer = create_trainer(
-            maximum_epochs=self.maximum_epochs,
-            callbacks=callbacks,
-            artifact_root_dir=self.artifact_root_dir,
-            train_loader_length=max(1, int(train_loader_length)),
-        )
-        if not self.verbose and suppress_non_batch_output:
-            with suppress_output():
-                run_trainer_fit(
-                    trainer,
-                    self.model,
-                    train_loader,
-                    val_loader,
-                    context=context,
-                    ckpt_path=ckpt_path,
-                )
-        else:
-            run_trainer_fit(
-                trainer,
-                self.model,
-                train_loader,
-                val_loader,
-                context=context,
-                ckpt_path=ckpt_path,
-            )
-        self.best_checkpoint_path_ = checkpoint_callback.best_model_path or None
-        best_score = checkpoint_callback.best_model_score
-        self.best_checkpoint_score_ = float(best_score.item()) if best_score is not None else None
-        if self.restore_best_checkpoint and self.best_checkpoint_path_:
-            checkpoint = torch.load(
-                self.best_checkpoint_path_,
-                map_location=self.device,
-                weights_only=False,
-            )
-            best_epoch = checkpoint.get("epoch")
-            self.best_checkpoint_epoch_ = int(best_epoch) if best_epoch is not None else None
-            state_dict = checkpoint.get("state_dict", checkpoint)
-            self.model.load_state_dict(state_dict)
-            self.model.to(self.device)
-            if int(self.verbose) >= 1:
-                stopped_epoch = int(getattr(trainer, "current_epoch", -1)) + 1
-                raw_best_val_node_field_loss = None
-                if (
-                    self.best_checkpoint_epoch_ is not None
-                    and hasattr(self.model, "val_node_field")
-                    and self.best_checkpoint_epoch_ < len(self.model.val_node_field)
-                ):
-                    raw_best_val_node_field_loss = float(
-                        self.model.val_node_field[self.best_checkpoint_epoch_]
-                    )
-                verbose_log(
-                    self,
-                    format_restored_checkpoint_summary(
-                        early_stopping_monitor=self.early_stopping_monitor,
-                        best_checkpoint_score=self.best_checkpoint_score_,
-                        best_checkpoint_epoch=self.best_checkpoint_epoch_,
-                        raw_best_val_node_field_loss=raw_best_val_node_field_loss,
-                        stopped_epoch=stopped_epoch,
-                    ),
-                    level=1,
-                )
-                verbose_log(self, f"  path={self.best_checkpoint_path_}", level=1)
-        if int(self.verbose) >= 1:
-            try:
-                self.plot_metrics()
-            except Exception as exc:
-                logger.warning("Unable to plot training metrics: %s", exc)
 
     def fit_from_prebuilt_batches(
         self,
@@ -2591,33 +2531,12 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             ckpt_path = os.path.expanduser(str(ckpt_path))
             if not os.path.isfile(ckpt_path):
                 raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
-        val_loader = self._build_validation_loader(
-            node_batch=validation_node_batch,
-            graph_conditioning=validation_graph_conditioning,
-            targets=None,
+        return self.training_coordinator_.fit_from_prebuilt_batches(
+            validation_node_batch,
+            validation_graph_conditioning,
+            batch_iter_factory,
+            ckpt_path=ckpt_path,
         )
-        train_loader = DataLoader(
-            PrebuiltBatchIterableDataset(batch_iter_factory),
-            batch_size=None,
-        )
-        previous_batch_logging = bool(getattr(self.model, "log_train_every_batch", False))
-        previous_stream_progress_owner = getattr(self.model, "_stream_progress_owner", None)
-        self.model._stream_progress_owner = getattr(self, "_graph_generator_snapshot_owner", None)
-        self.model.log_train_every_batch = bool(self.verbose)
-        try:
-            self._run_training(
-                train_loader,
-                val_loader,
-                ckpt_path=ckpt_path,
-                context=f"{self.__class__.__name__}.fit_from_prebuilt_batches",
-                train_loader_length=1,
-                suppress_non_batch_output=False,
-                snapshot_frequency="batch",
-            )
-        finally:
-            self.model.log_train_every_batch = previous_batch_logging
-            self.model._stream_progress_owner = previous_stream_progress_owner
-        return self
 
     def fit(
         self,
@@ -2631,39 +2550,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             ckpt_path = os.path.expanduser(str(ckpt_path))
             if not os.path.isfile(ckpt_path):
                 raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
-        payload = self._build_processed_training_payload(
-            node_batch=node_batch,
-            graph_conditioning=graph_conditioning,
+        return self.training_coordinator_.fit(
+            node_batch,
+            graph_conditioning,
             targets=targets,
-        )
-        dataset = self._build_dataset_from_processed_payload(payload)
-        if isinstance(dataset, ConditionalNodeFieldGraphWithEdgesDataset):
-            train_dataset, val_dataset = self._build_train_val_subsets(dataset)
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=self.batch_size,
-                shuffle=True,
-                collate_fn=collate_conditional_node_field_graph_with_edges,
-            )
-            val_loader = DataLoader(
-                val_dataset,
-                batch_size=self.batch_size,
-                shuffle=False,
-                collate_fn=collate_conditional_node_field_graph_with_edges,
-            )
-        else:
-            train_dataset, val_dataset = self._build_train_val_subsets(dataset)
-            train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-            val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
-
-        self._run_training(
-            train_loader,
-            val_loader,
             ckpt_path=ckpt_path,
-            context=f"{self.__class__.__name__}.fit",
-            train_loader_length=len(train_loader),
-            suppress_non_batch_output=True,
-            snapshot_frequency="epoch",
         )
 
     def set_guidance_predictor(
