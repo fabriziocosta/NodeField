@@ -1980,6 +1980,48 @@ def test_parallel_decode_matches_serial_decode():
         assert sorted(serial_graph.edges(data=True)) == sorted(parallel_graph.edges(data=True))
 
 
+def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        existence_threshold=0.7,
+        enforce_connectivity=False,
+        degree_slack_penalty=123.0,
+        warm_start_mst=False,
+        n_jobs=3,
+    )
+    path = tmp_path / "decoder.json"
+
+    decoder.save(str(path))
+
+    restored = ConditionalNodeFieldGraphDecoder().load(str(path))
+
+    assert restored.verbose is False
+    assert restored.existence_threshold == pytest.approx(0.7)
+    assert restored.enforce_connectivity is False
+    assert restored.degree_slack_penalty == pytest.approx(123.0)
+    assert restored.warm_start_mst is False
+    assert restored.n_jobs == 3
+
+
+def test_decoder_load_supports_legacy_dill_artifact(tmp_path):
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        degree_slack_penalty=321.0,
+    )
+    path = tmp_path / "decoder_legacy.pkl"
+    import dill as pickle
+
+    with open(path, "wb") as handle:
+        pickle.dump(decoder, handle)
+
+    restored = ConditionalNodeFieldGraphDecoder().load(str(path))
+
+    assert isinstance(restored, ConditionalNodeFieldGraphDecoder)
+    assert restored.enforce_connectivity is False
+    assert restored.degree_slack_penalty == pytest.approx(321.0)
+
+
 def test_optimize_adjacency_matrix_applies_forbidden_edge_set_cuts():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True)
     prob_matrix = np.asarray(

@@ -1,6 +1,8 @@
 """Decoder helpers for rebuilding labeled graphs from node-field predictions."""
 
+import json
 import sys
+from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import dill as pickle
@@ -16,6 +18,7 @@ from .runtime_utils import verbose_log
 
 Edge = Tuple[int, int]
 _DECODER_PROBABILITY_EPS = 1e-6
+_DECODER_ARTIFACT_VERSION = 1
 plt = _shared_diagnostics.plt
 
 
@@ -904,13 +907,49 @@ class ConditionalNodeFieldGraphDecoder(object):
         return decoded_graphs
 
     def save(self, filename: str = "generative_model.obj") -> None:
-        with open(filename, "wb") as f:
-            pickle.dump(self, f)
+        path = Path(filename)
+        artifact = {
+            "artifact_type": "ConditionalNodeFieldGraphDecoder",
+            "artifact_version": _DECODER_ARTIFACT_VERSION,
+            "config": {
+                "verbose": self.verbose,
+                "existence_threshold": self.existence_threshold,
+                "enforce_connectivity": self.enforce_connectivity,
+                "degree_slack_penalty": self.degree_slack_penalty,
+                "warm_start_mst": self.warm_start_mst,
+                "n_jobs": self.n_jobs,
+            },
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(artifact, handle, indent=2, sort_keys=True)
 
     def load(self, filename: str = "generative_model.obj") -> "ConditionalNodeFieldGraphDecoder":
-        with open(filename, "rb") as f:
-            self = pickle.load(f)
-        return self
+        path = Path(filename)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                artifact = json.load(handle)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            with open(path, "rb") as handle:
+                return pickle.load(handle)
+        if artifact.get("artifact_type") != "ConditionalNodeFieldGraphDecoder":
+            raise RuntimeError(
+                f"Unsupported decoder artifact type {artifact.get('artifact_type')!r} in {path}."
+            )
+        artifact_version = int(artifact.get("artifact_version", 0))
+        if artifact_version != _DECODER_ARTIFACT_VERSION:
+            raise RuntimeError(
+                "Saved decoder artifact version is incompatible with this NodeField version. "
+                f"Expected v{_DECODER_ARTIFACT_VERSION}, found v{artifact_version}: {path}"
+            )
+        config = artifact.get("config", {})
+        return self.__class__(
+            verbose=config.get("verbose", True),
+            existence_threshold=config.get("existence_threshold", 0.5),
+            enforce_connectivity=config.get("enforce_connectivity", True),
+            degree_slack_penalty=config.get("degree_slack_penalty", 1e6),
+            warm_start_mst=config.get("warm_start_mst", True),
+            n_jobs=config.get("n_jobs", 1),
+        )
 
 
 def _assemble_edge_labels_from_matrix(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
