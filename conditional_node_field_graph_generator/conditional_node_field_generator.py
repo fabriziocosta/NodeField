@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 import math
-from typing import List, Any, Optional, Tuple, Sequence, Union
+from typing import List, Any, Optional, Tuple, Sequence, Union, Dict
 import os
 
 import numpy as np
@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, TensorDataset
 
 from .metrics_collection import GraphGeneratorEpochSnapshotCallback, MetricsLogger
 from .metrics_visualization import plot_metrics
@@ -463,6 +463,17 @@ def collate_conditional_node_field_graph_with_edges(batch):
     return X, Y, edge_idx, edge_lbl, edge_label_idx, edge_label_tgt, aux_edge_idx, aux_edge_lbl, M, D
 
 
+class PrebuiltBatchIterableDataset(IterableDataset):
+    """Iterable dataset yielding already-collated training batches."""
+
+    def __init__(self, batch_iter_factory):
+        super().__init__()
+        self.batch_iter_factory = batch_iter_factory
+
+    def __iter__(self):
+        yield from self.batch_iter_factory()
+
+
 class ConditionalNodeFieldModule(pl.LightningModule):
     """Conditional node-field module with an explicit scalar energy and score via autograd."""
 
@@ -650,6 +661,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         self.val_edge_label_ce = []
         self.train_node_field = []
         self.val_node_field = []
+        self.log_train_every_batch = False
         if self.use_locality_supervision:
             self.train_edge_loss = []
             self.val_edge_loss = []
@@ -1210,6 +1222,14 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             self.log("train_exist", losses["exist"], on_step=False, on_epoch=True, batch_size=batch_size)
         if self.use_node_label_head:
             self.log("train_node_label_ce", losses["label_ce"], on_step=False, on_epoch=True, batch_size=batch_size)
+        if getattr(self, "log_train_every_batch", False):
+            print(
+                "train batch "
+                f"{batch_idx + 1}: "
+                f"total={float(total_loss.detach().cpu()):.4f} "
+                f"node_field={float(losses['node_field'].detach().cpu()):.4f} "
+                f"deg={float(losses['deg_ce'].detach().cpu()):.4f}"
+            )
         return total_loss
 
     def validation_step(self, batch, batch_idx):
@@ -2303,17 +2323,15 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             )
         self.is_setup_ = True
 
-    def fit(
+    def _build_processed_training_payload(
         self,
         node_batch: NodeGenerationBatch,
         graph_conditioning: GraphConditioningBatch,
         targets: Optional[Sequence[Any]] = None,
-        ckpt_path: Optional[str] = None,
-    ):
-        if ckpt_path is not None:
-            ckpt_path = os.path.expanduser(str(ckpt_path))
-            if not os.path.isfile(ckpt_path):
-                raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
+    ) -> Dict[str, Any]:
+        """Transform one supervision batch using the already-fitted warmup schema."""
+        if not self.is_setup_:
+            raise RuntimeError("ConditionalNodeFieldGenerator must be setup() before processing streamed batches.")
         node_encodings_list = node_batch.node_embeddings_list
         edge_pairs = node_batch.edge_pairs
         edge_targets = node_batch.edge_targets
@@ -2322,6 +2340,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         auxiliary_edge_pairs = node_batch.auxiliary_edge_pairs
         auxiliary_edge_targets = node_batch.auxiliary_edge_targets
         node_label_targets = node_batch.node_label_targets
+
         X_array = self._build_padded_node_array(node_encodings_list, self.number_of_rows_per_example)
         base_condition_array = self._compose_condition_array(graph_conditioning)
         if self.guidance_enabled_:
@@ -2344,15 +2363,13 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         encoded_node_label_targets = None
         encoded_edge_label_targets = None
         if node_label_targets is not None and self.num_node_label_classes_ > 0:
-            encoded_node_label_targets = self._encode_node_label_targets(node_label_targets, self.number_of_rows_per_example)
+            encoded_node_label_targets = self._encode_node_label_targets(
+                node_label_targets,
+                self.number_of_rows_per_example,
+            )
         if edge_label_targets is not None and self.edge_label_to_index_ is not None:
             encoded_edge_label_targets = self._encode_edge_label_targets(edge_label_targets)
         X_scaled, y_scaled = self._transform_data(X_array, y_array)
-
-        X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
-        y_tensor = torch.tensor(y_scaled, dtype=torch.float32)
-        mask_tensor = torch.tensor(mask_array, dtype=torch.bool)
-        degree_tensor = torch.tensor(degree_target_array, dtype=torch.long)
 
         effective_locality, effective_auxiliary_locality, effective_edge_labels = self._effective_supervision_flags(
             edge_pairs,
@@ -2362,43 +2379,99 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             auxiliary_edge_pairs,
             auxiliary_edge_targets,
         )
-        if effective_locality or effective_auxiliary_locality or effective_edge_labels:
-            dataset = ConditionalNodeFieldGraphWithEdgesDataset(
+        return {
+            "X_scaled": X_scaled,
+            "y_scaled": y_scaled,
+            "mask_array": mask_array,
+            "degree_target_array": degree_target_array,
+            "edge_pairs": edge_pairs,
+            "edge_targets": edge_targets,
+            "edge_label_pairs": edge_label_pairs,
+            "encoded_edge_label_targets": encoded_edge_label_targets,
+            "auxiliary_edge_pairs": auxiliary_edge_pairs,
+            "auxiliary_edge_targets": auxiliary_edge_targets,
+            "encoded_node_label_targets": encoded_node_label_targets,
+            "effective_locality": effective_locality,
+            "effective_auxiliary_locality": effective_auxiliary_locality,
+            "effective_edge_labels": effective_edge_labels,
+        }
+
+    def _build_dataset_from_processed_payload(self, payload: Dict[str, Any]):
+        """Build the materialized dataset matching the processed batch payload."""
+        X_scaled = payload["X_scaled"]
+        y_scaled = payload["y_scaled"]
+        mask_array = payload["mask_array"]
+        degree_target_array = payload["degree_target_array"]
+        encoded_node_label_targets = payload["encoded_node_label_targets"]
+        if (
+            payload["effective_locality"]
+            or payload["effective_auxiliary_locality"]
+            or payload["effective_edge_labels"]
+        ):
+            return ConditionalNodeFieldGraphWithEdgesDataset(
                 X_scaled,
                 y_scaled,
-                edge_pairs,
-                edge_targets,
-                edge_label_pairs,
-                encoded_edge_label_targets,
-                auxiliary_edge_pairs,
-                auxiliary_edge_targets,
+                payload["edge_pairs"],
+                payload["edge_targets"],
+                payload["edge_label_pairs"],
+                payload["encoded_edge_label_targets"],
+                payload["auxiliary_edge_pairs"],
+                payload["auxiliary_edge_targets"],
                 mask_array,
                 degree_target_array,
                 encoded_node_label_targets,
             )
-            train_dataset, val_dataset = self._build_train_val_subsets(dataset)
-            train_loader = DataLoader(
-                train_dataset,
-                batch_size=self.batch_size,
-                shuffle=True,
-                collate_fn=collate_conditional_node_field_graph_with_edges,
-            )
-            val_loader = DataLoader(
+        X_tensor = torch.tensor(X_scaled, dtype=torch.float32)
+        y_tensor = torch.tensor(y_scaled, dtype=torch.float32)
+        mask_tensor = torch.tensor(mask_array, dtype=torch.bool)
+        degree_tensor = torch.tensor(degree_target_array, dtype=torch.long)
+        if encoded_node_label_targets is None:
+            return TensorDataset(X_tensor, y_tensor, mask_tensor, degree_tensor)
+        label_tensor = torch.tensor(encoded_node_label_targets, dtype=torch.long)
+        return TensorDataset(X_tensor, y_tensor, mask_tensor, degree_tensor, label_tensor)
+
+    def _collate_processed_payload(self, payload: Dict[str, Any]):
+        """Convert one processed payload into a single batch tuple for streamed training."""
+        dataset = self._build_dataset_from_processed_payload(payload)
+        if isinstance(dataset, ConditionalNodeFieldGraphWithEdgesDataset):
+            batch = [dataset[idx] for idx in range(len(dataset))]
+            return collate_conditional_node_field_graph_with_edges(batch)
+        return dataset.tensors
+
+    def _build_validation_loader(
+        self,
+        node_batch: NodeGenerationBatch,
+        graph_conditioning: GraphConditioningBatch,
+        targets: Optional[Sequence[Any]] = None,
+    ):
+        """Build the fixed warmup validation loader used by streamed training."""
+        payload = self._build_processed_training_payload(
+            node_batch=node_batch,
+            graph_conditioning=graph_conditioning,
+            targets=targets,
+        )
+        dataset = self._build_dataset_from_processed_payload(payload)
+        _, val_dataset = self._build_train_val_subsets(dataset)
+        if isinstance(dataset, ConditionalNodeFieldGraphWithEdgesDataset):
+            return DataLoader(
                 val_dataset,
                 batch_size=self.batch_size,
                 shuffle=False,
                 collate_fn=collate_conditional_node_field_graph_with_edges,
             )
-        else:
-            if encoded_node_label_targets is None:
-                dataset = TensorDataset(X_tensor, y_tensor, mask_tensor, degree_tensor)
-            else:
-                label_tensor = torch.tensor(encoded_node_label_targets, dtype=torch.long)
-                dataset = TensorDataset(X_tensor, y_tensor, mask_tensor, degree_tensor, label_tensor)
-            train_dataset, val_dataset = self._build_train_val_subsets(dataset)
-            train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
-            val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+        return DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
 
+    def _run_training(
+        self,
+        train_loader,
+        val_loader,
+        *,
+        ckpt_path: Optional[str],
+        context: str,
+        train_loader_length: int,
+        suppress_non_batch_output: bool = True,
+    ) -> None:
+        """Execute Lightning training and restore the best checkpoint when configured."""
         snapshot_callback = None
         snapshot_owner = getattr(self, "_graph_generator_snapshot_owner", None)
         if snapshot_owner is not None and getattr(snapshot_owner, "model_name", None) is not None:
@@ -2421,16 +2494,16 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             maximum_epochs=self.maximum_epochs,
             callbacks=callbacks,
             artifact_root_dir=self.artifact_root_dir,
-            train_loader_length=len(train_loader),
+            train_loader_length=max(1, int(train_loader_length)),
         )
-        if not self.verbose:
+        if not self.verbose and suppress_non_batch_output:
             with suppress_output():
                 run_trainer_fit(
                     trainer,
                     self.model,
                     train_loader,
                     val_loader,
-                    context=f"{self.__class__.__name__}.fit",
+                    context=context,
                     ckpt_path=ckpt_path,
                 )
         else:
@@ -2439,17 +2512,13 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 self.model,
                 train_loader,
                 val_loader,
-                context=f"{self.__class__.__name__}.fit",
+                context=context,
                 ckpt_path=ckpt_path,
             )
         self.best_checkpoint_path_ = checkpoint_callback.best_model_path or None
         best_score = checkpoint_callback.best_model_score
         self.best_checkpoint_score_ = float(best_score.item()) if best_score is not None else None
         if self.restore_best_checkpoint and self.best_checkpoint_path_:
-            # This code restores a trusted checkpoint written by the current training run.
-            # PyTorch 2.6+ defaults torch.load(..., weights_only=True), which strips
-            # non-tensor metadata and can reject Lightning checkpoints containing
-            # numpy scalars or other safe metadata payloads.
             checkpoint = torch.load(
                 self.best_checkpoint_path_,
                 map_location=self.device,
@@ -2481,6 +2550,87 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                     )
                 )
                 print(f"  path={self.best_checkpoint_path_}")
+
+    def fit_from_prebuilt_batches(
+        self,
+        warmup_node_batch: NodeGenerationBatch,
+        warmup_graph_conditioning: GraphConditioningBatch,
+        batch_iter_factory,
+        ckpt_path: Optional[str] = None,
+    ):
+        """Train from a source-backed stream of already-schema-compatible batches."""
+        if ckpt_path is not None:
+            ckpt_path = os.path.expanduser(str(ckpt_path))
+            if not os.path.isfile(ckpt_path):
+                raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
+        val_loader = self._build_validation_loader(
+            node_batch=warmup_node_batch,
+            graph_conditioning=warmup_graph_conditioning,
+            targets=None,
+        )
+        train_loader = DataLoader(
+            PrebuiltBatchIterableDataset(batch_iter_factory),
+            batch_size=None,
+        )
+        previous_batch_logging = bool(getattr(self.model, "log_train_every_batch", False))
+        self.model.log_train_every_batch = True
+        try:
+            self._run_training(
+                train_loader,
+                val_loader,
+                ckpt_path=ckpt_path,
+                context=f"{self.__class__.__name__}.fit_from_prebuilt_batches",
+                train_loader_length=1,
+                suppress_non_batch_output=False,
+            )
+        finally:
+            self.model.log_train_every_batch = previous_batch_logging
+        return self
+
+    def fit(
+        self,
+        node_batch: NodeGenerationBatch,
+        graph_conditioning: GraphConditioningBatch,
+        targets: Optional[Sequence[Any]] = None,
+        ckpt_path: Optional[str] = None,
+    ):
+        if ckpt_path is not None:
+            ckpt_path = os.path.expanduser(str(ckpt_path))
+            if not os.path.isfile(ckpt_path):
+                raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
+        payload = self._build_processed_training_payload(
+            node_batch=node_batch,
+            graph_conditioning=graph_conditioning,
+            targets=targets,
+        )
+        dataset = self._build_dataset_from_processed_payload(payload)
+        if isinstance(dataset, ConditionalNodeFieldGraphWithEdgesDataset):
+            train_dataset, val_dataset = self._build_train_val_subsets(dataset)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                collate_fn=collate_conditional_node_field_graph_with_edges,
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                collate_fn=collate_conditional_node_field_graph_with_edges,
+            )
+        else:
+            train_dataset, val_dataset = self._build_train_val_subsets(dataset)
+            train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False)
+
+        self._run_training(
+            train_loader,
+            val_loader,
+            ckpt_path=ckpt_path,
+            context=f"{self.__class__.__name__}.fit",
+            train_loader_length=len(train_loader),
+            suppress_non_batch_output=True,
+        )
 
     def set_guidance_predictor(
         self,

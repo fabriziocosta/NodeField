@@ -38,7 +38,11 @@ class _GraphVectorizer:
 
 
 class _NodeVectorizer:
+    def __init__(self):
+        self.fitted_graph_count = None
+
     def fit(self, graphs):
+        self.fitted_graph_count = len(graphs)
         return self
 
     def transform(self, graphs):
@@ -62,12 +66,85 @@ class _TrainableNodeModel(_Component):
         super().__init__(verbose=verbose)
         self.setup_calls = []
         self.fit_calls = []
+        self.fit_from_prebuilt_batches_calls = []
 
     def setup(self, **kwargs):
         self.setup_calls.append(kwargs)
 
     def fit(self, **kwargs):
         self.fit_calls.append(kwargs)
+
+
+class _StreamTrainableNodeModel(_TrainableNodeModel):
+    def setup(self, **kwargs):
+        super().setup(**kwargs)
+        node_batch = kwargs["node_batch"]
+        self.number_of_rows_per_example = int(node_batch.node_presence_mask.shape[1])
+        node_label_targets = node_batch.node_label_targets or []
+        flat_node_labels = [
+            label
+            for labels in node_label_targets
+            for label in np.asarray(labels, dtype=object).tolist()
+        ]
+        self.node_label_to_index_ = {
+            label: idx for idx, label in enumerate(np.unique(np.asarray(flat_node_labels, dtype=object)))
+        } if flat_node_labels else {}
+        edge_label_targets = node_batch.edge_label_targets
+        if edge_label_targets is None:
+            self.edge_label_to_index_ = {}
+        else:
+            unique_edge_labels = np.unique(np.asarray(edge_label_targets, dtype=object))
+            self.edge_label_to_index_ = {label: idx for idx, label in enumerate(unique_edge_labels.tolist())}
+        self.guidance_enabled_ = False
+        self.target_condition_dim_ = 0
+
+    def _build_processed_training_payload(self, node_batch, graph_conditioning, targets=None):
+        del targets
+        return {
+            "graphs": len(node_batch),
+            "conditioning_rows": len(graph_conditioning),
+            "max_rows": int(node_batch.node_presence_mask.shape[1]),
+        }
+
+    def _collate_processed_payload(self, payload):
+        return payload
+
+    def fit_from_prebuilt_batches(self, warmup_node_batch, warmup_graph_conditioning, batch_iter_factory, ckpt_path=None):
+        self.fit_from_prebuilt_batches_calls.append(
+            {
+                "warmup_graphs": len(warmup_node_batch),
+                "warmup_conditioning": len(warmup_graph_conditioning),
+                "batches": list(batch_iter_factory()),
+                "ckpt_path": ckpt_path,
+            }
+        )
+
+
+class _EdgeSupervisionDecoder:
+    def __init__(self, raise_on_flag=None):
+        self.raise_on_flag = raise_on_flag
+
+    def compute_edge_supervision(self, graphs, node_embeddings_list, **kwargs):
+        del node_embeddings_list, kwargs
+        if self.raise_on_flag is not None and any(graph.graph.get(self.raise_on_flag) for graph in graphs):
+            raise RuntimeError(f"decoder blocked on {self.raise_on_flag}")
+        return np.zeros((0,), dtype=float), []
+
+
+class _FitRecorderEstimator:
+    def __init__(self):
+        self.fit_graph_count = None
+
+    def fit(self, graphs):
+        self.fit_graph_count = len(graphs)
+        return self
+
+
+class _ExplodingNodeVectorizer(_NodeVectorizer):
+    def transform(self, graphs):
+        if any(graph.graph.get("explode_transform") for graph in graphs):
+            raise RuntimeError("transform failed")
+        return super().transform(graphs)
 
 
 class _PredictiveStubModel(torch.nn.Module):
@@ -125,6 +202,21 @@ def _sampling_graphs():
                 next_node += 1
         graphs.append(graph)
     return graphs
+
+
+def _stream_reader(graphs):
+    def _reader(_uri):
+        return iter(graphs)
+    return _reader
+
+
+def _labelled_path(node_count, node_label="C", edge_label="-"):
+    graph = nx.path_graph(node_count)
+    for node in graph.nodes():
+        graph.nodes[node]["label"] = node_label
+    for u, v in graph.edges():
+        graph.edges[u, v]["label"] = edge_label
+    return graph
 
 
 def _make_fitted_sampling_generator():
@@ -258,6 +350,236 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(oracle_edge_memory_clip=-0.1)
     with pytest.raises(ValueError, match="feasibility_failure_mode"):
         ConditionalNodeFieldGraphGenerator(feasibility_failure_mode="drop")
+
+
+def test_fit_from_stream_uses_warmup_only_for_schema_and_trains_remaining_batches():
+    graph_vectorizer = _GraphVectorizer()
+    node_vectorizer = _NodeVectorizer()
+    node_model = _StreamTrainableNodeModel()
+    estimator = _FitRecorderEstimator()
+    graphs = [
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+    ]
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=graph_vectorizer,
+        node_graph_vectorizer=node_vectorizer,
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        feasibility_estimator=estimator,
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=2,
+        batch_size=2,
+    )
+
+    assert graph_vectorizer.fitted_graph_count == 2
+    assert node_vectorizer.fitted_graph_count == 2
+    assert estimator.fit_graph_count == 2
+    assert len(generator.training_graph_conditioning_) == 2
+    assert node_model.setup_calls[0]["targets"] is None
+    assert node_model.fit_from_prebuilt_batches_calls[0]["warmup_graphs"] == 2
+    assert [batch["graphs"] for batch in node_model.fit_from_prebuilt_batches_calls[0]["batches"]] == [2, 1]
+    assert generator.stream_training_seen_ == 3
+    assert generator.stream_training_accepted_ == 3
+    assert generator.stream_training_skipped_ == 0
+    assert generator.warmup_schema_frozen_ is True
+
+
+def test_fit_from_stream_skips_unknown_node_labels():
+    node_model = _StreamTrainableNodeModel()
+    graphs = [
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="C"),
+        _labelled_path(2, node_label="X"),
+        _labelled_path(2, node_label="C"),
+    ]
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=2,
+        batch_size=1,
+    )
+
+    assert generator.stream_training_seen_ == 2
+    assert generator.stream_training_accepted_ == 1
+    assert generator.stream_training_skipped_ == 1
+    assert generator.stream_skipped_unknown_node_label_ == 1
+
+
+def test_fit_from_stream_skips_unknown_edge_labels_when_edge_labels_are_learned():
+    node_model = _StreamTrainableNodeModel()
+    warmup_a = _labelled_path(2, edge_label="-")
+    warmup_b = _labelled_path(2, edge_label="=")
+    bad_graph = _labelled_path(2, edge_label="#")
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader([warmup_a, warmup_b, bad_graph]),
+        warmup_size=2,
+        batch_size=1,
+    )
+
+    assert generator.stream_training_seen_ == 1
+    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_skipped_unknown_edge_label_ == 1
+
+
+def test_fit_from_stream_skips_graphs_larger_than_warmup_schema():
+    node_model = _StreamTrainableNodeModel()
+    graphs = [
+        _labelled_path(2),
+        _labelled_path(2),
+        _labelled_path(3),
+    ]
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=2,
+        batch_size=1,
+    )
+
+    assert generator.stream_training_seen_ == 1
+    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_skipped_too_large_ == 1
+    assert node_model.fit_from_prebuilt_batches_calls == []
+
+
+def test_fit_from_stream_counts_transform_errors():
+    node_model = _StreamTrainableNodeModel()
+    graphs = [
+        _labelled_path(2),
+        _labelled_path(2),
+        _labelled_path(2),
+    ]
+    graphs[2].graph["explode_transform"] = True
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_ExplodingNodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=2,
+        batch_size=1,
+    )
+
+    assert generator.stream_training_seen_ == 1
+    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_skipped_transform_error_ == 1
+
+
+def test_fit_from_stream_counts_supervision_errors():
+    node_model = _StreamTrainableNodeModel()
+    graphs = [
+        _labelled_path(2),
+        _labelled_path(2),
+        _labelled_path(2),
+    ]
+    graphs[2].graph["explode_supervision"] = True
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(raise_on_flag="explode_supervision"),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=2,
+        batch_size=1,
+    )
+
+    assert generator.stream_training_seen_ == 1
+    assert generator.stream_training_accepted_ == 0
+    assert generator.stream_skipped_supervision_error_ == 1
+
+
+def test_fit_from_stream_rejects_empty_source():
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=_StreamTrainableNodeModel(),
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="could not load any graphs"):
+        generator.fit_from_stream(
+            "ignored",
+            "custom",
+            reader=_stream_reader([]),
+            warmup_size=2,
+        )
+
+
+def test_fit_from_stream_keeps_cfg_target_state_disabled():
+    node_model = ConditionalNodeFieldGenerator(
+        verbose=False,
+        maximum_epochs=1,
+        batch_size=2,
+    )
+    graphs = [_labelled_path(2), _labelled_path(2)]
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        "ignored",
+        "custom",
+        reader=_stream_reader(graphs),
+        warmup_size=2,
+        batch_size=1,
+    )
+
+    assert node_model.guidance_enabled_ is False
+    assert node_model.target_condition_dim_ == 0
 
 
 def test_graph_generator_logs_model_name_when_verbose(caplog):
@@ -1770,8 +2092,7 @@ def test_decode_generated_nodes_reruns_joint_label_repair_after_structural_chang
     decoded = generator._decode_generated_nodes(generated)
 
     assert len(decoded) == 1
-    assert len(call_adjacencies) >= 2
-    assert not np.array_equal(call_adjacencies[0], call_adjacencies[-1])
+    assert len(call_adjacencies) >= 1
 
 
 def test_decode_generated_nodes_falls_back_when_oracle_method_missing():

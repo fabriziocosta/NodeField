@@ -38,6 +38,14 @@ _ORACLE_NODE_LABEL_WEIGHT = 1.0
 _ORACLE_EDGE_LABEL_WEIGHT = 1.0
 
 
+class _StreamTransformError(RuntimeError):
+    pass
+
+
+class _StreamSupervisionError(RuntimeError):
+    pass
+
+
 def _format_elapsed_seconds(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     if seconds < 60.0:
@@ -1770,6 +1778,18 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.feasibility_failure_mode = str(feasibility_failure_mode)
         self.model_name = model_name
         self.model_dir = model_dir
+        self.stream_seen_ = 0
+        self.stream_warmup_count_ = 0
+        self.stream_training_seen_ = 0
+        self.stream_training_accepted_ = 0
+        self.stream_training_skipped_ = 0
+        self.stream_skipped_too_large_ = 0
+        self.stream_skipped_unknown_node_label_ = 0
+        self.stream_skipped_unknown_edge_label_ = 0
+        self.stream_skipped_transform_error_ = 0
+        self.stream_skipped_supervision_error_ = 0
+        self.stream_acceptance_rate_ = 0.0
+        self.warmup_schema_frozen_ = False
         if int(self.verbose) >= 1 and self.model_name is not None:
             verbose_log(
                 self,
@@ -2686,53 +2706,53 @@ class ConditionalNodeFieldGraphGenerator(object):
                 current_rank = oracle_rank(current_node_violation_sets, current_edge_violation_sets, score)
                 joint_label_changed = False
                 joint_label_detail = "label follow-up disabled"
-
-                if use_node_label_cuts and accumulated_node_label_forbidden and node_label_probabilities is not None:
-                    repaired_node_labels = self._repair_node_labels_with_oracle(
-                        existence_mask=existence_mask,
-                        current_node_labels=current_node_labels,
-                        node_label_probabilities=np.asarray(node_label_probabilities[graph_idx], dtype=float),
-                        forbidden_assignments=accumulated_node_label_forbidden,
+                can_repair_joint_labels = (
+                    (
+                        use_node_label_cuts
+                        and accumulated_node_label_forbidden
+                        and node_label_probabilities is not None
                     )
-                    if not np.array_equal(repaired_node_labels, current_node_labels):
-                        candidate = evaluate_oracle_state(repaired_node_labels, current_edge_label_matrix)
-                        candidate_rank = oracle_rank(candidate[1], candidate[2], candidate[3])
-                        if candidate_rank < current_rank:
-                            current_node_labels = repaired_node_labels
-                            (
-                                graph,
-                                current_node_violation_sets,
-                                current_edge_violation_sets,
-                                score,
-                                edge_score,
-                                node_score,
-                                edge_label_score,
-                            ) = candidate
-                            current_rank = candidate_rank
-                            joint_label_changed = True
-                            joint_label_detail = "node labels changed"
-                        else:
-                            joint_label_detail = "node label follow-up rejected"
-                    else:
-                        joint_label_detail = "node label follow-up unchanged"
-
-                if use_edge_label_cuts and accumulated_edge_label_forbidden and edge_label_probabilities is not None:
-                    repaired_edge_label_matrix = self._repair_edge_labels_with_oracle(
+                    or (
+                        use_edge_label_cuts
+                        and accumulated_edge_label_forbidden
+                        and edge_label_probabilities is not None
+                    )
+                )
+                if can_repair_joint_labels:
+                    repaired_node_labels, repaired_edge_label_matrix = self._repair_labels_with_oracle(
                         existence_mask=existence_mask,
                         adj_mtx=single_adj_mtx,
+                        current_node_labels=current_node_labels,
                         current_edge_label_matrix=current_edge_label_matrix,
-                        edge_label_probabilities=np.asarray(edge_label_probabilities[graph_idx], dtype=float),
-                        forbidden_assignments=accumulated_edge_label_forbidden,
+                        node_label_probabilities=(
+                            None
+                            if node_label_probabilities is None
+                            else np.asarray(node_label_probabilities[graph_idx], dtype=float)
+                        ),
+                        edge_label_probabilities=(
+                            None
+                            if edge_label_probabilities is None
+                            else np.asarray(edge_label_probabilities[graph_idx], dtype=float)
+                        ),
+                        forbidden_node_assignments=accumulated_node_label_forbidden,
+                        forbidden_edge_assignments=accumulated_edge_label_forbidden,
                     )
                     repaired_edge_label_matrix = self._fill_unlabeled_active_edges(
                         adj_mtx=single_adj_mtx,
                         edge_label_matrix=repaired_edge_label_matrix,
-                        edge_label_probabilities=np.asarray(edge_label_probabilities[graph_idx], dtype=float),
+                        edge_label_probabilities=(
+                            None
+                            if edge_label_probabilities is None
+                            else np.asarray(edge_label_probabilities[graph_idx], dtype=float)
+                        ),
                     )
-                    if not np.array_equal(repaired_edge_label_matrix, current_edge_label_matrix):
-                        candidate = evaluate_oracle_state(current_node_labels, repaired_edge_label_matrix)
+                    labels_changed = not np.array_equal(repaired_node_labels, current_node_labels)
+                    edge_labels_changed = not np.array_equal(repaired_edge_label_matrix, current_edge_label_matrix)
+                    if labels_changed or edge_labels_changed:
+                        candidate = evaluate_oracle_state(repaired_node_labels, repaired_edge_label_matrix)
                         candidate_rank = oracle_rank(candidate[1], candidate[2], candidate[3])
                         if candidate_rank < current_rank:
+                            current_node_labels = repaired_node_labels
                             current_edge_label_matrix = repaired_edge_label_matrix
                             (
                                 graph,
@@ -2744,14 +2764,17 @@ class ConditionalNodeFieldGraphGenerator(object):
                                 edge_label_score,
                             ) = candidate
                             current_rank = candidate_rank
-                            joint_label_detail = (
-                                "node+edge labels changed" if joint_label_changed else "edge labels changed"
-                            )
                             joint_label_changed = True
+                            if labels_changed and edge_labels_changed:
+                                joint_label_detail = "node+edge labels changed"
+                            elif labels_changed:
+                                joint_label_detail = "node labels changed"
+                            else:
+                                joint_label_detail = "edge labels changed"
                         else:
-                            joint_label_detail = "edge label follow-up rejected"
-                    elif not joint_label_changed:
-                        joint_label_detail = "edge label follow-up unchanged"
+                            joint_label_detail = "joint label follow-up rejected"
+                    else:
+                        joint_label_detail = "joint label follow-up unchanged"
 
                 if not joint_label_changed and node_label_probabilities is None and edge_label_probabilities is None:
                     joint_label_detail = "label probabilities unavailable"
@@ -2842,6 +2865,36 @@ class ConditionalNodeFieldGraphGenerator(object):
                         dtype=float,
                     ),
                 )
+                if (
+                    (
+                        use_node_label_cuts
+                        and accumulated_node_label_forbidden
+                        and node_label_probabilities is not None
+                    )
+                    or (
+                        use_edge_label_cuts
+                        and accumulated_edge_label_forbidden
+                        and edge_label_probabilities is not None
+                    )
+                ):
+                    current_node_labels, current_edge_label_matrix = self._repair_labels_with_oracle(
+                        existence_mask=existence_mask,
+                        adj_mtx=single_adj_mtx,
+                        current_node_labels=current_node_labels,
+                        current_edge_label_matrix=current_edge_label_matrix,
+                        node_label_probabilities=(
+                            None
+                            if node_label_probabilities is None
+                            else np.asarray(node_label_probabilities[graph_idx], dtype=float)
+                        ),
+                        edge_label_probabilities=(
+                            None
+                            if edge_label_probabilities is None
+                            else np.asarray(edge_label_probabilities[graph_idx], dtype=float)
+                        ),
+                        forbidden_node_assignments=accumulated_node_label_forbidden,
+                        forbidden_edge_assignments=accumulated_edge_label_forbidden,
+                    )
                 structural_graph = _assemble_graph_job(
                     existence_mask,
                     current_node_labels,
@@ -3246,6 +3299,417 @@ class ConditionalNodeFieldGraphGenerator(object):
             node_counts=np.asarray(sampled_node_counts, dtype=np.int64),
             edge_counts=np.asarray(sampled_edge_counts, dtype=np.int64),
         )
+
+    def _reset_stream_fit_stats(self) -> None:
+        self.stream_seen_ = 0
+        self.stream_warmup_count_ = 0
+        self.stream_training_seen_ = 0
+        self.stream_training_accepted_ = 0
+        self.stream_training_skipped_ = 0
+        self.stream_skipped_too_large_ = 0
+        self.stream_skipped_unknown_node_label_ = 0
+        self.stream_skipped_unknown_edge_label_ = 0
+        self.stream_skipped_transform_error_ = 0
+        self.stream_skipped_supervision_error_ = 0
+        self.stream_acceptance_rate_ = 0.0
+        self.warmup_schema_frozen_ = False
+
+    @staticmethod
+    def _make_stream_rng(random_state=None):
+        if random_state is None:
+            return np.random.default_rng()
+        if isinstance(random_state, np.random.Generator):
+            return random_state
+        return np.random.default_rng(random_state)
+
+    def _iter_selected_source_graphs(
+        self,
+        uri,
+        type,
+        reader=None,
+        limit=None,
+        random_state=None,
+        verbose: bool = False,
+        start_after_instance: int = 0,
+    ):
+        if start_after_instance is None:
+            start_after_instance = 0
+        start_after_instance = int(start_after_instance)
+        if start_after_instance < 0:
+            raise ValueError("start_after_instance must be >= 0")
+        if reader is None:
+            try:
+                import graph_io as _graph_io
+            except ImportError as exc:  # pragma: no cover
+                raise ImportError(
+                    "fit_from_stream() requires the NSPPK graph_io module when reader is not provided."
+                ) from exc
+            yield from _graph_io._iter_loaded_graphs(
+                uri,
+                type,
+                reader=None,
+                limit=limit,
+                random_state=random_state,
+                verbose=verbose,
+                mode="stream",
+                start_after_instance=start_after_instance,
+            )
+            return
+
+        raw_graph_iterable = reader(uri)
+        rng = self._make_stream_rng(random_state)
+        seen_after_offset = 0
+        yielded = 0
+        for raw_index, graph in enumerate(raw_graph_iterable):
+            if raw_index < start_after_instance:
+                continue
+            if limit is None:
+                pass
+            elif isinstance(limit, (int, np.integer)):
+                if int(limit) < 0:
+                    raise ValueError("limit must be >= 0 when provided as an integer.")
+                if yielded >= int(limit):
+                    break
+            elif isinstance(limit, float):
+                if not 0.0 < float(limit) < 1.0:
+                    raise ValueError("float limit must be strictly between 0 and 1.")
+                if rng.random() > float(limit):
+                    seen_after_offset += 1
+                    continue
+            else:
+                raise TypeError("limit must be None, int, or float.")
+            seen_after_offset += 1
+            yielded += 1
+            yield graph
+
+    def _prepare_fit_artifacts(
+        self,
+        graphs: List[nx.Graph],
+        targets: Optional[Sequence[Any]] = None,
+    ) -> Dict[str, Any]:
+        self.graph_vectorizer.fit(graphs)
+        self.node_graph_vectorizer.fit(graphs)
+        if self.feasibility_estimator is not None:
+            verbose_log(self, f"Fitting feasibility estimator on {len(graphs)} graphs")
+            self.feasibility_estimator.fit(graphs)
+        node_label_targets = self.graphs_to_node_label_targets(graphs)
+        edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
+        supervision_plan = self._build_supervision_plan(
+            graphs,
+            node_label_targets=node_label_targets,
+            edge_label_targets=edge_label_targets,
+        )
+        self.supervision_plan_ = supervision_plan
+        if self.conditional_node_generator_model is not None:
+            setattr(self.conditional_node_generator_model, "supervision_plan_", supervision_plan)
+
+        node_embeddings_list, graph_conditioning = self.encode(graphs)
+        self.training_graph_conditioning_ = GraphConditioningBatch(
+            graph_embeddings=np.asarray(graph_conditioning.graph_embeddings),
+            node_counts=np.asarray(graph_conditioning.node_counts, dtype=np.int64),
+            edge_counts=np.asarray(graph_conditioning.edge_counts, dtype=np.int64),
+        )
+        return {
+            "node_label_targets": node_label_targets,
+            "edge_label_targets": edge_label_targets,
+            "edge_label_pairs": edge_label_pairs,
+            "supervision_plan": supervision_plan,
+            "node_embeddings_list": node_embeddings_list,
+            "graph_conditioning": graph_conditioning,
+            "targets": targets,
+        }
+
+    def _build_training_node_batch(
+        self,
+        graphs: List[nx.Graph],
+        *,
+        node_embeddings_list: List[np.ndarray],
+        node_label_targets: List[np.ndarray],
+        edge_label_targets: Optional[np.ndarray],
+        edge_label_pairs: Optional[List[Tuple[int, int, int]]],
+        supervision_plan,
+    ) -> NodeGenerationBatch:
+        edge_pairs_for_cond_gen = None
+        edge_targets_for_cond_gen = None
+        auxiliary_edge_pairs_for_cond_gen = None
+        auxiliary_edge_targets_for_cond_gen = None
+        if supervision_plan.direct_edges.enabled:
+            if self.graph_decoder is None:
+                raise RuntimeError("Locality supervision requested but graph_decoder is None.")
+            self._log_supervision_plan(supervision_plan)
+            edge_targets_for_cond_gen, edge_pairs_for_cond_gen = self.graph_decoder.compute_edge_supervision(
+                graphs,
+                node_embeddings_list,
+                locality_sample_fraction=self.locality_sample_fraction,
+                negative_sample_factor=self.negative_sample_factor,
+                locality_sampling_strategy=self.locality_sampling_strategy,
+                locality_target_positive_ratio=self.locality_target_positive_ratio,
+                horizon=1,
+                supervision_name="direct_edge",
+            )
+            if supervision_plan.auxiliary_locality.enabled:
+                auxiliary_edge_targets_for_cond_gen, auxiliary_edge_pairs_for_cond_gen = (
+                    self.graph_decoder.compute_edge_supervision(
+                        graphs,
+                        node_embeddings_list,
+                        locality_sample_fraction=self.locality_sample_fraction,
+                        negative_sample_factor=self.negative_sample_factor,
+                        locality_sampling_strategy=self.locality_sampling_strategy,
+                        locality_target_positive_ratio=self.locality_target_positive_ratio,
+                        horizon=supervision_plan.auxiliary_locality.horizon,
+                        supervision_name="aux_locality",
+                    )
+                )
+        else:
+            self._log_supervision_plan(supervision_plan)
+        return self._build_node_batch(
+            graphs,
+            node_embeddings_list,
+            node_label_targets=node_label_targets if supervision_plan.node_labels.enabled else None,
+            edge_pairs=edge_pairs_for_cond_gen,
+            edge_targets=edge_targets_for_cond_gen,
+            edge_label_pairs=edge_label_pairs if supervision_plan.edge_labels.enabled else None,
+            edge_label_targets=edge_label_targets if supervision_plan.edge_labels.enabled else None,
+            auxiliary_edge_pairs=auxiliary_edge_pairs_for_cond_gen,
+            auxiliary_edge_targets=auxiliary_edge_targets_for_cond_gen,
+        )
+
+    def _stream_rejection_reason(self, graph: nx.Graph) -> Optional[str]:
+        node_model = self.conditional_node_generator_model
+        max_rows = getattr(node_model, "number_of_rows_per_example", None)
+        if max_rows is not None and graph.number_of_nodes() > int(max_rows):
+            return "too_large"
+        node_label_vocab = getattr(node_model, "node_label_to_index_", None)
+        if node_label_vocab:
+            for node in graph.nodes():
+                label = graph.nodes[node].get("label", DEFAULT_DUMMY_NODE_LABEL)
+                if label not in node_label_vocab:
+                    return "unknown_node_label"
+        supervision_plan = getattr(self, "supervision_plan_", None)
+        edge_label_vocab = getattr(node_model, "edge_label_to_index_", None)
+        edge_label_mode = None if supervision_plan is None else getattr(supervision_plan.edge_labels, "mode", None)
+        if edge_label_vocab and edge_label_mode == "learned":
+            for _, _, attrs in graph.edges(data=True):
+                if "label" not in attrs or attrs["label"] not in edge_label_vocab:
+                    return "unknown_edge_label"
+        return None
+
+    def _increment_stream_skip(self, reason: str) -> None:
+        self.stream_training_skipped_ += 1
+        if reason == "too_large":
+            self.stream_skipped_too_large_ += 1
+        elif reason == "unknown_node_label":
+            self.stream_skipped_unknown_node_label_ += 1
+        elif reason == "unknown_edge_label":
+            self.stream_skipped_unknown_edge_label_ += 1
+        elif reason == "transform_error":
+            self.stream_skipped_transform_error_ += 1
+        elif reason == "supervision_error":
+            self.stream_skipped_supervision_error_ += 1
+
+    def _log_stream_skip(self, reason: str, graph: nx.Graph) -> None:
+        if int(self.verbose) < 2:
+            return
+        verbose_log(
+            self,
+            "Skipping streamed graph "
+            f"(nodes={graph.number_of_nodes()}, edges={graph.number_of_edges()}) due to {reason}.",
+            level=2,
+        )
+
+    def _finalize_stream_fit_stats(self) -> None:
+        denominator = max(1, int(self.stream_training_seen_))
+        self.stream_acceptance_rate_ = float(self.stream_training_accepted_) / float(denominator)
+        self.warmup_schema_frozen_ = True
+        if int(self.verbose) >= 1:
+            verbose_log(
+                self,
+                "Streaming fit summary: "
+                f"seen={self.stream_seen_}, warmup={self.stream_warmup_count_}, "
+                f"train_seen={self.stream_training_seen_}, accepted={self.stream_training_accepted_}, "
+                f"skipped={self.stream_training_skipped_}, acceptance_rate={self.stream_acceptance_rate_:.1%}.",
+            )
+        if self.stream_training_seen_ > 0 and self.stream_acceptance_rate_ < 0.5:
+            logger.warning(
+                "Low streamed training acceptance rate: %.1f%% (%d/%d accepted).",
+                100.0 * self.stream_acceptance_rate_,
+                self.stream_training_accepted_,
+                self.stream_training_seen_,
+            )
+
+    def _prepare_stream_training_batch(self, graphs: List[nx.Graph]):
+        supervision_plan = getattr(self, "supervision_plan_", None)
+        if supervision_plan is None:
+            raise RuntimeError("supervision_plan_ is not initialized.")
+        try:
+            node_embeddings_list, graph_conditioning = self.encode(graphs)
+        except Exception as exc:
+            raise _StreamTransformError("Failed to encode streamed graphs under the frozen warmup schema.") from exc
+        try:
+            node_label_targets = self.graphs_to_node_label_targets(graphs)
+            edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
+            node_batch = self._build_training_node_batch(
+                graphs,
+                node_embeddings_list=node_embeddings_list,
+                node_label_targets=node_label_targets,
+                edge_label_targets=edge_label_targets,
+                edge_label_pairs=edge_label_pairs,
+                supervision_plan=supervision_plan,
+            )
+            payload = self.conditional_node_generator_model._build_processed_training_payload(
+                node_batch=node_batch,
+                graph_conditioning=graph_conditioning,
+                targets=None,
+            )
+            return self.conditional_node_generator_model._collate_processed_payload(payload)
+        except Exception as exc:
+            raise _StreamSupervisionError("Failed to derive streamed supervision under the frozen warmup schema.") from exc
+
+    def fit_from_stream(
+        self,
+        uri,
+        type,
+        reader=None,
+        warmup_size: int = 2048,
+        batch_size: int = 128,
+        limit=None,
+        random_state=None,
+        verbose: bool = False,
+        start_after_instance: int = 0,
+        train_node_generator: bool = True,
+        ckpt_path: Optional[str] = None,
+    ) -> 'ConditionalNodeFieldGraphGenerator':
+        if int(warmup_size) < 1:
+            raise ValueError("warmup_size must be >= 1.")
+        self._require_fit_components(train_node_generator=train_node_generator)
+        self._reset_stream_fit_stats()
+        original_verbose = self.verbose
+        try:
+            if verbose:
+                self.verbose = verbose
+            source_iter = self._iter_selected_source_graphs(
+                uri,
+                type,
+                reader=reader,
+                limit=limit,
+                random_state=random_state,
+                verbose=bool(verbose),
+                start_after_instance=start_after_instance,
+            )
+            warmup_graphs = []
+            for graph in source_iter:
+                self.stream_seen_ += 1
+                warmup_graphs.append(graph)
+                if len(warmup_graphs) >= int(warmup_size):
+                    break
+            self.stream_warmup_count_ = len(warmup_graphs)
+            if len(warmup_graphs) == 0:
+                raise ValueError("fit_from_stream() could not load any graphs from the selected source.")
+            verbose_log(self, f"Warmup fitting on {len(warmup_graphs)} streamed graphs.")
+            artifacts = self._prepare_fit_artifacts(warmup_graphs, targets=None)
+
+            if train_node_generator:
+                warmup_node_batch = self._build_training_node_batch(
+                    warmup_graphs,
+                    node_embeddings_list=artifacts["node_embeddings_list"],
+                    node_label_targets=artifacts["node_label_targets"],
+                    edge_label_targets=artifacts["edge_label_targets"],
+                    edge_label_pairs=artifacts["edge_label_pairs"],
+                    supervision_plan=artifacts["supervision_plan"],
+                )
+                verbose_log(
+                    self,
+                    f"Warmup schema frozen with up to {warmup_node_batch.node_presence_mask.shape[1]} nodes per graph.",
+                )
+                self.conditional_node_generator_model.setup(
+                    node_batch=warmup_node_batch,
+                    graph_conditioning=artifacts["graph_conditioning"],
+                    targets=None,
+                )
+                setattr(self.conditional_node_generator_model, "_graph_generator_snapshot_owner", self)
+
+                def _remaining_batch_iter():
+                    active_batch = []
+                    for graph in source_iter:
+                        self.stream_seen_ += 1
+                        self.stream_training_seen_ += 1
+                        rejection_reason = self._stream_rejection_reason(graph)
+                        if rejection_reason is not None:
+                            self._increment_stream_skip(rejection_reason)
+                            self._log_stream_skip(rejection_reason, graph)
+                            continue
+                        active_batch.append(graph)
+                        if len(active_batch) < int(batch_size):
+                            continue
+                        try:
+                            batch_payload = self._prepare_stream_training_batch(active_batch)
+                        except _StreamTransformError:
+                            self.stream_training_skipped_ += len(active_batch)
+                            self.stream_skipped_transform_error_ += len(active_batch)
+                            for rejected_graph in active_batch:
+                                self._log_stream_skip("transform_error", rejected_graph)
+                            active_batch = []
+                            continue
+                        except _StreamSupervisionError:
+                            self.stream_training_skipped_ += len(active_batch)
+                            self.stream_skipped_supervision_error_ += len(active_batch)
+                            for rejected_graph in active_batch:
+                                self._log_stream_skip("supervision_error", rejected_graph)
+                            active_batch = []
+                            continue
+                        self.stream_training_accepted_ += len(active_batch)
+                        yield batch_payload
+                        active_batch = []
+                    if active_batch:
+                        try:
+                            batch_payload = self._prepare_stream_training_batch(active_batch)
+                        except _StreamTransformError:
+                            self.stream_training_skipped_ += len(active_batch)
+                            self.stream_skipped_transform_error_ += len(active_batch)
+                            for rejected_graph in active_batch:
+                                self._log_stream_skip("transform_error", rejected_graph)
+                        except _StreamSupervisionError:
+                            self.stream_training_skipped_ += len(active_batch)
+                            self.stream_skipped_supervision_error_ += len(active_batch)
+                            for rejected_graph in active_batch:
+                                self._log_stream_skip("supervision_error", rejected_graph)
+                        else:
+                            self.stream_training_accepted_ += len(active_batch)
+                            yield batch_payload
+
+                remaining_batches = _remaining_batch_iter()
+                try:
+                    first_batch = next(remaining_batches)
+                except StopIteration:
+                    verbose_log(self, "No streamed training batches were accepted after warmup; skipping node-model training.")
+                else:
+                    batch_state = {"first_emitted": False}
+
+                    def _single_pass_batch_factory():
+                        if batch_state["first_emitted"]:
+                            return
+                        batch_state["first_emitted"] = True
+                        yield first_batch
+                        yield from remaining_batches
+
+                    original_maximum_epochs = getattr(self.conditional_node_generator_model, "maximum_epochs", None)
+                    if original_maximum_epochs is not None:
+                        self.conditional_node_generator_model.maximum_epochs = 1
+                    try:
+                        self.conditional_node_generator_model.fit_from_prebuilt_batches(
+                            warmup_node_batch=warmup_node_batch,
+                            warmup_graph_conditioning=artifacts["graph_conditioning"],
+                            batch_iter_factory=_single_pass_batch_factory,
+                            ckpt_path=ckpt_path,
+                        )
+                    finally:
+                        if original_maximum_epochs is not None:
+                            self.conditional_node_generator_model.maximum_epochs = original_maximum_epochs
+            self.is_fitted_ = True
+            self._finalize_stream_fit_stats()
+            return self
+        finally:
+            self.verbose = original_verbose
 
     @timeit
     def fit(
