@@ -1084,9 +1084,10 @@ Parameters:
 Streaming semantics:
 
 - warmup defines the frozen schema
-- the first `batch_size` warmup graphs form the fixed validation set
-- all warmup graphs are still reused as epoch-1 training batches
-- later epochs replay only the post-warmup tail
+- all warmup graphs are used for epoch-1 training
+- the first compatible post-warmup batch is reserved as the fixed validation set
+- epoch-1 streamed training starts after that validation batch
+- later epochs replay only the post-warmup tail and skip that same validation slot
 - incompatible post-warmup graphs are skipped rather than adapting the schema
 - `maximum_epochs` on the node generator controls how many times the post-warmup stream is restarted
 

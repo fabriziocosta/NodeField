@@ -227,16 +227,17 @@ The flow is:
 
 1. read `warmup_size` graphs from the selected source,
 2. fit vectorizers, supervision metadata, feasibility estimator, and model schema on warmup only,
-3. reserve the first streamed batch worth of warmup graphs as a fixed validation subset,
-4. still reuse all warmup graphs as epoch-1 training batches,
-5. continue training on the post-warmup stream, skipping incompatible graphs,
+3. train on all warmup graphs during epoch 1,
+4. reserve the first compatible post-warmup batch as a fixed validation subset,
+5. continue training on the remaining post-warmup stream, skipping incompatible graphs,
 6. when `maximum_epochs > 1`, restart only the post-warmup stream for later epochs.
 
 This means warmup plays three roles at once:
 
 - schema definition,
-- fixed validation support,
 - initial training data for epoch 1.
+
+Validation is intentionally disjoint from warmup training. The fixed validation batch comes from the stream immediately after warmup, not from the warmup graphs themselves.
 
 The schema is never expanded after warmup. Post-warmup graphs are accepted only if they remain compatible with the warmup-defined node-count limit, label vocabularies, and transform/supervision assumptions.
 
