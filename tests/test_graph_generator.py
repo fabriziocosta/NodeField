@@ -1,5 +1,6 @@
 import io
 import types
+from concurrent.futures.process import BrokenProcessPool
 
 import numpy as np
 import networkx as nx
@@ -10,6 +11,7 @@ import torch
 from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
+import conditional_node_field_graph_generator.parallel_utils as parallel_utils
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
@@ -1783,6 +1785,123 @@ def test_plot_decoder_diagnostics_uses_integer_node_ticks(monkeypatch):
     assert adjacency_axis.yticks == [0, 1]
     assert adjacency_axis.yticklabels == [1, 2]
     assert label_axis.yticklabels == ["0", "1", "2"]
+
+
+def test_parallel_map_falls_back_to_threads_on_broken_process_pool(monkeypatch):
+    calls = {"thread_used": False}
+
+    class _BrokenProcessExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, jobs):
+            raise BrokenProcessPool("process pool terminated")
+
+    class _ThreadExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            calls["thread_used"] = True
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, jobs):
+            return [func(job) for job in jobs]
+
+    monkeypatch.setattr(parallel_utils, "ProcessPoolExecutor", _BrokenProcessExecutor)
+    monkeypatch.setattr(parallel_utils, "ThreadPoolExecutor", _ThreadExecutor)
+
+    result = parallel_utils._parallel_map(lambda x: x + 1, [1, 2, 3], max_workers=2, verbose=False)
+
+    assert result == [2, 3, 4]
+    assert calls["thread_used"] is True
+
+
+def test_parallel_map_falls_back_to_threads_on_pickle_type_error(monkeypatch):
+    calls = {"thread_used": False}
+
+    class _PickleFailingProcessExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, jobs):
+            raise TypeError("cannot pickle local object")
+
+    class _ThreadExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            calls["thread_used"] = True
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, jobs):
+            return [func(job) for job in jobs]
+
+    monkeypatch.setattr(parallel_utils, "ProcessPoolExecutor", _PickleFailingProcessExecutor)
+    monkeypatch.setattr(parallel_utils, "ThreadPoolExecutor", _ThreadExecutor)
+
+    result = parallel_utils._parallel_map(lambda x: x * 2, [1, 2], max_workers=2, verbose=False)
+
+    assert result == [2, 4]
+    assert calls["thread_used"] is True
+
+
+def test_parallel_map_does_not_mask_non_parallel_worker_errors(monkeypatch):
+    calls = {"thread_used": False}
+
+    class _FailingProcessExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, jobs):
+            raise ValueError("worker failed")
+
+    class _ThreadExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            calls["thread_used"] = True
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, jobs):
+            return [func(job) for job in jobs]
+
+    monkeypatch.setattr(parallel_utils, "ProcessPoolExecutor", _FailingProcessExecutor)
+    monkeypatch.setattr(parallel_utils, "ThreadPoolExecutor", _ThreadExecutor)
+
+    with pytest.raises(ValueError, match="worker failed"):
+        parallel_utils._parallel_map(lambda x: x, [1, 2], max_workers=2, verbose=False)
+
+    assert calls["thread_used"] is False
 
 
 def test_fill_unlabeled_active_edges_uses_edge_label_probabilities():
