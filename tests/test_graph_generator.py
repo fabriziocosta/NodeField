@@ -3,6 +3,7 @@ import types
 
 import numpy as np
 import networkx as nx
+import pandas as pd
 import pytest
 import pulp
 import torch
@@ -580,6 +581,37 @@ def test_fit_from_stream_keeps_cfg_target_state_disabled():
 
     assert node_model.guidance_enabled_ is False
     assert node_model.target_condition_dim_ == 0
+
+
+def test_fit_from_stream_accepts_smiles_csv_source(tmp_path):
+    pytest.importorskip("abstractgraph_graphicalizer.chem")
+    csv_path = tmp_path / "tiny_zinc.csv"
+    pd.DataFrame(
+        {
+            "smiles": ["CC", "CCC", "CCCC"],
+            "logP": [1.0, 2.0, 3.0],
+        }
+    ).to_csv(csv_path, index=False)
+    node_model = _StreamTrainableNodeModel()
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=_EdgeSupervisionDecoder(),
+        verbose=False,
+    )
+
+    generator.fit_from_stream(
+        csv_path,
+        "smiles_csv",
+        warmup_size=1,
+        batch_size=1,
+    )
+
+    assert generator.stream_warmup_count_ == 1
+    assert generator.stream_training_seen_ == 2
+    assert generator.stream_training_accepted_ == 2
+    assert node_model.fit_from_prebuilt_batches_calls[0]["warmup_graphs"] == 1
 
 
 def test_graph_generator_logs_model_name_when_verbose(caplog):

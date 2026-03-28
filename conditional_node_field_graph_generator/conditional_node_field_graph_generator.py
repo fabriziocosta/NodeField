@@ -26,6 +26,7 @@ from .conditional_node_field_generator import (
     NodeGenerationBatch,
 )
 from .conditional_node_field_graph_decoder import ConditionalNodeFieldGraphDecoder
+from .input_sources import iter_selected_source_graphs
 
 DEFAULT_DUMMY_NODE_LABEL = "__dummy_node_label__"
 logger = get_runtime_logger(__name__)
@@ -2418,74 +2419,6 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.stream_acceptance_rate_ = 0.0
         self.warmup_schema_frozen_ = False
 
-    @staticmethod
-    def _make_stream_rng(random_state=None):
-        if random_state is None:
-            return np.random.default_rng()
-        if isinstance(random_state, np.random.Generator):
-            return random_state
-        return np.random.default_rng(random_state)
-
-    def _iter_selected_source_graphs(
-        self,
-        uri,
-        type,
-        reader=None,
-        limit=None,
-        random_state=None,
-        verbose: bool = False,
-        start_after_instance: int = 0,
-    ):
-        if start_after_instance is None:
-            start_after_instance = 0
-        start_after_instance = int(start_after_instance)
-        if start_after_instance < 0:
-            raise ValueError("start_after_instance must be >= 0")
-        if reader is None:
-            try:
-                import graph_io as _graph_io
-            except ImportError as exc:  # pragma: no cover
-                raise ImportError(
-                    "fit_from_stream() requires the NSPPK graph_io module when reader is not provided."
-                ) from exc
-            yield from _graph_io._iter_loaded_graphs(
-                uri,
-                type,
-                reader=None,
-                limit=limit,
-                random_state=random_state,
-                verbose=verbose,
-                mode="stream",
-                start_after_instance=start_after_instance,
-            )
-            return
-
-        raw_graph_iterable = reader(uri)
-        rng = self._make_stream_rng(random_state)
-        seen_after_offset = 0
-        yielded = 0
-        for raw_index, graph in enumerate(raw_graph_iterable):
-            if raw_index < start_after_instance:
-                continue
-            if limit is None:
-                pass
-            elif isinstance(limit, (int, np.integer)):
-                if int(limit) < 0:
-                    raise ValueError("limit must be >= 0 when provided as an integer.")
-                if yielded >= int(limit):
-                    break
-            elif isinstance(limit, float):
-                if not 0.0 < float(limit) < 1.0:
-                    raise ValueError("float limit must be strictly between 0 and 1.")
-                if rng.random() > float(limit):
-                    seen_after_offset += 1
-                    continue
-            else:
-                raise TypeError("limit must be None, int, or float.")
-            seen_after_offset += 1
-            yielded += 1
-            yield graph
-
     def _prepare_fit_artifacts(
         self,
         graphs: List[nx.Graph],
@@ -2691,7 +2624,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         try:
             if verbose:
                 self.verbose = verbose
-            source_iter = self._iter_selected_source_graphs(
+            source_iter = iter_selected_source_graphs(
                 uri,
                 type,
                 reader=reader,
