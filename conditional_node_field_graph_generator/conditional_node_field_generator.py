@@ -2550,6 +2550,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                     )
                 )
                 print(f"  path={self.best_checkpoint_path_}")
+        if int(self.verbose) >= 1:
+            try:
+                self.plot_metrics()
+            except Exception as exc:
+                print(f"Unable to plot training metrics: {exc}")
 
     def fit_from_prebuilt_batches(
         self,
