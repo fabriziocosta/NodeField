@@ -29,6 +29,11 @@ from .conditional_node_field_graph_decoder import (
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .input_sources import iter_selected_source_graphs
+from .interpolation_utils import (
+    interpolate_integer_series as _interpolate_integer_series,
+    scaled_slerp,
+    scaled_slerp_average,
+)
 from .parallel_utils import _normalize_n_jobs, _parallel_map
 
 DEFAULT_DUMMY_NODE_LABEL = "__dummy_node_label__"
@@ -257,77 +262,6 @@ class GeneratedGuidanceBatch:
 
     def __len__(self) -> int:
         return int(len(self.decoded_graphs))
-
-def _interpolate_integer_series(start, end, ts, minimum):
-    values = np.rint([(1.0 - t) * start + t * end for t in ts]).astype(np.int64)
-    return np.maximum(values, np.int64(minimum))
-
-def scaled_slerp(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
-    """Interpolate between vectors on the hypersphere while blending magnitudes linearly.
-
-    Args:
-        v0 (np.ndarray): Input value.
-        v1 (np.ndarray): Input value.
-        t (float): Input value.
-
-    Returns:
-        np.ndarray: Computed result.
-    """
-    # Compute magnitudes
-    mag0 = np.linalg.norm(v0)
-    mag1 = np.linalg.norm(v1)
-
-    # Normalize directions (guard against zero)
-    v0_unit = v0 / mag0 if mag0 != 0 else v0
-    v1_unit = v1 / mag1 if mag1 != 0 else v1
-
-    # Compute angle between
-    dot = np.clip(np.dot(v0_unit, v1_unit), -1.0, 1.0)
-    theta = np.arccos(dot)
-
-    # Slerp the direction
-    if theta < 1e-6:
-        # Nearly colinear: fall back to linear interpolation + renormalization
-        direction = (1 - t) * v0_unit + t * v1_unit
-        norm = np.linalg.norm(direction)
-        direction = direction / norm if norm != 0 else direction
-    else:
-        sin_theta = np.sin(theta)
-        direction = (
-            np.sin((1 - t) * theta) * v0_unit +
-            np.sin(t * theta) * v1_unit
-        ) / sin_theta
-
-    # Linearly interpolate magnitudes
-    mag = (1 - t) * mag0 + t * mag1
-    return direction * mag
-
-
-def scaled_slerp_average(vectors: np.ndarray) -> np.ndarray:
-    """Compute a magnitude-aware mean direction for a batch of vectors.
-
-    Args:
-        vectors (np.ndarray): Input value.
-
-    Returns:
-        np.ndarray: Computed result.
-    """
-    vs = np.asarray(vectors, dtype=float)             # (B, D)
-    mags = np.linalg.norm(vs, axis=1)                # (B,)
-    unit_vs = np.zeros_like(vs)                      # (B, D)
-    nonzero = mags > 0
-    unit_vs[nonzero] = vs[nonzero] / mags[nonzero, None]
-
-    avg_dir = unit_vs.sum(axis=0)                    # (D,)
-    norm = np.linalg.norm(avg_dir)
-    if norm > 0:
-        avg_dir /= norm
-
-    avg_mag = mags.mean()
-    return avg_dir * avg_mag                         # (D,)
-
-
-
 
 # =============================================================================
 # ConditionalNodeFieldGraphGenerator Class 
