@@ -263,8 +263,9 @@ def score_feasible_rate(owner: Any, **kwargs: Any) -> dict[str, Any]:
         )
 
         if owner.feasibility_estimator is None:
-            decoded_graphs = owner._decode_conditioning_batch(
+            decoded_graphs = owner.decode_service_.decode_conditioning_batch(
                 graph_conditioning,
+                sampling_mode="unguided",
                 desired_target=desired_target,
                 guidance_scale=guidance_scale,
             )
@@ -272,8 +273,9 @@ def score_feasible_rate(owner: Any, **kwargs: Any) -> dict[str, Any]:
             total_generated = len(decoded_graphs)
             total_feasible = len(decoded_graphs)
         elif not owner.use_feasibility_filtering:
-            decoded_graphs = owner._decode_conditioning_batch(
+            decoded_graphs = owner.decode_service_.decode_conditioning_batch(
                 graph_conditioning,
+                sampling_mode="unguided",
                 desired_target=desired_target,
                 guidance_scale=guidance_scale,
             )
@@ -284,19 +286,13 @@ def score_feasible_rate(owner: Any, **kwargs: Any) -> dict[str, Any]:
             total_feasible = int(feasibility_mask.sum())
         else:
             def _decode_attempt(candidate_conditioning: Sequence[Any], attempt_idx: int) -> list[nx.Graph]:
-                try:
-                    return owner._decode_conditioning_batch(
-                        candidate_conditioning,
-                        desired_target=desired_target,
-                        guidance_scale=guidance_scale,
-                        attempt_idx=attempt_idx,
-                    )
-                except TypeError:
-                    return owner._decode_conditioning_batch(
-                        candidate_conditioning,
-                        desired_target=desired_target,
-                        guidance_scale=guidance_scale,
-                    )
+                return owner.decode_service_.decode_conditioning_batch(
+                    candidate_conditioning,
+                    sampling_mode="unguided",
+                    desired_target=desired_target,
+                    guidance_scale=guidance_scale,
+                    attempt_idx=attempt_idx,
+                )
 
             accepted_graphs_by_slot, total_generated, total_feasible = decode_with_feasibility_slots_core(
                 owner,
