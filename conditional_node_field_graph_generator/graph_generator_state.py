@@ -36,6 +36,36 @@ class OracleConfig:
     edge_memory_clip: float
 
 
+@dataclass(frozen=True)
+class DecodePolicy:
+    use_feasibility_filtering: bool
+    max_feasibility_attempts: int
+    feasibility_candidates_per_attempt: int
+    feasibility_failure_mode: str
+
+
+@dataclass(frozen=True)
+class CheckpointPolicy:
+    restore_best_checkpoint: bool
+    checkpoint_root_dir: str
+
+
+@dataclass(frozen=True)
+class MetricsPolicy:
+    plot_on_train_end: bool = True
+
+
+@dataclass(frozen=True)
+class TrainingPolicy:
+    maximum_epochs: int
+    early_stopping_monitor: str
+    early_stopping_mode: str
+    enable_early_stopping: bool
+    early_stopping_patience: int
+    early_stopping_min_delta: float
+    suppress_non_batch_output: bool = True
+
+
 @dataclass
 class StreamFitStats:
     seen: int = 0

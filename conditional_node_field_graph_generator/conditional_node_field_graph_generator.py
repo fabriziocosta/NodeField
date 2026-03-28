@@ -38,11 +38,13 @@ from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .input_sources import iter_selected_source_graphs
 from .graph_generator_state import (
+    DecodePolicy,
     FeasibilityConfig,
     LocalityConfig,
     OracleConfig,
     StreamFitStats,
 )
+from .decode_service import DecodeService
 from .decode_pipeline import (
     accept_feasible_candidates_by_slot as _accept_feasible_candidates_by_slot,
     decode_with_feasibility_slots_core as _decode_with_feasibility_slots_core,
@@ -419,6 +421,13 @@ class ConditionalNodeFieldGraphGenerator(object):
             edge_memory_decay=float(self.oracle_edge_memory_decay),
             edge_memory_clip=float(self.oracle_edge_memory_clip),
         )
+        self.decode_policy_ = DecodePolicy(
+            use_feasibility_filtering=bool(self.use_feasibility_filtering),
+            max_feasibility_attempts=int(self.max_feasibility_attempts),
+            feasibility_candidates_per_attempt=int(self.feasibility_candidates_per_attempt),
+            feasibility_failure_mode=str(self.feasibility_failure_mode),
+        )
+        self.decode_service_ = DecodeService(self)
 
     def _restore_label_vocab_metadata_from_node_model(self) -> None:
         node_model = getattr(self, "conditional_node_generator_model", None)
@@ -2276,8 +2285,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
     ) -> List[nx.Graph]:
-        return _decode_generated_nodes(
-            self,
+        return self.decode_service_.decode_generated_nodes(
             generated_nodes,
             graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
@@ -2726,19 +2734,31 @@ class ConditionalNodeFieldGraphGenerator(object):
         Returns:
             List[nx.Graph]: Computed result.
         """
-        if int(self.verbose) >= 3:
-            verbose_log(self, f"Predicting node matrices for {len(graph_conditioning)} graphs...", level=3)
-        generated_nodes = self._predict_generated_nodes(
+        return self.decode_service_.decode_conditioning_batch(
             graph_conditioning,
             sampling_mode="unguided",
             desired_target=desired_target,
             guidance_scale=guidance_scale,
-        )
-        return self._decode_generated_nodes(
-            generated_nodes,
-            graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
+        )
+
+    def _decode_with_feasibility_slots(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+        guidance_scale: float = 1.0,
+        apply_feasibility_filtering: Optional[bool] = None,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+    ) -> List[Optional[nx.Graph]]:
+        """Decode graphs and optionally reject infeasible outputs until the batch is filled."""
+        return self.decode_service_.decode_with_feasibility_slots(
+            graph_conditioning,
+            sampling_mode="unguided",
+            desired_target=desired_target,
+            guidance_scale=guidance_scale,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
 
     def _should_apply_feasibility_filtering(
@@ -2808,46 +2828,6 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> List[nx.Graph]:
         return _finalize_feasibility_graphs(self, accepted_graphs_by_slot, expected_count)
 
-    def _decode_with_feasibility_slots(
-        self,
-        graph_conditioning: GraphConditioningBatch,
-        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
-        guidance_scale: float = 1.0,
-        apply_feasibility_filtering: Optional[bool] = None,
-        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
-    ) -> List[Optional[nx.Graph]]:
-        """Decode graphs and optionally reject infeasible outputs until the batch is filled.
-
-        Args:
-            graph_conditioning (GraphConditioningBatch): Input value.
-            desired_target (Optional[Union[int, float, Sequence[Any]]]): Optional input value.
-            guidance_scale (float): Optional input value.
-            apply_feasibility_filtering (Optional[bool]): Optional input value.
-
-        Returns:
-            List[Optional[nx.Graph]]: Computed result.
-        """
-        use_filtering = self._should_apply_feasibility_filtering(apply_feasibility_filtering)
-        if self.feasibility_estimator is None or not use_filtering:
-            return list(
-                self._decode_conditioning_batch(
-                    graph_conditioning,
-                    desired_target=desired_target,
-                    guidance_scale=guidance_scale,
-                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
-                )
-            )
-        return self._decode_with_feasibility_slots_core(
-            graph_conditioning,
-            decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self._decode_conditioning_batch(
-                candidate_conditioning,
-                desired_target=desired_target,
-                guidance_scale=guidance_scale,
-                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
-                attempt_idx=attempt_idx,
-            ),
-        )
-
     def _decode_with_feasibility(
         self,
         graph_conditioning: GraphConditioningBatch,
@@ -2867,14 +2847,14 @@ class ConditionalNodeFieldGraphGenerator(object):
         Returns:
             List[nx.Graph]: Computed result.
         """
-        accepted_graphs_by_slot = self._decode_with_feasibility_slots(
+        return self.decode_service_.decode(
             graph_conditioning,
+            sampling_mode="unguided",
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
-        return self._finalize_feasibility_graphs(accepted_graphs_by_slot, len(graph_conditioning))
 
     def decode(
         self,
@@ -2906,17 +2886,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
     ) -> List[nx.Graph]:
-        if int(self.verbose) >= 3:
-            verbose_log(self, f"Predicting classifier-guided node matrices for {len(graph_conditioning)} graphs...", level=3)
-        generated_nodes = self.conditional_node_generator_model.predict_classifier_guided(
+        return self.decode_service_.decode_conditioning_batch(
             graph_conditioning,
+            sampling_mode="classifier_guided",
             desired_class=desired_class,
             classifier_scale=classifier_scale,
-        )
-        self._log_generated_batch_info(graph_conditioning, generated_nodes)
-        return self._decode_generated_nodes(
-            generated_nodes,
-            graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
         )
@@ -2929,25 +2903,13 @@ class ConditionalNodeFieldGraphGenerator(object):
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[Optional[nx.Graph]]:
-        use_filtering = self._should_apply_feasibility_filtering(apply_feasibility_filtering)
-        if self.feasibility_estimator is None or not use_filtering:
-            return list(
-                self._decode_conditioning_batch_classifier_guided(
-                    graph_conditioning,
-                    desired_class=desired_class,
-                    classifier_scale=classifier_scale,
-                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
-                )
-            )
-        return self._decode_with_feasibility_slots_core(
+        return self.decode_service_.decode_with_feasibility_slots(
             graph_conditioning,
-            decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self._decode_conditioning_batch_classifier_guided(
-                candidate_conditioning,
-                desired_class=desired_class,
-                classifier_scale=classifier_scale,
-                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
-                attempt_idx=attempt_idx,
-            ),
+            sampling_mode="classifier_guided",
+            desired_class=desired_class,
+            classifier_scale=classifier_scale,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
 
     def decode_classifier_guided(
@@ -2966,14 +2928,14 @@ class ConditionalNodeFieldGraphGenerator(object):
                 f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})",
                 level=1,
             )
-        accepted_graphs_by_slot = self._decode_with_feasibility_slots_classifier_guided(
+        return self.decode_service_.decode(
             graph_conditioning,
+            sampling_mode="classifier_guided",
             desired_class=desired_class,
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
-        return self._finalize_feasibility_graphs(accepted_graphs_by_slot, len(graph_conditioning))
 
     def _decode_conditioning_batch_regression_guided(
         self,
@@ -2983,17 +2945,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
     ) -> List[nx.Graph]:
-        if int(self.verbose) >= 3:
-            verbose_log(self, f"Predicting regression-guided node matrices for {len(graph_conditioning)} graphs...", level=3)
-        generated_nodes = self._predict_generated_nodes(
+        return self.decode_service_.decode_conditioning_batch(
             graph_conditioning,
             sampling_mode="regression_guided",
             desired_target=desired_target,
             predictor_scale=predictor_scale,
-        )
-        return self._decode_generated_nodes(
-            generated_nodes,
-            graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
         )
@@ -3006,25 +2962,13 @@ class ConditionalNodeFieldGraphGenerator(object):
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     ) -> List[Optional[nx.Graph]]:
-        use_filtering = self._should_apply_feasibility_filtering(apply_feasibility_filtering)
-        if self.feasibility_estimator is None or not use_filtering:
-            return list(
-                self._decode_conditioning_batch_regression_guided(
-                    graph_conditioning,
-                    desired_target=desired_target,
-                    predictor_scale=predictor_scale,
-                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
-                )
-            )
-        return self._decode_with_feasibility_slots_core(
+        return self.decode_service_.decode_with_feasibility_slots(
             graph_conditioning,
-            decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self._decode_conditioning_batch_regression_guided(
-                candidate_conditioning,
-                desired_target=desired_target,
-                predictor_scale=predictor_scale,
-                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
-                attempt_idx=attempt_idx,
-            ),
+            sampling_mode="regression_guided",
+            desired_target=desired_target,
+            predictor_scale=predictor_scale,
+            apply_feasibility_filtering=apply_feasibility_filtering,
+            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
 
     def decode_regression_guided(
@@ -3043,14 +2987,14 @@ class ConditionalNodeFieldGraphGenerator(object):
                 f"Using regression guidance toward target(s): {desired_target} (scale={predictor_scale})",
                 level=1,
             )
-        accepted_graphs_by_slot = self._decode_with_feasibility_slots_regression_guided(
+        return self.decode_service_.decode(
             graph_conditioning,
+            sampling_mode="regression_guided",
             desired_target=desired_target,
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         )
-        return self._finalize_feasibility_graphs(accepted_graphs_by_slot, len(graph_conditioning))
 
     @timeit
     def sample(
