@@ -16,6 +16,7 @@ from conditional_node_field_graph_generator.conditional_node_field_generator imp
     NodeGenerationBatch,
 )
 from conditional_node_field_graph_generator.metrics_collection import (
+    GraphGeneratorBatchAndEpochSnapshotCallback,
     GraphGeneratorEpochSnapshotCallback,
 )
 from conditional_node_field_graph_generator.extensions.demo.pipeline import fit_graph_generator
@@ -366,6 +367,55 @@ def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch
         {
             "graph_generator": owner,
             "model_name": "demo-chem",
+            "model_dir": tmp_path,
+            "log": False,
+            "is_fitted": True,
+        }
+    ]
+
+
+def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
+        calls.append(
+            {
+                "graph_generator": graph_generator,
+                "model_name": model_name,
+                "model_dir": model_dir,
+                "log": log,
+                "is_fitted": graph_generator.is_fitted_,
+            }
+        )
+        return "saved.pkl"
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.persistence.save_graph_generator",
+        fake_save_graph_generator,
+    )
+
+    class _Owner:
+        def __init__(self):
+            self.model_name = "demo-stream"
+            self.model_dir = tmp_path
+            self.is_fitted_ = False
+            self.stream_snapshot_every_n_batches = 100
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 1
+
+    owner = _Owner()
+    callback = GraphGeneratorBatchAndEpochSnapshotCallback(owner)
+
+    callback.on_validation_epoch_end(_Trainer(), object())
+
+    assert owner.is_fitted_ is False
+    assert calls == [
+        {
+            "graph_generator": owner,
+            "model_name": "demo-stream",
             "model_dir": tmp_path,
             "log": False,
             "is_fitted": True,

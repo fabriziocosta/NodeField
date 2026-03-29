@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 
 from .graph_generator_state import CheckpointPolicy, MetricsPolicy, TrainingPolicy
 from .metrics_collection import (
+    GraphGeneratorBatchAndEpochSnapshotCallback,
     GraphGeneratorBatchSnapshotCallback,
     GraphGeneratorEpochSnapshotCallback,
     MetricsLogger,
@@ -35,7 +36,7 @@ class TrainingCoordinator:
         if snapshot_owner is None or getattr(snapshot_owner, "model_name", None) is None:
             return None
         if snapshot_frequency == "batch":
-            return GraphGeneratorBatchSnapshotCallback(snapshot_owner)
+            return GraphGeneratorBatchAndEpochSnapshotCallback(snapshot_owner)
         if snapshot_frequency == "epoch":
             return GraphGeneratorEpochSnapshotCallback(snapshot_owner)
         return None

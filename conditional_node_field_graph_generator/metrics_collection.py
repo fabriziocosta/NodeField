@@ -318,3 +318,17 @@ class GraphGeneratorBatchSnapshotCallback(pl.callbacks.Callback):
             )
         finally:
             owner.is_fitted_ = previous_fit_state
+
+
+class GraphGeneratorBatchAndEpochSnapshotCallback(pl.callbacks.Callback):
+    """Persist streaming snapshots on both batch cadence and validation epoch end."""
+
+    def __init__(self, owner_graph_generator):
+        self._batch_callback = GraphGeneratorBatchSnapshotCallback(owner_graph_generator)
+        self._epoch_callback = GraphGeneratorEpochSnapshotCallback(owner_graph_generator)
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self._batch_callback.on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        self._epoch_callback.on_validation_epoch_end(trainer, pl_module)
