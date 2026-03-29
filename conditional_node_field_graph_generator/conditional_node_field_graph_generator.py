@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import random
+import time
 import pulp
 import dill as pickle
 from .runtime_utils import get_runtime_logger, timeit, verbose_log
@@ -297,6 +298,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts: int = 10,
             feasibility_candidates_per_attempt: int = 4,
             feasibility_failure_mode: str = "return_partial",
+            max_feasibility_seconds_per_sample: Optional[float] = 10.0,
             model_name: Optional[str] = None,
             model_dir: Optional[str] = None,
             stream_snapshot_every_n_batches: int = 10,
@@ -327,6 +329,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts (int): Optional input value.
             feasibility_candidates_per_attempt (int): Optional input value.
             feasibility_failure_mode (str): Optional input value.
+            max_feasibility_seconds_per_sample (Optional[float]): Optional input value.
             model_name (Optional[str]): Optional input value.
             model_dir (Optional[str]): Optional input value.
             stream_snapshot_every_n_batches (int): Optional input value.
@@ -364,8 +367,12 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.max_feasibility_attempts = int(max_feasibility_attempts)
         self.feasibility_candidates_per_attempt = int(feasibility_candidates_per_attempt)
         self.feasibility_failure_mode = str(feasibility_failure_mode)
+        self.max_feasibility_seconds_per_sample = (
+            None if max_feasibility_seconds_per_sample is None else float(max_feasibility_seconds_per_sample)
+        )
         self.model_name = None if model_name is None else sanitize_model_token(model_name)
         self.model_dir = model_dir
+        self._generation_timeout_deadline: Optional[float] = None
         self.warmup_schema_frozen_ = False
         if int(self.verbose) >= 1 and self.model_name is not None:
             verbose_log(
@@ -396,6 +403,11 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise ValueError("max_feasibility_attempts must be >= 1")
         if self.feasibility_candidates_per_attempt < 1:
             raise ValueError("feasibility_candidates_per_attempt must be >= 1")
+        if (
+            self.max_feasibility_seconds_per_sample is not None
+            and self.max_feasibility_seconds_per_sample <= 0.0
+        ):
+            raise ValueError("max_feasibility_seconds_per_sample must be > 0 when provided")
         valid_feasibility_failure_modes = {"raise", "return_partial"}
         if self.feasibility_failure_mode not in valid_feasibility_failure_modes:
             raise ValueError(
@@ -415,6 +427,11 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_attempts=int(self.max_feasibility_attempts),
             candidates_per_attempt=int(self.feasibility_candidates_per_attempt),
             failure_mode=str(self.feasibility_failure_mode),
+            max_seconds_per_sample=(
+                None
+                if self.max_feasibility_seconds_per_sample is None
+                else float(self.max_feasibility_seconds_per_sample)
+            ),
         )
         self.oracle_config_ = OracleConfig(
             candidates_per_attempt=int(self.feasibility_oracle_candidates_per_attempt),
@@ -431,8 +448,44 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts=int(self.max_feasibility_attempts),
             feasibility_candidates_per_attempt=int(self.feasibility_candidates_per_attempt),
             feasibility_failure_mode=str(self.feasibility_failure_mode),
+            max_feasibility_seconds_per_sample=(
+                None
+                if self.max_feasibility_seconds_per_sample is None
+                else float(self.max_feasibility_seconds_per_sample)
+            ),
         )
         self.decode_service_ = DecodeService(self)
+
+    def _get_generation_timeout_deadline(self) -> Optional[float]:
+        deadline = getattr(self, "_generation_timeout_deadline", None)
+        if deadline is None:
+            return None
+        return float(deadline)
+
+    def _remaining_generation_timeout_seconds(self) -> Optional[float]:
+        deadline = self._get_generation_timeout_deadline()
+        if deadline is None:
+            return None
+        return max(0.0, float(deadline - time.perf_counter()))
+
+    def _set_generation_timeout_deadline(self, timeout_seconds: Optional[float]) -> Optional[float]:
+        previous = getattr(self, "_generation_timeout_deadline", None)
+        if timeout_seconds is None:
+            self._generation_timeout_deadline = None
+        else:
+            self._generation_timeout_deadline = time.perf_counter() + max(0.0, float(timeout_seconds))
+        return previous
+
+    def _restore_generation_timeout_deadline(self, deadline: Optional[float]) -> None:
+        self._generation_timeout_deadline = deadline
+
+    def _resolve_solver_time_limit_seconds(self, default_seconds: Optional[float] = None) -> Optional[float]:
+        remaining = self._remaining_generation_timeout_seconds()
+        if remaining is None:
+            return default_seconds
+        if default_seconds is None:
+            return max(1.0, remaining)
+        return max(1.0, min(float(default_seconds), remaining))
 
     def _restore_label_vocab_metadata_from_node_model(self) -> None:
         node_model = getattr(self, "conditional_node_generator_model", None)
@@ -730,7 +783,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     for node_idx, label_idx in zip(node_set, label_indices)
                 ) <= len(node_set) - 1
             ), f"ForbiddenNodeLabels_{cut_idx}"
-        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        solver_kwargs = {"msg": False}
+        solver_time_limit = self._resolve_solver_time_limit_seconds()
+        if solver_time_limit is not None:
+            solver_kwargs["timeLimit"] = max(1.0, float(solver_time_limit))
+        status = prob.solve(pulp.PULP_CBC_CMD(**solver_kwargs))
         if int(status) != pulp.LpStatusOptimal:
             return np.asarray(current_node_labels, dtype=object)
         repaired = np.asarray(current_node_labels, dtype=object).copy()
@@ -803,7 +860,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     for edge, label_idx in zip(edge_set, label_indices)
                 ) <= len(edge_set) - 1
             ), f"ForbiddenEdgeLabels_{cut_idx}"
-        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        solver_kwargs = {"msg": False}
+        solver_time_limit = self._resolve_solver_time_limit_seconds()
+        if solver_time_limit is not None:
+            solver_kwargs["timeLimit"] = max(1.0, float(solver_time_limit))
+        status = prob.solve(pulp.PULP_CBC_CMD(**solver_kwargs))
         if int(status) != pulp.LpStatusOptimal:
             return np.asarray(current_edge_label_matrix, dtype=object)
         repaired = np.asarray(current_edge_label_matrix, dtype=object).copy()
@@ -944,7 +1005,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     ) <= len(edge_set) - 1
                 ), f"JointForbiddenEdgeLabels_{cut_idx}"
 
-        status = prob.solve(pulp.PULP_CBC_CMD(msg=False))
+        solver_kwargs = {"msg": False}
+        solver_time_limit = self._resolve_solver_time_limit_seconds()
+        if solver_time_limit is not None:
+            solver_kwargs["timeLimit"] = max(1.0, float(solver_time_limit))
+        status = prob.solve(pulp.PULP_CBC_CMD(**solver_kwargs))
         if int(status) != pulp.LpStatusOptimal:
             return repaired_node_labels, repaired_edge_label_matrix
 

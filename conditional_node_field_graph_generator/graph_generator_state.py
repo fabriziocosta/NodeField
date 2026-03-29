@@ -22,6 +22,7 @@ class FeasibilityConfig:
     max_attempts: int
     candidates_per_attempt: int
     failure_mode: str
+    max_seconds_per_sample: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class DecodePolicy:
     max_feasibility_attempts: int
     feasibility_candidates_per_attempt: int
     feasibility_failure_mode: str
+    max_feasibility_seconds_per_sample: Optional[float]
 
 
 @dataclass(frozen=True)

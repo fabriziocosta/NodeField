@@ -178,6 +178,7 @@ def _decode_single_adjacency_job(
     warm_start_mst: bool,
     verbose: int,
     diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
+    adjacency_time_limit_seconds: Optional[float] = 60.0,
 ) -> np.ndarray:
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
@@ -185,6 +186,7 @@ def _decode_single_adjacency_job(
         enforce_connectivity=enforce_connectivity,
         warm_start_mst=warm_start_mst,
         diagnostic_graph_renderer=diagnostic_graph_renderer,
+        adjacency_time_limit_seconds=adjacency_time_limit_seconds,
     )
     n_nodes = min(len(existence_mask), len(degree_prediction))
     prob_matrix = np.zeros((n_nodes, n_nodes))
@@ -213,6 +215,7 @@ def _decode_single_adjacency_job(
         prob_matrix,
         target_degrees,
         target_edge_count=desired_edge_count,
+        timeLimit=adjacency_time_limit_seconds,
     )
     if int(verbose) >= 4 and diagnostic_graph_renderer is None:
         _plot_decoder_diagnostics(
@@ -431,6 +434,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         warm_start_mst: bool = True,
         n_jobs: int = 1,
         diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
+        adjacency_time_limit_seconds: Optional[float] = 60.0,
     ) -> None:
         self.verbose = verbose
         self.existence_threshold = existence_threshold
@@ -439,13 +443,17 @@ class ConditionalNodeFieldGraphDecoder(object):
         self.warm_start_mst = warm_start_mst
         self.n_jobs = _normalize_n_jobs(n_jobs)
         self.diagnostic_graph_renderer = diagnostic_graph_renderer
+        self.adjacency_time_limit_seconds = (
+            None if adjacency_time_limit_seconds is None else float(adjacency_time_limit_seconds)
+        )
+        self.active_time_limit_seconds: Optional[float] = None
 
     def optimize_adjacency_matrix(
         self,
         prob_matrix: np.ndarray,
         target_degrees: List[int],
         target_edge_count: Optional[int] = None,
-        timeLimit: int = 60,
+        timeLimit: Optional[float] = None,
         verbose: bool = False,
         alpha: float = 0.7,
         connectivity: Optional[bool] = None,
@@ -513,7 +521,15 @@ class ConditionalNodeFieldGraphDecoder(object):
             for (i, j), var in x.items():
                 var.start = 1 if tree.has_edge(i, j) else 0
 
-        solver = pulp.PULP_CBC_CMD(timeLimit=timeLimit, msg=verbose)
+        effective_time_limit = timeLimit
+        if effective_time_limit is None:
+            effective_time_limit = self.active_time_limit_seconds
+        if effective_time_limit is None:
+            effective_time_limit = self.adjacency_time_limit_seconds
+        solver_kwargs = {"msg": verbose}
+        if effective_time_limit is not None:
+            solver_kwargs["timeLimit"] = max(1.0, float(effective_time_limit))
+        solver = pulp.PULP_CBC_CMD(**solver_kwargs)
         prob.solve(solver)
         status_code = int(getattr(prob, "status", 0))
         status_label = pulp.LpStatus.get(status_code, f"Unknown({status_code})")
@@ -950,6 +966,15 @@ class ConditionalNodeFieldGraphDecoder(object):
                 bool(self.warm_start_mst),
                 int(self.verbose),
                 self.diagnostic_graph_renderer if self.n_jobs == 1 else None,
+                (
+                    float(self.active_time_limit_seconds)
+                    if self.active_time_limit_seconds is not None
+                    else (
+                        None
+                        if self.adjacency_time_limit_seconds is None
+                        else float(self.adjacency_time_limit_seconds)
+                    )
+                ),
             )
             for graph_idx in range(len(predicted_probs_list))
         ]
@@ -1161,6 +1186,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "degree_slack_penalty": self.degree_slack_penalty,
                 "warm_start_mst": self.warm_start_mst,
                 "n_jobs": self.n_jobs,
+                "adjacency_time_limit_seconds": self.adjacency_time_limit_seconds,
             },
         }
         with open(path, "w", encoding="utf-8") as handle:
@@ -1192,6 +1218,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             degree_slack_penalty=config.get("degree_slack_penalty", 1e6),
             warm_start_mst=config.get("warm_start_mst", True),
             n_jobs=config.get("n_jobs", 1),
+            adjacency_time_limit_seconds=config.get("adjacency_time_limit_seconds", 60.0),
         )
 
 
