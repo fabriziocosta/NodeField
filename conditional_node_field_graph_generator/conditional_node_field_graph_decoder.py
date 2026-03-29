@@ -435,6 +435,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         n_jobs: int = 1,
         diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
         adjacency_time_limit_seconds: Optional[float] = 60.0,
+        parallel_decode_timeout_seconds: Optional[float] = 30.0,
     ) -> None:
         self.verbose = verbose
         self.existence_threshold = existence_threshold
@@ -445,6 +446,9 @@ class ConditionalNodeFieldGraphDecoder(object):
         self.diagnostic_graph_renderer = diagnostic_graph_renderer
         self.adjacency_time_limit_seconds = (
             None if adjacency_time_limit_seconds is None else float(adjacency_time_limit_seconds)
+        )
+        self.parallel_decode_timeout_seconds = (
+            None if parallel_decode_timeout_seconds is None else float(parallel_decode_timeout_seconds)
         )
         self.active_time_limit_seconds: Optional[float] = None
 
@@ -986,7 +990,20 @@ class ConditionalNodeFieldGraphDecoder(object):
             )
         if self.n_jobs == 1 or len(jobs) <= 1:
             return [_decode_single_adjacency_job(*job) for job in jobs]
-        return _parallel_map(_decode_single_adjacency_job_star, jobs, self.n_jobs, verbose=bool(self.verbose))
+        timeout_seconds = self.parallel_decode_timeout_seconds
+        if self.active_time_limit_seconds is not None:
+            timeout_seconds = max(
+                float(timeout_seconds) if timeout_seconds is not None else 0.0,
+                float(self.active_time_limit_seconds) + 5.0,
+            )
+        return _parallel_map(
+            _decode_single_adjacency_job_star,
+            jobs,
+            self.n_jobs,
+            verbose=bool(self.verbose),
+            timeout_seconds=timeout_seconds,
+            timeout_fallback_label="parallel adjacency decode",
+        )
 
     def decode_node_labels(
         self,
@@ -1118,7 +1135,14 @@ class ConditionalNodeFieldGraphDecoder(object):
         if self.n_jobs == 1 or len(jobs) <= 1:
             decoded_graphs = [_assemble_graph_job(*job) for job in jobs]
         else:
-            decoded_graphs = _parallel_map(_assemble_graph_job_star, jobs, self.n_jobs, verbose=bool(self.verbose))
+            decoded_graphs = _parallel_map(
+                _assemble_graph_job_star,
+                jobs,
+                self.n_jobs,
+                verbose=bool(self.verbose),
+                timeout_seconds=self.parallel_decode_timeout_seconds,
+                timeout_fallback_label="parallel graph assembly",
+            )
 
         if int(self.verbose) >= 4:
             for graph_idx, (adj_mtx, decoded_graph) in enumerate(zip(adj_mtx_list, decoded_graphs)):
@@ -1187,6 +1211,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "warm_start_mst": self.warm_start_mst,
                 "n_jobs": self.n_jobs,
                 "adjacency_time_limit_seconds": self.adjacency_time_limit_seconds,
+                "parallel_decode_timeout_seconds": self.parallel_decode_timeout_seconds,
             },
         }
         with open(path, "w", encoding="utf-8") as handle:
@@ -1219,6 +1244,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             warm_start_mst=config.get("warm_start_mst", True),
             n_jobs=config.get("n_jobs", 1),
             adjacency_time_limit_seconds=config.get("adjacency_time_limit_seconds", 60.0),
+            parallel_decode_timeout_seconds=config.get("parallel_decode_timeout_seconds", 30.0),
         )
 
 

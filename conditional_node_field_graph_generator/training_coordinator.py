@@ -139,6 +139,8 @@ class TrainingCoordinator:
             PrebuiltBatchIterableDataset(
                 batch_iter_factory,
                 prefetch_batches=int(getattr(owner, "stream_prefetch_batches", 2)),
+                batch_timeout_seconds=getattr(owner, "stream_batch_timeout_seconds", None),
+                max_consecutive_timeouts=int(getattr(owner, "stream_max_consecutive_stalls", 3)),
             ),
             batch_size=None,
         )

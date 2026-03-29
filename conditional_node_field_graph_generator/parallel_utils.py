@@ -1,6 +1,6 @@
 """Shared parallel execution helpers."""
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 import os
 from typing import Optional
@@ -22,12 +22,37 @@ def _normalize_n_jobs(n_jobs: Optional[int]) -> int:
     return max(1, n_jobs)
 
 
-def _parallel_map(func, jobs, max_workers: int, verbose: bool = False):
+def _parallel_map(
+    func,
+    jobs,
+    max_workers: int,
+    verbose: bool = False,
+    timeout_seconds: Optional[float] = None,
+    timeout_fallback_label: str = "parallel work",
+):
     if max_workers <= 1 or len(jobs) <= 1:
         return [func(job) for job in jobs]
     try:
-        with ProcessPoolExecutor(max_workers=min(max_workers, len(jobs))) as executor:
-            return list(executor.map(func, jobs))
+        executor = ProcessPoolExecutor(max_workers=min(max_workers, len(jobs)))
+        try:
+            futures = [executor.submit(func, job) for job in jobs]
+            if timeout_seconds is None:
+                return [future.result() for future in futures]
+            return [future.result(timeout=float(timeout_seconds)) for future in futures]
+        except FuturesTimeoutError:
+            executor.shutdown(wait=False, cancel_futures=True)
+            if verbose:
+                logger.warning(
+                    "Process-based %s exceeded %.1fs; falling back to sequential execution.",
+                    timeout_fallback_label,
+                    float(timeout_seconds),
+                )
+            return [func(job) for job in jobs]
+        finally:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
     except Exception as exc:
         if not _should_fallback_to_threads(exc):
             raise

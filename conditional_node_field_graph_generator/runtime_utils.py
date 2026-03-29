@@ -1,6 +1,7 @@
 """Runtime helpers for verbose logging and trainer execution."""
 
 import logging
+import multiprocessing as mp
 import sys
 import time
 import warnings
@@ -96,3 +97,40 @@ def run_trainer_fit(trainer, model, train_loader, val_loader, context: str, ckpt
             "CLI-style argument parsing or sys.exit(). "
             f"Current sys.argv starts with: {argv_preview!r}"
         ) from exc
+
+
+def run_with_fork_timeout(worker, *args, timeout_seconds: float | None = None):
+    """Run a top-level worker in a forked subprocess and enforce a hard timeout."""
+    if timeout_seconds is None:
+        return worker(*args)
+    timeout_seconds = float(timeout_seconds)
+    if timeout_seconds <= 0.0:
+        raise TimeoutError("timeout_seconds must be > 0 when provided.")
+    try:
+        ctx = mp.get_context("fork")
+    except ValueError:
+        return worker(*args)
+
+    result_queue = ctx.Queue(maxsize=1)
+
+    def _runner(queue_, worker_, worker_args_):
+        try:
+            queue_.put(("ok", worker_(*worker_args_)))
+        except Exception as exc:  # pragma: no cover
+            queue_.put(("err", repr(exc)))
+
+    process = ctx.Process(target=_runner, args=(result_queue, worker, args), daemon=True)
+    process.start()
+    process.join(timeout_seconds)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        raise TimeoutError(f"Timed out after {timeout_seconds:.1f}s.")
+    if process.exitcode not in (0, None) and result_queue.empty():
+        raise RuntimeError(f"Worker exited with code {process.exitcode}.")
+    if result_queue.empty():
+        return None
+    status, payload = result_queue.get()
+    if status == "err":
+        raise RuntimeError(payload)
+    return payload

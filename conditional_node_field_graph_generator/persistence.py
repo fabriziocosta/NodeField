@@ -12,7 +12,7 @@ import dill as pickle
 
 from .naming_utils import sanitize_model_token
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
-from .runtime_utils import get_runtime_logger
+from .runtime_utils import get_runtime_logger, run_with_fork_timeout
 
 
 GRAPH_GENERATOR_PERSISTENCE_VERSION = 3
@@ -57,8 +57,24 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.stream_prefetch_batches = 2
     if not hasattr(graph_generator, "stream_snapshot_every_n_batches"):
         graph_generator.stream_snapshot_every_n_batches = 10
+    if not hasattr(graph_generator, "stream_batch_timeout_seconds"):
+        graph_generator.stream_batch_timeout_seconds = 30.0
+    if not hasattr(graph_generator, "stream_snapshot_timeout_seconds"):
+        graph_generator.stream_snapshot_timeout_seconds = 30.0
+    if not hasattr(graph_generator, "stream_pdf_timeout_seconds"):
+        graph_generator.stream_pdf_timeout_seconds = 15.0
+    if not hasattr(graph_generator, "stream_max_consecutive_stalls"):
+        graph_generator.stream_max_consecutive_stalls = 3
     if getattr(graph_generator, "model_name", None) is not None:
         graph_generator.model_name = sanitize_model_token(graph_generator.model_name)
+
+
+def _atomic_pickle_dump_worker(graph_generator, output_path: str) -> None:
+    _atomic_pickle_dump(graph_generator, Path(output_path))
+
+
+def _save_graph_generator_loss_curves_pdf_worker(graph_generator, output_path: str, log: bool) -> None:
+    _save_graph_generator_loss_curves_pdf(graph_generator, output_path=Path(output_path), log=log)
 
 
 def _save_graph_generator_loss_curves_pdf(graph_generator, *, output_path: Path, log: bool) -> None:
@@ -134,12 +150,33 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=T
     lock_factory = getattr(graph_generator, "_ensure_stream_runtime_lock", None)
     lock_context = lock_factory() if callable(lock_factory) else nullcontext()
     with lock_context:
-        _atomic_pickle_dump(graph_generator, path)
-        _save_graph_generator_loss_curves_pdf(
-            graph_generator,
-            output_path=pdf_path,
-            log=log,
-        )
+        snapshot_timeout_seconds = getattr(graph_generator, "stream_snapshot_timeout_seconds", None)
+        pdf_timeout_seconds = getattr(graph_generator, "stream_pdf_timeout_seconds", None)
+        try:
+            run_with_fork_timeout(
+                _atomic_pickle_dump_worker,
+                graph_generator,
+                str(path),
+                timeout_seconds=snapshot_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning("Timed out while saving graph generator snapshot %s; skipping snapshot.", path)
+            return None
+        except Exception as exc:
+            logger.warning("Unable to save graph generator snapshot %s: %s", path, exc)
+            return None
+        try:
+            run_with_fork_timeout(
+                _save_graph_generator_loss_curves_pdf_worker,
+                graph_generator,
+                str(pdf_path),
+                log,
+                timeout_seconds=pdf_timeout_seconds,
+            )
+        except TimeoutError:
+            logger.warning("Timed out while saving graph generator loss curves PDF %s; skipping PDF.", pdf_path)
+        except Exception as exc:
+            logger.warning("Unable to save graph generator loss curves PDF %s: %s", pdf_path, exc)
     if log:
         logger.info("Saved graph generator as: %s", filename)
         logger.info("%s", path)

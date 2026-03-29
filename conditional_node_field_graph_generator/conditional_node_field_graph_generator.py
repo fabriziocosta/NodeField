@@ -11,7 +11,7 @@ import threading
 import time
 import pulp
 import dill as pickle
-from .runtime_utils import get_runtime_logger, timeit, verbose_log
+from .runtime_utils import get_runtime_logger, run_with_fork_timeout, timeit, verbose_log
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union, FrozenSet, Iterable, Callable
 from .conditional_node_field_generator import (
     ConditionalNodeGeneratorBase,
@@ -112,6 +112,14 @@ class _StreamTransformError(RuntimeError):
 
 class _StreamSupervisionError(RuntimeError):
     pass
+
+
+class _StreamBatchTimeoutError(RuntimeError):
+    pass
+
+
+def _prepare_stream_training_batch_worker(graph_generator, graphs: List[nx.Graph]):
+    return graph_generator._prepare_stream_training_batch(graphs)
 
 
 @dataclass(frozen=True)
@@ -341,6 +349,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             model_name: Optional[str] = None,
             model_dir: Optional[str] = None,
             stream_snapshot_every_n_batches: int = 10,
+            stream_batch_timeout_seconds: Optional[float] = 30.0,
+            stream_snapshot_timeout_seconds: Optional[float] = 30.0,
+            stream_pdf_timeout_seconds: Optional[float] = 15.0,
+            stream_max_consecutive_stalls: int = 3,
             ) -> None:
         """Store the collaborating components and configuration used for the pipeline.
 
@@ -372,6 +384,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             model_name (Optional[str]): Optional input value.
             model_dir (Optional[str]): Optional input value.
             stream_snapshot_every_n_batches (int): Optional input value.
+            stream_batch_timeout_seconds (Optional[float]): Optional input value.
+            stream_snapshot_timeout_seconds (Optional[float]): Optional input value.
+            stream_pdf_timeout_seconds (Optional[float]): Optional input value.
+            stream_max_consecutive_stalls (int): Optional input value.
         """
         self.graph_vectorizer = graph_vectorizer
         self.node_graph_vectorizer = node_graph_vectorizer
@@ -383,6 +399,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.stream_fit_stats_ = StreamFitStats()
         self.stream_prefetch_batches = 2
         self.stream_snapshot_every_n_batches = max(1, int(stream_snapshot_every_n_batches))
+        self.stream_batch_timeout_seconds = None if stream_batch_timeout_seconds is None else float(stream_batch_timeout_seconds)
+        self.stream_snapshot_timeout_seconds = None if stream_snapshot_timeout_seconds is None else float(stream_snapshot_timeout_seconds)
+        self.stream_pdf_timeout_seconds = None if stream_pdf_timeout_seconds is None else float(stream_pdf_timeout_seconds)
+        self.stream_max_consecutive_stalls = max(1, int(stream_max_consecutive_stalls))
         self.is_fitted_ = False
         if not 0.0 < locality_sample_fraction <= 1.0:
             raise ValueError("locality_sample_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
@@ -447,6 +467,12 @@ class ConditionalNodeFieldGraphGenerator(object):
             and self.max_feasibility_seconds_per_sample <= 0.0
         ):
             raise ValueError("max_feasibility_seconds_per_sample must be > 0 when provided")
+        if self.stream_batch_timeout_seconds is not None and self.stream_batch_timeout_seconds <= 0.0:
+            raise ValueError("stream_batch_timeout_seconds must be > 0 when provided")
+        if self.stream_snapshot_timeout_seconds is not None and self.stream_snapshot_timeout_seconds <= 0.0:
+            raise ValueError("stream_snapshot_timeout_seconds must be > 0 when provided")
+        if self.stream_pdf_timeout_seconds is not None and self.stream_pdf_timeout_seconds <= 0.0:
+            raise ValueError("stream_pdf_timeout_seconds must be > 0 when provided")
         valid_feasibility_failure_modes = {"raise", "return_partial"}
         if self.feasibility_failure_mode not in valid_feasibility_failure_modes:
             raise ValueError(
@@ -1656,6 +1682,22 @@ class ConditionalNodeFieldGraphGenerator(object):
             except Exception as exc:
                 raise _StreamSupervisionError("Failed to derive streamed supervision under the frozen warmup schema.") from exc
 
+    def _prepare_stream_training_batch_with_timeout(self, graphs: List[nx.Graph]):
+        timeout_seconds = getattr(self, "stream_batch_timeout_seconds", None)
+        if timeout_seconds is None:
+            return self._prepare_stream_training_batch(graphs)
+        try:
+            return run_with_fork_timeout(
+                _prepare_stream_training_batch_worker,
+                self,
+                graphs,
+                timeout_seconds=float(timeout_seconds),
+            )
+        except TimeoutError as exc:
+            raise _StreamBatchTimeoutError(
+                f"Streamed batch preparation exceeded {float(timeout_seconds):.1f}s."
+            ) from exc
+
     def fit_from_stream(
         self,
         uri,
@@ -1735,7 +1777,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         warmup_train_batches.append(
                             (
                                 int(len(warmup_batch_graphs)),
-                                self._prepare_stream_training_batch(warmup_batch_graphs),
+                                self._prepare_stream_training_batch_with_timeout(warmup_batch_graphs),
                             )
                         )
 
@@ -1750,7 +1792,10 @@ class ConditionalNodeFieldGraphGenerator(object):
                         if len(active_batch) < int(batch_size):
                             continue
                         try:
-                            batch_payload = self._prepare_stream_training_batch(active_batch)
+                            batch_payload = self._prepare_stream_training_batch_with_timeout(active_batch)
+                        except _StreamBatchTimeoutError:
+                            active_batch = []
+                            continue
                         except _StreamTransformError:
                             active_batch = []
                             continue
@@ -1760,7 +1805,9 @@ class ConditionalNodeFieldGraphGenerator(object):
                         return active_batch
                     if active_batch:
                         try:
-                            self._prepare_stream_training_batch(active_batch)
+                            self._prepare_stream_training_batch_with_timeout(active_batch)
+                        except _StreamBatchTimeoutError:
+                            return None
                         except _StreamTransformError:
                             return None
                         except _StreamSupervisionError:
@@ -1770,6 +1817,7 @@ class ConditionalNodeFieldGraphGenerator(object):
 
                 def _iter_training_batches(graph_iter):
                     active_batch = []
+                    consecutive_stalls = 0
                     for graph in graph_iter:
                         self.stream_seen_ += 1
                         self.stream_training_seen_ += 1
@@ -1783,8 +1831,27 @@ class ConditionalNodeFieldGraphGenerator(object):
                         if len(active_batch) < int(batch_size):
                             continue
                         try:
-                            batch_payload = self._prepare_stream_training_batch(active_batch)
+                            batch_payload = self._prepare_stream_training_batch_with_timeout(active_batch)
+                        except _StreamBatchTimeoutError:
+                            consecutive_stalls += 1
+                            self.stream_training_skipped_ += len(active_batch)
+                            self.stream_epoch_training_skipped_ += len(active_batch)
+                            self.stream_skipped_transform_error_ += len(active_batch)
+                            verbose_log(
+                                self,
+                                f"Streamed batch preparation timed out; skipped {len(active_batch)} graphs "
+                                f"(consecutive stalls={consecutive_stalls}/{self.stream_max_consecutive_stalls}).",
+                                level=1,
+                            )
+                            if consecutive_stalls >= int(self.stream_max_consecutive_stalls):
+                                raise RuntimeError(
+                                    "Streaming training aborted after repeated batch-preparation stalls. "
+                                    "Resume from the latest checkpoint."
+                                )
+                            active_batch = []
+                            continue
                         except _StreamTransformError:
+                            consecutive_stalls = 0
                             self.stream_training_skipped_ += len(active_batch)
                             self.stream_epoch_training_skipped_ += len(active_batch)
                             self.stream_skipped_transform_error_ += len(active_batch)
@@ -1793,6 +1860,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                             active_batch = []
                             continue
                         except _StreamSupervisionError:
+                            consecutive_stalls = 0
                             self.stream_training_skipped_ += len(active_batch)
                             self.stream_epoch_training_skipped_ += len(active_batch)
                             self.stream_skipped_supervision_error_ += len(active_batch)
@@ -1800,13 +1868,20 @@ class ConditionalNodeFieldGraphGenerator(object):
                                 self._log_stream_skip("supervision_error", rejected_graph)
                             active_batch = []
                             continue
+                        consecutive_stalls = 0
                         self.stream_training_accepted_ += len(active_batch)
                         self.stream_epoch_training_accepted_ += len(active_batch)
                         yield batch_payload
                         active_batch = []
                     if active_batch:
                         try:
-                            batch_payload = self._prepare_stream_training_batch(active_batch)
+                            batch_payload = self._prepare_stream_training_batch_with_timeout(active_batch)
+                        except _StreamBatchTimeoutError:
+                            verbose_log(
+                                self,
+                                f"Trailing streamed batch preparation timed out; skipped {len(active_batch)} graphs.",
+                                level=1,
+                            )
                         except _StreamTransformError:
                             self.stream_training_skipped_ += len(active_batch)
                             self.stream_epoch_training_skipped_ += len(active_batch)

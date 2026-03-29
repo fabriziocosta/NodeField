@@ -483,10 +483,18 @@ def collate_conditional_node_field_graph_with_edges(batch):
 class PrebuiltBatchIterableDataset(IterableDataset):
     """Iterable dataset yielding already-collated training batches."""
 
-    def __init__(self, batch_iter_factory, prefetch_batches: int = 0):
+    def __init__(
+        self,
+        batch_iter_factory,
+        prefetch_batches: int = 0,
+        batch_timeout_seconds: float | None = None,
+        max_consecutive_timeouts: int = 3,
+    ):
         super().__init__()
         self.batch_iter_factory = batch_iter_factory
         self.prefetch_batches = max(0, int(prefetch_batches))
+        self.batch_timeout_seconds = None if batch_timeout_seconds is None else float(batch_timeout_seconds)
+        self.max_consecutive_timeouts = max(1, int(max_consecutive_timeouts))
 
     def __iter__(self):
         if self.prefetch_batches <= 0:
@@ -508,8 +516,22 @@ class PrebuiltBatchIterableDataset(IterableDataset):
 
         producer = threading.Thread(target=_producer, daemon=True)
         producer.start()
+        consecutive_timeouts = 0
         while True:
-            item = batch_queue.get()
+            try:
+                if self.batch_timeout_seconds is None:
+                    item = batch_queue.get()
+                else:
+                    item = batch_queue.get(timeout=self.batch_timeout_seconds)
+            except queue.Empty:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= self.max_consecutive_timeouts:
+                    raise RuntimeError(
+                        "Streaming batch delivery stalled while waiting for the prefetch queue. "
+                        "Resume from the latest checkpoint."
+                    )
+                continue
+            consecutive_timeouts = 0
             if item is sentinel:
                 break
             if isinstance(item, tuple) and len(item) == 2 and item[0] is error_sentinel:

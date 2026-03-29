@@ -6,7 +6,7 @@ import time
 import pytorch_lightning as pl
 import torch
 
-from .runtime_utils import get_runtime_logger
+from .runtime_utils import get_runtime_logger, verbose_log
 
 logger = get_runtime_logger(__name__)
 
@@ -126,6 +126,11 @@ class MetricsLogger(pl.callbacks.Callback):
             pl_module.train_aux_edge_loss.append(m.get("train_aux_locality_ce", m.get("train_aux_edge_loss", torch.tensor(0.0))).item())
             pl_module.train_aux_edge_acc.append(m.get("train_aux_edge_acc", torch.tensor(0.0)).item())
 
+    def on_validation_epoch_start(self, trainer, pl_module):
+        current_epoch = int(getattr(trainer, "current_epoch", -1)) + 1
+        setattr(pl_module, "_validation_epoch_started_at", time.time())
+        verbose_log(pl_module, f"epoch {current_epoch}: starting validation", level=2)
+
     def on_validation_epoch_end(self, trainer, pl_module):
         m = trainer.callback_metrics
         pl_module.val_losses.append(m.get("val_total", torch.tensor(0.0)).item())
@@ -161,6 +166,14 @@ class MetricsLogger(pl.callbacks.Callback):
         except (TypeError, ValueError):
             verbose_level = 1 if getattr(pl_module, "verbose", False) else 0
         if verbose_level >= 2:
+            started_at = getattr(pl_module, "_validation_epoch_started_at", None)
+            if started_at is not None:
+                verbose_log(
+                    pl_module,
+                    f"epoch {int(getattr(trainer, 'current_epoch', -1)) + 1}: finished validation in "
+                    f"{max(0.0, time.time() - float(started_at)):.2f}s",
+                    level=2,
+                )
             interval = int(getattr(pl_module, "verbose_epoch_interval", 10))
             current_epoch = int(getattr(trainer, "current_epoch", -1)) + 1
             if interval > 0 and (current_epoch % interval == 0):
@@ -277,11 +290,18 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
         previous_fit_state = bool(getattr(owner, "is_fitted_", False))
         owner.is_fitted_ = True
         try:
+            verbose_log(owner, f"epoch {epoch_label}: saving generator snapshot", level=2)
+            snapshot_started_at = time.time()
             save_graph_generator(
                 owner,
                 model_name=model_name,
                 model_dir=getattr(owner, "model_dir", None),
                 log=False,
+            )
+            verbose_log(
+                owner,
+                f"epoch {epoch_label}: finished generator snapshot in {max(0.0, time.time() - snapshot_started_at):.2f}s",
+                level=2,
             )
         finally:
             owner.is_fitted_ = previous_fit_state
@@ -310,11 +330,22 @@ class GraphGeneratorBatchSnapshotCallback(pl.callbacks.Callback):
         previous_fit_state = bool(getattr(owner, "is_fitted_", False))
         owner.is_fitted_ = True
         try:
+            verbose_log(
+                owner,
+                f"epoch {int(getattr(trainer, 'current_epoch', -1)) + 1}: saving batch snapshot after batch {int(batch_idx) + 1}",
+                level=2,
+            )
+            snapshot_started_at = time.time()
             save_graph_generator(
                 owner,
                 model_name=model_name,
                 model_dir=getattr(owner, "model_dir", None),
                 log=False,
+            )
+            verbose_log(
+                owner,
+                f"epoch {int(getattr(trainer, 'current_epoch', -1)) + 1}: finished batch snapshot in {max(0.0, time.time() - snapshot_started_at):.2f}s",
+                level=2,
             )
         finally:
             owner.is_fitted_ = previous_fit_state

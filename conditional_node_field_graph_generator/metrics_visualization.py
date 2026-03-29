@@ -118,15 +118,20 @@ def _build_metrics_figure(
     if not active_panels:
         active_panels = [("Metrics", metrics)]
 
-    fig_height = 4.8 * len(active_panels) + 1.2
+    if len(active_panels) == 2:
+        nrows, ncols = 1, 2
+        fig_width, fig_height = 22, 6.2
+    else:
+        nrows, ncols = len(active_panels), 1
+        fig_width, fig_height = 18, 4.8 * len(active_panels) + 1.2
     fig, axes = plt.subplots(
-        len(active_panels),
-        1,
-        figsize=(18, fig_height),
+        nrows,
+        ncols,
+        figsize=(fig_width, fig_height),
         sharex=True,
         squeeze=False,
     )
-    flat_axes = axes[:, 0]
+    flat_axes = list(axes.reshape(-1))
     color_by_metric = {
         metric_name: default_colors[idx % len(default_colors)]
         for idx, metric_name in enumerate(metrics)
@@ -201,7 +206,8 @@ def _build_metrics_figure(
         ax.set_title(panel_title)
         ax.grid(True, which="both", linestyle="--", linewidth=0.5)
 
-    flat_axes[-1].set_xlabel("Epoch")
+    for ax in flat_axes[-ncols:]:
+        ax.set_xlabel("Epoch")
     legend_lines = []
     legend_labels = []
     for train_line, train_label, val_line, val_label in zip(train_lines, train_labels, val_lines, val_labels):
@@ -209,7 +215,10 @@ def _build_metrics_figure(
         legend_labels.extend([train_label, val_label])
     legend_ncols = max(1, len(train_lines))
     fig.legend(legend_lines, legend_labels, loc="upper center", ncol=legend_ncols, fontsize="small")
-    fig.subplots_adjust(left=0.08, right=0.68, top=0.90, hspace=0.30)
+    if ncols == 2:
+        fig.subplots_adjust(left=0.07, right=0.93, top=0.86, bottom=0.12, wspace=0.55)
+    else:
+        fig.subplots_adjust(left=0.08, right=0.68, top=0.90, hspace=0.30)
     return fig
 
 
