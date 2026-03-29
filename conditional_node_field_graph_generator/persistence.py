@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
+import tempfile
 
 import dill as pickle
-import pandas as pd
 
 from .naming_utils import sanitize_model_token
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
@@ -59,6 +60,64 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.model_name = sanitize_model_token(graph_generator.model_name)
 
 
+def _save_graph_generator_loss_curves_pdf(graph_generator, *, output_path: Path, log: bool) -> None:
+    exporter = getattr(graph_generator, "export_metrics_pdf", None)
+    if not callable(exporter):
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        suffix=output_path.suffix,
+        prefix=f".{output_path.stem}.",
+        dir=output_path.parent,
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+    try:
+        saved_path = exporter(str(temp_path))
+    except Exception as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.warning("Unable to save graph generator loss curves PDF %s: %s", output_path, exc)
+        return
+    if saved_path is None:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return
+    saved_path = Path(saved_path)
+    if saved_path != temp_path:
+        os.replace(saved_path, temp_path)
+    os.replace(temp_path, output_path)
+    if log:
+        logger.info("Saved graph generator loss curves as: %s", Path(saved_path).name)
+        logger.info("%s", output_path)
+
+
+def _atomic_pickle_dump(obj, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=output_path.suffix,
+            prefix=f".{output_path.stem}.",
+            dir=output_path.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            pickle.dump(obj, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, output_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
 def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
     resolved_model_name = model_name if model_name is not None else getattr(graph_generator, "model_name", None)
     if resolved_model_name is None:
@@ -70,8 +129,13 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=T
     stem = sanitize_model_token(resolved_model_name)
     filename = f"{stem}.pkl"
     path = model_root / filename
-    with open(path, "wb") as handle:
-        pickle.dump(graph_generator, handle)
+    pdf_path = model_root / f"{stem}.loss-curves.pdf"
+    _atomic_pickle_dump(graph_generator, path)
+    _save_graph_generator_loss_curves_pdf(
+        graph_generator,
+        output_path=pdf_path,
+        log=log,
+    )
     if log:
         logger.info("Saved graph generator as: %s", filename)
         logger.info("%s", path)
@@ -79,6 +143,8 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=T
 
 
 def list_saved_graph_generators(model_dir=None):
+    import pandas as pd
+
     model_root = resolve_saved_generator_dir(model_dir=model_dir)
     files = sorted(model_root.glob("*.pkl"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not files:

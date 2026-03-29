@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -201,6 +204,54 @@ def test_save_graph_generator_uses_explicit_generator_metadata(tmp_path):
 
     assert filename == "demo-chem.pkl"
     assert (tmp_path / filename).exists()
+
+
+def test_save_graph_generator_uses_atomic_replace(monkeypatch, tmp_path):
+    replace_calls = []
+    real_replace = os.replace
+
+    def recording_replace(src, dst):
+        replace_calls.append((Path(src), Path(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", recording_replace)
+
+    generator = _SaveableGenerator(model_name="demo-chem", model_dir=tmp_path)
+
+    filename = save_graph_generator(generator)
+
+    assert filename == "demo-chem.pkl"
+    assert (tmp_path / filename).exists()
+    assert len(replace_calls) == 1
+    src, dst = replace_calls[0]
+    assert src.parent == tmp_path
+    assert src.name.startswith(".demo-chem.")
+    assert dst == tmp_path / "demo-chem.pkl"
+    assert not src.exists()
+
+
+def test_save_graph_generator_also_exports_loss_curves_pdf_when_supported(tmp_path):
+    class _GeneratorWithPdf(_SaveableGenerator):
+        def __init__(self, model_name=None, model_dir=None):
+            super().__init__(model_name=model_name, model_dir=model_dir)
+            self.exported_paths = []
+
+        def export_metrics_pdf(self, output_path, window=10, alpha=0.3):
+            path = Path(output_path)
+            path.write_text("pdf placeholder")
+            self.exported_paths.append((path, window, alpha))
+            return path
+
+    generator = _GeneratorWithPdf(model_name="demo-chem", model_dir=tmp_path)
+
+    filename = save_graph_generator(generator)
+
+    assert filename == "demo-chem.pkl"
+    assert (tmp_path / filename).exists()
+    assert (tmp_path / "demo-chem.loss-curves.pdf").exists()
+    assert generator.exported_paths == [
+        (tmp_path / "demo-chem.loss-curves.pdf", 10, 0.3)
+    ]
 
 
 def test_save_graph_generator_skips_when_model_name_is_none(tmp_path):

@@ -1,5 +1,6 @@
 """Metric plotting helpers for Conditional Node Field training."""
 
+from pathlib import Path
 from typing import Dict, Sequence
 
 import matplotlib.pyplot as plt
@@ -74,14 +75,14 @@ def _blend_with_white(color: str, amount: float = 0.45) -> tuple[float, float, f
     return tuple(np.clip(mixed, 0.0, 1.0))
 
 
-def plot_metrics(
+def _build_metrics_figure(
     train_metrics: Dict[str, Sequence[float]],
     val_metrics: Dict[str, Sequence[float]],
     window: int = 10,
     alpha: float = 0.55,
     log_scale: bool = True,
-) -> None:
-    """Visualise train/validation metrics with LOESS-smoothed overlays."""
+) -> plt.Figure | None:
+    """Create the metrics figure without displaying it."""
     raw_train_alpha = 0.3
     raw_val_alpha = 0.3
     smoothed_train_alpha = 0.7
@@ -97,7 +98,7 @@ def plot_metrics(
         if len(train_metrics.get(name, [])) > 0 and len(val_metrics.get(name, [])) > 0
     ]
     if not metrics:
-        return
+        return None
 
     color_cycle = plt.rcParams.get("axes.prop_cycle", None)
     default_colors = (
@@ -209,5 +210,49 @@ def plot_metrics(
     legend_ncols = max(1, len(train_lines))
     fig.legend(legend_lines, legend_labels, loc="upper center", ncol=legend_ncols, fontsize="small")
     fig.subplots_adjust(left=0.08, right=0.68, top=0.90, hspace=0.30)
+    return fig
+
+
+def plot_metrics(
+    train_metrics: Dict[str, Sequence[float]],
+    val_metrics: Dict[str, Sequence[float]],
+    window: int = 10,
+    alpha: float = 0.55,
+    log_scale: bool = True,
+) -> None:
+    """Visualise train/validation metrics with LOESS-smoothed overlays."""
+    fig = _build_metrics_figure(
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        window=window,
+        alpha=alpha,
+        log_scale=log_scale,
+    )
+    if fig is None:
+        return
     plt.show(block=False)
     plt.close(fig)
+
+
+def save_metrics_pdf(
+    train_metrics: Dict[str, Sequence[float]],
+    val_metrics: Dict[str, Sequence[float]],
+    output_path: str | Path,
+    window: int = 10,
+    alpha: float = 0.55,
+    log_scale: bool = True,
+) -> Path | None:
+    """Render the metrics figure to a PDF file."""
+    fig = _build_metrics_figure(
+        train_metrics=train_metrics,
+        val_metrics=val_metrics,
+        window=window,
+        alpha=alpha,
+        log_scale=log_scale,
+    )
+    if fig is None:
+        return None
+    resolved_output_path = Path(output_path)
+    fig.savefig(resolved_output_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return resolved_output_path

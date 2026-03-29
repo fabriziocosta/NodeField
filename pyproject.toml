@@ -21,20 +21,26 @@ classifiers = [
 dependencies = [
   "numpy<3",
   "torch",
-  "pytorch-lightning",
   "scipy",
   "pandas",
   "scikit-learn",
   "networkx",
-  "matplotlib",
   "pulp",
-  "dill",
-  "requests",
-  "toolz"
+  "dill"
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "jupyterlab", "notebook"]
+training = [
+  "pytorch-lightning",
+  "matplotlib"
+]
+notebooks = [
+  "requests"
+]
+synthetic = [
+  "toolz"
+]
 ecosystem = [
   "abstractgraph>=0.1.0",
   "abstractgraph-ml>=0.1.0",
@@ -45,6 +51,10 @@ chem = [
   "abstractgraph-graphicalizer>=0.1.0; python_version >= '3.13'"
 ]
 full = [
+  "pytorch-lightning",
+  "matplotlib",
+  "requests",
+  "toolz",
   "abstractgraph>=0.1.0",
   "abstractgraph-ml>=0.1.0",
   "abstractgraph-graphicalizer[chem]>=0.1.0; python_version < '3.13'",

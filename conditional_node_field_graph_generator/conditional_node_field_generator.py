@@ -11,18 +11,33 @@ from typing import List, Any, Optional, Tuple, Sequence, Union, Dict
 import os
 
 import numpy as np
-import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, Dataset, IterableDataset, TensorDataset
 
-from .metrics_visualization import plot_metrics
 from .naming_utils import sanitize_model_token
 from .runtime_utils import get_runtime_logger, verbose_log
 from .graph_generator_state import CheckpointPolicy, MetricsPolicy, TrainingPolicy
-from .training_coordinator import TrainingCoordinator
+
+try:
+    import pytorch_lightning as pl
+    _PYTORCH_LIGHTNING_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover
+    _PYTORCH_LIGHTNING_IMPORT_ERROR = exc
+
+    class _LightningModuleFallback(nn.Module):
+        def save_hyperparameters(self, *args, **kwargs):
+            return None
+
+        def log(self, *args, **kwargs):
+            return None
+
+    class _LightningNamespace:
+        LightningModule = _LightningModuleFallback
+
+    pl = _LightningNamespace()
 
 _EDGE_COUNT_GRAPH_SIZE_EXPONENT = math.log2(3.0)
 logger = get_runtime_logger(__name__)
@@ -1604,6 +1619,22 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             checkpoint_root_dir=str(self.checkpoint_root_dir),
         )
 
+    @staticmethod
+    def _require_training_dependencies() -> None:
+        if _PYTORCH_LIGHTNING_IMPORT_ERROR is not None:
+            raise ImportError(
+                "Training support requires the optional 'pytorch-lightning' dependency. "
+                "Install the training extras for NodeField to enable fitting."
+            ) from _PYTORCH_LIGHTNING_IMPORT_ERROR
+
+    def _ensure_training_coordinator(self):
+        self._require_training_dependencies()
+        if self.training_coordinator_ is None:
+            from .training_coordinator import TrainingCoordinator
+
+            self.training_coordinator_ = TrainingCoordinator(self)
+        return self.training_coordinator_
+
     def __init__(
         self,
         latent_embedding_dimension: int = 128,
@@ -1675,7 +1706,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.training_policy_ = self._current_training_policy()
         self.checkpoint_policy_ = self._current_checkpoint_policy()
         self.metrics_policy_ = MetricsPolicy(plot_on_train_end=True)
-        self.training_coordinator_ = TrainingCoordinator(self)
+        self.training_coordinator_ = None
         self.important_feature_index = important_feature_index
         self.lambda_degree_importance = lambda_degree_importance
         self.degree_temperature = degree_temperature
@@ -2339,6 +2370,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             if effective_auxiliary_locality:
                 verbose_log(self, f"Auxiliary-locality BCE positive weight: {auxiliary_edge_pos_weight:.3f}.")
 
+        self._require_training_dependencies()
         self.model = ConditionalNodeFieldModule(
             number_of_rows_per_example=self.number_of_rows_per_example,
             input_feature_dimension=self.input_feature_dimension,
@@ -2562,7 +2594,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         snapshot_frequency: Optional[str] = "epoch",
     ) -> None:
         """Execute Lightning training and restore the best checkpoint when configured."""
-        self.training_coordinator_.run_training(
+        self._ensure_training_coordinator().run_training(
             train_loader,
             val_loader,
             ckpt_path=ckpt_path,
@@ -2588,7 +2620,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             ckpt_path = os.path.expanduser(str(ckpt_path))
             if not os.path.isfile(ckpt_path):
                 raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
-        return self.training_coordinator_.fit_from_prebuilt_batches(
+        return self._ensure_training_coordinator().fit_from_prebuilt_batches(
             validation_node_batch,
             validation_graph_conditioning,
             batch_iter_factory,
@@ -2607,7 +2639,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             ckpt_path = os.path.expanduser(str(ckpt_path))
             if not os.path.isfile(ckpt_path):
                 raise FileNotFoundError(f"Checkpoint path does not exist: {ckpt_path}")
-        return self.training_coordinator_.fit(
+        return self._ensure_training_coordinator().fit(
             node_batch,
             graph_conditioning,
             targets=targets,
@@ -3103,31 +3135,56 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         if self.model is None:
             logger.info("Model is not fitted yet.")
             return
+        from .metrics_visualization import plot_metrics
+
+        train_metrics, val_metrics = self._collect_metric_histories()
         plot_metrics(
-            train_metrics={
-                "total": self.model.train_losses,
-                "deg_ce": self.model.train_deg_ce,
-                "node_field": self.model.train_node_field,
-                **({"exist": self.model.train_exist} if self.model.use_existence_head else {}),
-                **({"node_label_ce": self.model.train_node_label_ce} if self.model.use_node_label_head else {}),
-                **({"edge_label_ce": self.model.train_edge_label_ce} if self.model.use_edge_label_head else {}),
-                **({"edge_ce": self.model.train_edge_loss} if self.model.use_locality_supervision else {}),
-                **({"aux_locality": self.model.train_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
-            },
-            val_metrics={
-                "total": self.model.val_losses,
-                "deg_ce": self.model.val_deg_ce,
-                "node_field": self.model.val_node_field,
-                **({"exist": self.model.val_exist} if self.model.use_existence_head else {}),
-                **({"node_label_ce": self.model.val_node_label_ce} if self.model.use_node_label_head else {}),
-                **({"edge_label_ce": self.model.val_edge_label_ce} if self.model.use_edge_label_head else {}),
-                **({"edge_ce": self.model.val_edge_loss} if self.model.use_locality_supervision else {}),
-                **({"aux_locality": self.model.val_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
-            },
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
             window=window,
             alpha=alpha,
         )
 
+    def _collect_metric_histories(self) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+        if self.model is None:
+            return {}, {}
+        train_metrics = {
+            "total": self.model.train_losses,
+            "deg_ce": self.model.train_deg_ce,
+            "node_field": self.model.train_node_field,
+            **({"exist": self.model.train_exist} if self.model.use_existence_head else {}),
+            **({"node_label_ce": self.model.train_node_label_ce} if self.model.use_node_label_head else {}),
+            **({"edge_label_ce": self.model.train_edge_label_ce} if self.model.use_edge_label_head else {}),
+            **({"edge_ce": self.model.train_edge_loss} if self.model.use_locality_supervision else {}),
+            **({"aux_locality": self.model.train_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
+        }
+        val_metrics = {
+            "total": self.model.val_losses,
+            "deg_ce": self.model.val_deg_ce,
+            "node_field": self.model.val_node_field,
+            **({"exist": self.model.val_exist} if self.model.use_existence_head else {}),
+            **({"node_label_ce": self.model.val_node_label_ce} if self.model.use_node_label_head else {}),
+            **({"edge_label_ce": self.model.val_edge_label_ce} if self.model.use_edge_label_head else {}),
+            **({"edge_ce": self.model.val_edge_loss} if self.model.use_locality_supervision else {}),
+            **({"aux_locality": self.model.val_aux_edge_loss} if self.model.use_auxiliary_locality_supervision else {}),
+        }
+        return train_metrics, val_metrics
+
+    def export_metrics_pdf(self, output_path: str, window: int = 10, alpha: float = 0.3):
+        """Write the recorded loss curves to a PDF file when metrics are available."""
+        if self.model is None:
+            logger.info("Model is not fitted yet.")
+            return None
+        from .metrics_visualization import save_metrics_pdf
+
+        train_metrics, val_metrics = self._collect_metric_histories()
+        return save_metrics_pdf(
+            train_metrics=train_metrics,
+            val_metrics=val_metrics,
+            output_path=output_path,
+            window=window,
+            alpha=alpha,
+        )
 
 def __getattr__(name: str):
     """Lazily expose the graph generator from the node-generator module."""
