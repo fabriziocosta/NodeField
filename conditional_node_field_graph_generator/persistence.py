@@ -65,6 +65,12 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.stream_pdf_timeout_seconds = 15.0
     if not hasattr(graph_generator, "stream_max_consecutive_stalls"):
         graph_generator.stream_max_consecutive_stalls = 3
+    graph_decoder = getattr(graph_generator, "graph_decoder", None)
+    if graph_decoder is not None:
+        if not hasattr(graph_decoder, "parallel_decode_timeout_seconds"):
+            graph_decoder.parallel_decode_timeout_seconds = 30.0
+        if not hasattr(graph_decoder, "active_time_limit_seconds"):
+            graph_decoder.active_time_limit_seconds = None
     if getattr(graph_generator, "model_name", None) is not None:
         graph_generator.model_name = sanitize_model_token(graph_generator.model_name)
 
