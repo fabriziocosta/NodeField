@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import tempfile
+from contextlib import nullcontext
 
 import dill as pickle
 
@@ -130,12 +131,15 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=T
     filename = f"{stem}.pkl"
     path = model_root / filename
     pdf_path = model_root / f"{stem}.loss-curves.pdf"
-    _atomic_pickle_dump(graph_generator, path)
-    _save_graph_generator_loss_curves_pdf(
-        graph_generator,
-        output_path=pdf_path,
-        log=log,
-    )
+    lock_factory = getattr(graph_generator, "_ensure_stream_runtime_lock", None)
+    lock_context = lock_factory() if callable(lock_factory) else nullcontext()
+    with lock_context:
+        _atomic_pickle_dump(graph_generator, path)
+        _save_graph_generator_loss_curves_pdf(
+            graph_generator,
+            output_path=pdf_path,
+            log=log,
+        )
     if log:
         logger.info("Saved graph generator as: %s", filename)
         logger.info("%s", path)

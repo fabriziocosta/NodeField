@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import random
+import threading
 import time
 import pulp
 import dill as pickle
@@ -173,6 +174,13 @@ class ConditionalNodeFieldGraphGenerator(object):
             self.stream_fit_stats_ = stats
         return stats
 
+    def _ensure_stream_runtime_lock(self) -> threading.RLock:
+        lock = getattr(self, "_stream_runtime_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._stream_runtime_lock = lock
+        return lock
+
     @staticmethod
     def _edge_label_matrix_to_list(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
         return _edge_label_matrix_to_list(adj_mtx, edge_label_matrix)
@@ -187,91 +195,122 @@ class ConditionalNodeFieldGraphGenerator(object):
 
     @property
     def stream_seen_(self) -> int:
-        return int(self._ensure_stream_fit_stats().seen)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().seen)
 
     @stream_seen_.setter
     def stream_seen_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().seen = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().seen = int(value)
 
     @property
     def stream_warmup_count_(self) -> int:
-        return int(self._ensure_stream_fit_stats().warmup_count)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().warmup_count)
 
     @stream_warmup_count_.setter
     def stream_warmup_count_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().warmup_count = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().warmup_count = int(value)
 
     @property
     def stream_training_seen_(self) -> int:
-        return int(self._ensure_stream_fit_stats().training_seen)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().training_seen)
 
     @stream_training_seen_.setter
     def stream_training_seen_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().training_seen = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().training_seen = int(value)
 
     @property
     def stream_training_accepted_(self) -> int:
-        return int(self._ensure_stream_fit_stats().training_accepted)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().training_accepted)
 
     @stream_training_accepted_.setter
     def stream_training_accepted_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().training_accepted = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().training_accepted = int(value)
 
     @property
     def stream_training_skipped_(self) -> int:
-        return int(self._ensure_stream_fit_stats().training_skipped)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().training_skipped)
 
     @stream_training_skipped_.setter
     def stream_training_skipped_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().training_skipped = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().training_skipped = int(value)
 
     @property
     def stream_skipped_too_large_(self) -> int:
-        return int(self._ensure_stream_fit_stats().skipped_too_large)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().skipped_too_large)
 
     @stream_skipped_too_large_.setter
     def stream_skipped_too_large_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().skipped_too_large = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().skipped_too_large = int(value)
 
     @property
     def stream_skipped_unknown_node_label_(self) -> int:
-        return int(self._ensure_stream_fit_stats().skipped_unknown_node_label)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().skipped_unknown_node_label)
 
     @stream_skipped_unknown_node_label_.setter
     def stream_skipped_unknown_node_label_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().skipped_unknown_node_label = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().skipped_unknown_node_label = int(value)
 
     @property
     def stream_skipped_unknown_edge_label_(self) -> int:
-        return int(self._ensure_stream_fit_stats().skipped_unknown_edge_label)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().skipped_unknown_edge_label)
 
     @stream_skipped_unknown_edge_label_.setter
     def stream_skipped_unknown_edge_label_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().skipped_unknown_edge_label = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().skipped_unknown_edge_label = int(value)
 
     @property
     def stream_skipped_transform_error_(self) -> int:
-        return int(self._ensure_stream_fit_stats().skipped_transform_error)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().skipped_transform_error)
 
     @stream_skipped_transform_error_.setter
     def stream_skipped_transform_error_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().skipped_transform_error = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().skipped_transform_error = int(value)
 
     @property
     def stream_skipped_supervision_error_(self) -> int:
-        return int(self._ensure_stream_fit_stats().skipped_supervision_error)
+        with self._ensure_stream_runtime_lock():
+            return int(self._ensure_stream_fit_stats().skipped_supervision_error)
 
     @stream_skipped_supervision_error_.setter
     def stream_skipped_supervision_error_(self, value: int) -> None:
-        self._ensure_stream_fit_stats().skipped_supervision_error = int(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().skipped_supervision_error = int(value)
 
     @property
     def stream_acceptance_rate_(self) -> float:
-        return float(self._ensure_stream_fit_stats().acceptance_rate)
+        with self._ensure_stream_runtime_lock():
+            return float(self._ensure_stream_fit_stats().acceptance_rate)
 
     @stream_acceptance_rate_.setter
     def stream_acceptance_rate_(self, value: float) -> None:
-        self._ensure_stream_fit_stats().acceptance_rate = float(value)
+        with self._ensure_stream_runtime_lock():
+            self._ensure_stream_fit_stats().acceptance_rate = float(value)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_stream_runtime_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._stream_runtime_lock = threading.RLock()
 
     def __init__(
             self,
@@ -1567,53 +1606,55 @@ class ConditionalNodeFieldGraphGenerator(object):
         )
 
     def _finalize_stream_fit_stats(self) -> None:
-        denominator = max(1, int(self.stream_training_seen_))
-        self.stream_acceptance_rate_ = float(self.stream_training_accepted_) / float(denominator)
-        self.warmup_schema_frozen_ = True
-        if int(self.verbose) >= 1:
-            verbose_log(
-                self,
-                "Streaming fit summary: "
-                f"seen={self.stream_seen_}, warmup={self.stream_warmup_count_}, "
-                f"train_seen={self.stream_training_seen_}, accepted={self.stream_training_accepted_}, "
-                f"skipped={self.stream_training_skipped_}, acceptance_rate={self.stream_acceptance_rate_:.1%}.",
-            )
-        if self.stream_training_seen_ > 0 and self.stream_acceptance_rate_ < 0.5:
-            logger.warning(
-                "Low streamed training acceptance rate: %.1f%% (%d/%d accepted).",
-                100.0 * self.stream_acceptance_rate_,
-                self.stream_training_accepted_,
-                self.stream_training_seen_,
-            )
+        with self._ensure_stream_runtime_lock():
+            denominator = max(1, int(self.stream_training_seen_))
+            self.stream_acceptance_rate_ = float(self.stream_training_accepted_) / float(denominator)
+            self.warmup_schema_frozen_ = True
+            if int(self.verbose) >= 1:
+                verbose_log(
+                    self,
+                    "Streaming fit summary: "
+                    f"seen={self.stream_seen_}, warmup={self.stream_warmup_count_}, "
+                    f"train_seen={self.stream_training_seen_}, accepted={self.stream_training_accepted_}, "
+                    f"skipped={self.stream_training_skipped_}, acceptance_rate={self.stream_acceptance_rate_:.1%}.",
+                )
+            if self.stream_training_seen_ > 0 and self.stream_acceptance_rate_ < 0.5:
+                logger.warning(
+                    "Low streamed training acceptance rate: %.1f%% (%d/%d accepted).",
+                    100.0 * self.stream_acceptance_rate_,
+                    self.stream_training_accepted_,
+                    self.stream_training_seen_,
+                )
 
     def _prepare_stream_training_batch(self, graphs: List[nx.Graph]):
-        supervision_plan = getattr(self, "supervision_plan_", None)
-        if supervision_plan is None:
-            raise RuntimeError("supervision_plan_ is not initialized.")
-        try:
-            node_embeddings_list, graph_conditioning = self.encode(graphs)
-        except Exception as exc:
-            raise _StreamTransformError("Failed to encode streamed graphs under the frozen warmup schema.") from exc
-        try:
-            node_label_targets = self.graphs_to_node_label_targets(graphs)
-            edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
-            node_batch = self._build_training_node_batch(
-                graphs,
-                node_embeddings_list=node_embeddings_list,
-                node_label_targets=node_label_targets,
-                edge_label_targets=edge_label_targets,
-                edge_label_pairs=edge_label_pairs,
-                supervision_plan=supervision_plan,
-                log_details=False,
-            )
-            payload = self.conditional_node_generator_model._build_processed_training_payload(
-                node_batch=node_batch,
-                graph_conditioning=graph_conditioning,
-                targets=None,
-            )
-            return self.conditional_node_generator_model._collate_processed_payload(payload)
-        except Exception as exc:
-            raise _StreamSupervisionError("Failed to derive streamed supervision under the frozen warmup schema.") from exc
+        with self._ensure_stream_runtime_lock():
+            supervision_plan = getattr(self, "supervision_plan_", None)
+            if supervision_plan is None:
+                raise RuntimeError("supervision_plan_ is not initialized.")
+            try:
+                node_embeddings_list, graph_conditioning = self.encode(graphs)
+            except Exception as exc:
+                raise _StreamTransformError("Failed to encode streamed graphs under the frozen warmup schema.") from exc
+            try:
+                node_label_targets = self.graphs_to_node_label_targets(graphs)
+                edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
+                node_batch = self._build_training_node_batch(
+                    graphs,
+                    node_embeddings_list=node_embeddings_list,
+                    node_label_targets=node_label_targets,
+                    edge_label_targets=edge_label_targets,
+                    edge_label_pairs=edge_label_pairs,
+                    supervision_plan=supervision_plan,
+                    log_details=False,
+                )
+                payload = self.conditional_node_generator_model._build_processed_training_payload(
+                    node_batch=node_batch,
+                    graph_conditioning=graph_conditioning,
+                    targets=None,
+                )
+                return self.conditional_node_generator_model._collate_processed_payload(payload)
+            except Exception as exc:
+                raise _StreamSupervisionError("Failed to derive streamed supervision under the frozen warmup schema.") from exc
 
     def fit_from_stream(
         self,
@@ -2926,7 +2967,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         verbose: bool = False,
-    ) -> Dict[str, Any]:
+        ) -> Dict[str, Any]:
         """Score generation quality using the fraction of feasible decoded candidates."""
         return _score_feasible_rate(
             self,
@@ -2939,6 +2980,31 @@ class ConditionalNodeFieldGraphGenerator(object):
             guidance_scale=guidance_scale,
             verbose=verbose,
         )
+
+    def _collect_metric_histories(self) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+        node_model = getattr(self, "conditional_node_generator_model", None)
+        collector = getattr(node_model, "_collect_metric_histories", None)
+        if callable(collector):
+            return collector()
+        return {}, {}
+
+    def plot_metrics(self, window: int = 10, alpha: float = 0.3):
+        """Visualise the wrapped node model training metrics when available."""
+        node_model = getattr(self, "conditional_node_generator_model", None)
+        plotter = getattr(node_model, "plot_metrics", None)
+        if not callable(plotter):
+            logger.info("Node generator does not expose plot_metrics().")
+            return None
+        return plotter(window=window, alpha=alpha)
+
+    def export_metrics_pdf(self, output_path: str, window: int = 10, alpha: float = 0.3):
+        """Write wrapped node model training metrics to a PDF when available."""
+        node_model = getattr(self, "conditional_node_generator_model", None)
+        exporter = getattr(node_model, "export_metrics_pdf", None)
+        if not callable(exporter):
+            logger.info("Node generator does not expose export_metrics_pdf().")
+            return None
+        return exporter(output_path=output_path, window=window, alpha=alpha)
 
     @timeit
     def conditional_sample(
