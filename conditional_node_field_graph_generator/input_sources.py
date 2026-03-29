@@ -49,6 +49,25 @@ _LOCAL_READERS: dict[str, Callable[[str | Path], Iterable[nx.Graph]]] = {
 }
 
 
+def estimate_source_instance_count(uri, source_type) -> Optional[int]:
+    normalized_type = str(source_type).strip().lower()
+    if normalized_type not in _LOCAL_READERS:
+        return None
+    path = Path(uri)
+    if not path.is_file():
+        return None
+    if path.suffix.lower() != ".csv":
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            line_count = sum(1 for _ in handle)
+    except OSError:
+        return None
+    if line_count <= 1:
+        return 0
+    return max(0, line_count - 1)
+
+
 def iter_selected_source_graphs(
     uri,
     source_type,
@@ -58,12 +77,17 @@ def iter_selected_source_graphs(
     random_state=None,
     verbose: bool = False,
     start_after_instance: int = 0,
+    max_selected: Optional[int] = None,
 ):
     if start_after_instance is None:
         start_after_instance = 0
     start_after_instance = int(start_after_instance)
     if start_after_instance < 0:
         raise ValueError("start_after_instance must be >= 0")
+    if max_selected is not None:
+        max_selected = int(max_selected)
+        if max_selected < 0:
+            raise ValueError("max_selected must be >= 0 when provided")
 
     normalized_type = str(source_type).strip().lower()
     if reader is None and normalized_type not in _LOCAL_READERS:
@@ -93,6 +117,8 @@ def iter_selected_source_graphs(
     for raw_index, graph in enumerate(graph_iterable):
         if raw_index < start_after_instance:
             continue
+        if max_selected is not None and yielded >= max_selected:
+            break
         if normalized_limit is None:
             pass
         elif isinstance(normalized_limit, int):

@@ -38,7 +38,7 @@ from .conditional_node_field_graph_decoder import (
 )
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
-from .input_sources import iter_selected_source_graphs
+from .input_sources import estimate_source_instance_count, iter_selected_source_graphs
 from .naming_utils import sanitize_model_token
 from .graph_generator_state import (
     DecodePolicy,
@@ -1720,6 +1720,20 @@ class ConditionalNodeFieldGraphGenerator(object):
         try:
             if verbose:
                 self.verbose = verbose
+            source_selected_quota: Optional[int] = None
+            if isinstance(limit, float) and 0.0 < float(limit) < 1.0:
+                estimated_source_count = estimate_source_instance_count(uri, type)
+                if estimated_source_count is not None:
+                    source_selected_quota = max(
+                        int(warmup_size) + int(batch_size),
+                        int(round(float(limit) * float(estimated_source_count))),
+                    )
+                    verbose_log(
+                        self,
+                        f"Streaming Bernoulli quota: limit={float(limit):.3f}, "
+                        f"source_count={estimated_source_count}, selected_per_epoch={source_selected_quota}.",
+                        level=2,
+                    )
             def _make_source_iter(*, source_start_after_instance: Optional[int] = None):
                 resolved_start_after_instance = start_after_instance
                 if source_start_after_instance is not None:
@@ -1732,6 +1746,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     random_state=random_state,
                     verbose=bool(verbose),
                     start_after_instance=resolved_start_after_instance,
+                    max_selected=source_selected_quota,
                 )
 
             source_iter = _make_source_iter()
