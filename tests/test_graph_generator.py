@@ -364,7 +364,7 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_failure_mode="drop")
 
 
-def test_fit_from_stream_uses_warmup_only_for_schema_and_trains_remaining_batches():
+def test_fit_from_stream_reuses_cached_warmup_batches_during_training():
     graph_vectorizer = _GraphVectorizer()
     node_vectorizer = _NodeVectorizer()
     node_model = _StreamTrainableNodeModel()
@@ -401,14 +401,14 @@ def test_fit_from_stream_uses_warmup_only_for_schema_and_trains_remaining_batche
     assert node_model.fit_from_prebuilt_batches_calls[0]["validation_graphs"] == 2
     assert [
         batch["graphs"] for batch in node_model.fit_from_prebuilt_batches_calls[0]["batches"][0]
-    ] == [1]
-    assert generator.stream_training_seen_ == 1
-    assert generator.stream_training_accepted_ == 1
+    ] == [2, 1]
+    assert generator.stream_training_seen_ == 3
+    assert generator.stream_training_accepted_ == 3
     assert generator.stream_training_skipped_ == 0
     assert generator.warmup_schema_frozen_ is True
 
 
-def test_fit_from_stream_restarts_post_warmup_stream_for_multiple_epochs():
+def test_fit_from_stream_reuses_warmup_batches_and_restarts_post_warmup_stream_for_multiple_epochs():
     node_model = _StreamTrainableNodeModel(maximum_epochs=2)
     graphs = [
         _labelled_path(2, node_label="C"),
@@ -434,10 +434,10 @@ def test_fit_from_stream_restarts_post_warmup_stream_for_multiple_epochs():
 
     epoch_batches = node_model.fit_from_prebuilt_batches_calls[0]["batches"]
     assert len(epoch_batches) == 2
-    assert [[batch["graphs"] for batch in epoch] for epoch in epoch_batches] == [[1], [1]]
+    assert [[batch["graphs"] for batch in epoch] for epoch in epoch_batches] == [[1, 1, 1], [1, 1, 1]]
     assert generator.stream_warmup_count_ == 2
-    assert generator.stream_training_seen_ == 2
-    assert generator.stream_training_accepted_ == 2
+    assert generator.stream_training_seen_ == 6
+    assert generator.stream_training_accepted_ == 6
 
 
 def test_fit_from_stream_uses_first_post_warmup_batch_for_validation():

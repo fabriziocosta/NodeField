@@ -1637,7 +1637,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         try:
             if verbose:
                 self.verbose = verbose
-            def _make_source_iter():
+            def _make_source_iter(*, source_start_after_instance: Optional[int] = None):
+                resolved_start_after_instance = start_after_instance
+                if source_start_after_instance is not None:
+                    resolved_start_after_instance = int(source_start_after_instance)
                 return iter_selected_source_graphs(
                     uri,
                     type,
@@ -1645,7 +1648,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     limit=limit,
                     random_state=random_state,
                     verbose=bool(verbose),
-                    start_after_instance=start_after_instance,
+                    start_after_instance=resolved_start_after_instance,
                 )
 
             source_iter = _make_source_iter()
@@ -1687,9 +1690,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                 warmup_train_batches = []
                 if warmup_train_graphs:
                     for start_idx in range(0, len(warmup_train_graphs), int(batch_size)):
+                        warmup_batch_graphs = warmup_train_graphs[start_idx:start_idx + int(batch_size)]
                         warmup_train_batches.append(
-                            self._prepare_stream_training_batch(
-                                warmup_train_graphs[start_idx:start_idx + int(batch_size)]
+                            (
+                                int(len(warmup_batch_graphs)),
+                                self._prepare_stream_training_batch(warmup_batch_graphs),
                             )
                         )
 
@@ -1804,25 +1809,22 @@ class ConditionalNodeFieldGraphGenerator(object):
                         self.stream_epoch_training_seen_ = 0
                         self.stream_epoch_training_accepted_ = 0
                         self.stream_epoch_training_skipped_ = 0
-                        replay_iter = source_iter if batch_state["epoch_call_count"] == 1 else _make_source_iter()
-                        skipped_warmup = 0
-                        for graph in replay_iter:
-                            self.stream_seen_ += 1
-                            if skipped_warmup < int(self.stream_warmup_count_):
-                                skipped_warmup += 1
-                                continue
-                            break
+                        for warmup_batch_size, warmup_batch_payload in warmup_train_batches:
+                            self.stream_training_seen_ += int(warmup_batch_size)
+                            self.stream_epoch_training_seen_ += int(warmup_batch_size)
+                            self.stream_training_accepted_ += int(warmup_batch_size)
+                            self.stream_epoch_training_accepted_ += int(warmup_batch_size)
+                            yield warmup_batch_payload
+
+                        if batch_state["epoch_call_count"] == 1:
+                            replay_tail_iter = source_iter
                         else:
-                            return
-
-                        def _replay_tail_iter(first_graph):
-                            yield first_graph
-                            yield from replay_iter
-
-                        replay_tail_iter = _replay_tail_iter(graph)
-                        reserved_validation = _consume_validation_batch(replay_tail_iter)
-                        if reserved_validation is None:
-                            return
+                            replay_tail_iter = _make_source_iter(
+                                source_start_after_instance=start_after_instance + int(self.stream_warmup_count_)
+                            )
+                            reserved_validation = _consume_validation_batch(replay_tail_iter)
+                            if reserved_validation is None:
+                                return
                         yield from _iter_training_batches(replay_tail_iter)
 
                     self.conditional_node_generator_model.fit_from_prebuilt_batches(
