@@ -299,6 +299,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_failure_mode: str = "return_partial",
             model_name: Optional[str] = None,
             model_dir: Optional[str] = None,
+            stream_snapshot_every_n_batches: int = 10,
             ) -> None:
         """Store the collaborating components and configuration used for the pipeline.
 
@@ -328,6 +329,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_failure_mode (str): Optional input value.
             model_name (Optional[str]): Optional input value.
             model_dir (Optional[str]): Optional input value.
+            stream_snapshot_every_n_batches (int): Optional input value.
         """
         self.graph_vectorizer = graph_vectorizer
         self.node_graph_vectorizer = node_graph_vectorizer
@@ -338,6 +340,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.training_graph_conditioning_: Optional[GraphConditioningBatch] = None
         self.stream_fit_stats_ = StreamFitStats()
         self.stream_prefetch_batches = 2
+        self.stream_snapshot_every_n_batches = max(1, int(stream_snapshot_every_n_batches))
         self.is_fitted_ = False
         if not 0.0 < locality_sample_fraction <= 1.0:
             raise ValueError("locality_sample_fraction must be between 0.0 (exclusive) and 1.0 (inclusive)")
@@ -1340,6 +1343,9 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.stream_training_seen_ = 0
         self.stream_training_accepted_ = 0
         self.stream_training_skipped_ = 0
+        self.stream_epoch_training_seen_ = 0
+        self.stream_epoch_training_accepted_ = 0
+        self.stream_epoch_training_skipped_ = 0
         self.stream_skipped_too_large_ = 0
         self.stream_skipped_unknown_node_label_ = 0
         self.stream_skipped_unknown_edge_label_ = 0
@@ -1473,6 +1479,7 @@ class ConditionalNodeFieldGraphGenerator(object):
 
     def _increment_stream_skip(self, reason: str) -> None:
         self.stream_training_skipped_ += 1
+        self.stream_epoch_training_skipped_ += 1
         if reason == "too_large":
             self.stream_skipped_too_large_ += 1
         elif reason == "unknown_node_label":
@@ -1655,6 +1662,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     for graph in graph_iter:
                         self.stream_seen_ += 1
                         self.stream_training_seen_ += 1
+                        self.stream_epoch_training_seen_ += 1
                         rejection_reason = self._stream_rejection_reason(graph)
                         if rejection_reason is not None:
                             self._increment_stream_skip(rejection_reason)
@@ -1667,6 +1675,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                             batch_payload = self._prepare_stream_training_batch(active_batch)
                         except _StreamTransformError:
                             self.stream_training_skipped_ += len(active_batch)
+                            self.stream_epoch_training_skipped_ += len(active_batch)
                             self.stream_skipped_transform_error_ += len(active_batch)
                             for rejected_graph in active_batch:
                                 self._log_stream_skip("transform_error", rejected_graph)
@@ -1674,12 +1683,14 @@ class ConditionalNodeFieldGraphGenerator(object):
                             continue
                         except _StreamSupervisionError:
                             self.stream_training_skipped_ += len(active_batch)
+                            self.stream_epoch_training_skipped_ += len(active_batch)
                             self.stream_skipped_supervision_error_ += len(active_batch)
                             for rejected_graph in active_batch:
                                 self._log_stream_skip("supervision_error", rejected_graph)
                             active_batch = []
                             continue
                         self.stream_training_accepted_ += len(active_batch)
+                        self.stream_epoch_training_accepted_ += len(active_batch)
                         yield batch_payload
                         active_batch = []
                     if active_batch:
@@ -1687,16 +1698,19 @@ class ConditionalNodeFieldGraphGenerator(object):
                             batch_payload = self._prepare_stream_training_batch(active_batch)
                         except _StreamTransformError:
                             self.stream_training_skipped_ += len(active_batch)
+                            self.stream_epoch_training_skipped_ += len(active_batch)
                             self.stream_skipped_transform_error_ += len(active_batch)
                             for rejected_graph in active_batch:
                                 self._log_stream_skip("transform_error", rejected_graph)
                         except _StreamSupervisionError:
                             self.stream_training_skipped_ += len(active_batch)
+                            self.stream_epoch_training_skipped_ += len(active_batch)
                             self.stream_skipped_supervision_error_ += len(active_batch)
                             for rejected_graph in active_batch:
                                 self._log_stream_skip("supervision_error", rejected_graph)
                         else:
                             self.stream_training_accepted_ += len(active_batch)
+                            self.stream_epoch_training_accepted_ += len(active_batch)
                             yield batch_payload
 
                 validation_graphs = _consume_validation_batch(source_iter)
@@ -1722,6 +1736,9 @@ class ConditionalNodeFieldGraphGenerator(object):
 
                     def _single_pass_batch_factory():
                         batch_state["epoch_call_count"] += 1
+                        self.stream_epoch_training_seen_ = 0
+                        self.stream_epoch_training_accepted_ = 0
+                        self.stream_epoch_training_skipped_ = 0
                         replay_iter = source_iter if batch_state["epoch_call_count"] == 1 else _make_source_iter()
                         skipped_warmup = 0
                         for graph in replay_iter:

@@ -6,6 +6,8 @@ import sys
 import warnings
 from pathlib import Path
 
+from abstractgraph_graphicalizer.chem import download_zinc_dataset as _chem_download_zinc_dataset
+
 from .runtime_paths import (
     ensure_repo_on_syspath as _ensure_repo_on_syspath,
     resolve_artifact_root,
@@ -92,8 +94,26 @@ def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True)
     return context
 
 
+def download_zinc_dataset(dataset_dir: str | Path, filename: str | None = None) -> Path:
+    """Return a ZINC CSV path, defaulting to the external downloader for the canonical file.
+
+    When ``filename`` is provided, this helper returns ``dataset_dir / filename`` and requires
+    that the file already exists. This keeps notebook workflows repo-local while still allowing
+    alternate filtered copies such as ``zinc_18.csv``.
+    """
+    dataset_path = Path(dataset_dir).expanduser()
+    dataset_path.mkdir(parents=True, exist_ok=True)
+    if filename is None:
+        return Path(_chem_download_zinc_dataset(dataset_path))
+    requested_path = dataset_path / str(filename)
+    if not requested_path.is_file():
+        raise FileNotFoundError(f"Requested ZINC dataset file does not exist: {requested_path}")
+    return requested_path
+
+
 __all__ = [
     "configure_notebook",
+    "download_zinc_dataset",
     "ensure_repo_on_syspath",
     "find_repo_root",
     "find_local_nsppk_repo",

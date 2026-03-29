@@ -302,6 +302,9 @@ class GraphGeneratorBatchSnapshotCallback(pl.callbacks.Callback):
         model_name = getattr(owner, "model_name", None)
         if model_name is None:
             return
+        snapshot_every_n_batches = max(1, int(getattr(owner, "stream_snapshot_every_n_batches", 10)))
+        if ((int(batch_idx) + 1) % snapshot_every_n_batches) != 0:
+            return
         from .persistence import save_graph_generator
 
         previous_fit_state = bool(getattr(owner, "is_fitted_", False))

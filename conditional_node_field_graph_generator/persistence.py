@@ -53,6 +53,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.oracle_use_edge_label_cuts = False
     if not hasattr(graph_generator, "stream_prefetch_batches"):
         graph_generator.stream_prefetch_batches = 2
+    if not hasattr(graph_generator, "stream_snapshot_every_n_batches"):
+        graph_generator.stream_snapshot_every_n_batches = 10
     if getattr(graph_generator, "model_name", None) is not None:
         graph_generator.model_name = sanitize_model_token(graph_generator.model_name)
 

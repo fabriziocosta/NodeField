@@ -614,10 +614,6 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         if checkpoint_root_dir is None:
             checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "node_field")
         self.checkpoint_root_dir = str(checkpoint_root_dir)
-        self.training_policy_ = self._current_training_policy()
-        self.checkpoint_policy_ = self._current_checkpoint_policy()
-        self.metrics_policy_ = MetricsPolicy(plot_on_train_end=True)
-        self.training_coordinator_ = TrainingCoordinator(self)
         self.important_feature_index = important_feature_index
         self.max_degree = int(max_degree)
         self.lambda_degree_importance = lambda_degree_importance
@@ -1261,7 +1257,9 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             if progress_owner is not None:
                 progress_prefix = (
                     f"accepted={int(getattr(progress_owner, 'stream_training_accepted_', 0)):>7d} "
-                    f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0)):>7d} | "
+                    f"(epoch={int(getattr(progress_owner, 'stream_epoch_training_accepted_', 0)):>7d}) "
+                    f"skipped={int(getattr(progress_owner, 'stream_training_skipped_', 0)):>7d} "
+                    f"(epoch={int(getattr(progress_owner, 'stream_epoch_training_skipped_', 0)):>7d}) | "
                 )
             trainer = getattr(self, "trainer", None)
             current_epoch = int(getattr(trainer, "current_epoch", -1)) + 1 if trainer is not None else None
@@ -1674,6 +1672,10 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         if checkpoint_root_dir is None:
             checkpoint_root_dir = os.path.join(self.artifact_root_dir, "checkpoints", "node_field")
         self.checkpoint_root_dir = str(checkpoint_root_dir)
+        self.training_policy_ = self._current_training_policy()
+        self.checkpoint_policy_ = self._current_checkpoint_policy()
+        self.metrics_policy_ = MetricsPolicy(plot_on_train_end=True)
+        self.training_coordinator_ = TrainingCoordinator(self)
         self.important_feature_index = important_feature_index
         self.lambda_degree_importance = lambda_degree_importance
         self.degree_temperature = degree_temperature

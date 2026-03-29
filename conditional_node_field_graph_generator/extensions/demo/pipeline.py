@@ -923,6 +923,7 @@ def build_graph_generator(
     checkpoint_root=None,
     model_name=None,
     model_dir=None,
+    stream_snapshot_every_n_batches=10,
 ):
     if nbits is not None:
         if node_vectorizer_nbits is None:
@@ -1101,6 +1102,7 @@ def build_graph_generator(
         feasibility_failure_mode=feasibility_failure_mode,
         model_name=model_name,
         model_dir=str(model_dir) if model_dir is not None else None,
+        stream_snapshot_every_n_batches=stream_snapshot_every_n_batches,
         verbose=verbose,
     )
 
