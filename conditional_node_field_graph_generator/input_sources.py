@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -34,12 +35,61 @@ def _normalize_limit(limit):
 def _iter_molecular_source_graphs(uri, source_type) -> Iterable[nx.Graph]:
     try:
         from abstractgraph_graphicalizer.chem import MolecularGraphSourceLoader
+    except ImportError:
+        MolecularGraphSourceLoader = None
+
+    if MolecularGraphSourceLoader is not None:
+        loader = MolecularGraphSourceLoader(on_error="skip")
+        yield from loader.iter_graphs(uri, source_type)
+        return
+
+    try:
+        from abstractgraph_graphicalizer.chem import ZINCLoader, smiles_to_graph
     except ImportError as exc:  # pragma: no cover
         raise ImportError(
-            "Molecular stream sources require abstractgraph_graphicalizer.chem.MolecularGraphSourceLoader."
+            "Molecular stream sources require abstractgraph_graphicalizer chemistry support."
         ) from exc
-    loader = MolecularGraphSourceLoader(on_error="skip")
-    yield from loader.iter_graphs(uri, source_type)
+
+    normalized_type = str(source_type).strip().lower()
+    path = Path(uri)
+    if normalized_type == "zinc_csv":
+        loader = ZINCLoader(path.parent, on_error="skip")
+        dataset_name = path.stem
+        with open(path, "r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row_index, row in enumerate(reader):
+                graph = loader._graph_from_row(row, dataset_name=dataset_name, row_index=row_index)
+                if graph is not None:
+                    yield graph
+        return
+
+    if normalized_type in {"smiles_csv", "csv_smiles"}:
+        with open(path, "r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = [str(name).strip() for name in (reader.fieldnames or []) if name]
+            smiles_field = "smiles" if "smiles" in fieldnames else None
+            if smiles_field is None and fieldnames:
+                smiles_field = fieldnames[0]
+            if smiles_field is None:
+                raise ValueError(f"Could not determine a SMILES column for source: {path}")
+            for row_index, row in enumerate(reader):
+                smiles = row.get(smiles_field)
+                if smiles is None or not str(smiles).strip():
+                    continue
+                try:
+                    graph = smiles_to_graph(str(smiles))
+                except Exception:
+                    continue
+                graph.graph["source"] = normalized_type
+                graph.graph["input"] = f"{path.stem}[{row_index}]"
+                for key, value in row.items():
+                    if key is None or value is None or value == "":
+                        continue
+                    graph.graph[key] = value
+                yield graph
+        return
+
+    raise ValueError(f"Unsupported molecular source type: {source_type!r}")
 
 
 _LOCAL_READERS: dict[str, Callable[[str | Path], Iterable[nx.Graph]]] = {

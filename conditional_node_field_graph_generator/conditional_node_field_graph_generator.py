@@ -82,6 +82,13 @@ _ORACLE_EDGE_LABEL_WEIGHT = 1.0
 plt = _shared_diagnostics.plt
 
 
+def _format_minutes_seconds(elapsed_seconds: float) -> str:
+    total_seconds = max(0.0, float(elapsed_seconds))
+    minutes = int(total_seconds // 60)
+    seconds = total_seconds - (minutes * 60)
+    return f"{minutes}m {seconds:.1f}s"
+
+
 def _is_molecule_like_graph(graph: nx.Graph) -> bool:
     return _shared_diagnostics._is_molecule_like_graph(graph)
 
@@ -116,6 +123,10 @@ class _StreamSupervisionError(RuntimeError):
 
 class _StreamBatchTimeoutError(RuntimeError):
     pass
+
+
+def _prepare_stream_training_payload_worker(graph_generator, graphs: List[nx.Graph]):
+    return graph_generator._prepare_stream_training_payload(graphs)
 
 
 def _prepare_stream_training_batch_worker(graph_generator, graphs: List[nx.Graph]):
@@ -1493,7 +1504,13 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.node_graph_vectorizer.fit(graphs)
         if self.feasibility_estimator is not None:
             verbose_log(self, f"Fitting feasibility estimator on {len(graphs)} graphs")
+            feasibility_started_at = time.time()
             self.feasibility_estimator.fit(graphs)
+            verbose_log(
+                self,
+                "Finished fitting feasibility estimator in "
+                f"{_format_minutes_seconds(time.time() - feasibility_started_at)}",
+            )
         node_label_targets = self.graphs_to_node_label_targets(graphs)
         edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
         supervision_plan = self._build_supervision_plan(
@@ -1652,7 +1669,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     self.stream_training_seen_,
                 )
 
-    def _prepare_stream_training_batch(self, graphs: List[nx.Graph]):
+    def _prepare_stream_training_payload(self, graphs: List[nx.Graph]):
         with self._ensure_stream_runtime_lock():
             supervision_plan = getattr(self, "supervision_plan_", None)
             if supervision_plan is None:
@@ -1678,25 +1695,39 @@ class ConditionalNodeFieldGraphGenerator(object):
                     graph_conditioning=graph_conditioning,
                     targets=None,
                 )
-                return self.conditional_node_generator_model._collate_processed_payload(payload)
+                return payload
             except Exception as exc:
                 raise _StreamSupervisionError("Failed to derive streamed supervision under the frozen warmup schema.") from exc
+
+    def _prepare_stream_training_batch(self, graphs: List[nx.Graph]):
+        payload = self._prepare_stream_training_payload(graphs)
+        return self.conditional_node_generator_model._collate_processed_payload(payload)
 
     def _prepare_stream_training_batch_with_timeout(self, graphs: List[nx.Graph]):
         timeout_seconds = getattr(self, "stream_batch_timeout_seconds", None)
         if timeout_seconds is None:
             return self._prepare_stream_training_batch(graphs)
         try:
-            return run_with_fork_timeout(
-                _prepare_stream_training_batch_worker,
+            payload = run_with_fork_timeout(
+                _prepare_stream_training_payload_worker,
                 self,
                 graphs,
                 timeout_seconds=float(timeout_seconds),
             )
+            return self.conditional_node_generator_model._collate_processed_payload(payload)
         except TimeoutError as exc:
-            raise _StreamBatchTimeoutError(
-                f"Streamed batch preparation exceeded {float(timeout_seconds):.1f}s."
-            ) from exc
+            verbose_log(
+                self,
+                "Streamed batch preparation exceeded "
+                f"{float(timeout_seconds):.1f}s; retrying in-process without the fork timeout.",
+                level=1,
+            )
+            try:
+                return self._prepare_stream_training_batch(graphs)
+            except Exception as fallback_exc:
+                raise _StreamBatchTimeoutError(
+                    f"Streamed batch preparation exceeded {float(timeout_seconds):.1f}s."
+                ) from fallback_exc
 
     def fit_from_stream(
         self,
@@ -1997,7 +2028,13 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.node_graph_vectorizer.fit(graphs)
         if self.feasibility_estimator is not None:
             verbose_log(self, f"Fitting feasibility estimator on {len(graphs)} graphs")
+            feasibility_started_at = time.time()
             self.feasibility_estimator.fit(graphs)
+            verbose_log(
+                self,
+                "Finished fitting feasibility estimator in "
+                f"{_format_minutes_seconds(time.time() - feasibility_started_at)}",
+            )
         node_label_targets = self.graphs_to_node_label_targets(graphs)
         edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
         supervision_plan = self._build_supervision_plan(
