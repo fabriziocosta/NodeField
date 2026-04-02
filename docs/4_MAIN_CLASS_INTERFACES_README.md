@@ -849,6 +849,8 @@ ConditionalNodeFieldGraphGenerator(
     max_feasibility_attempts: int = 10,
     feasibility_candidates_per_attempt: int = 4,
     feasibility_failure_mode: str = "return_partial",
+    feasibility_rejection_mode: str = "fallback_unfiltered",
+    max_feasibility_seconds_per_sample: Optional[float] = 10.0,
 )
 ```
 
@@ -982,8 +984,31 @@ Oracle semantics:
 
 - `feasibility_failure_mode`
   `"raise"` or `"return_partial"`.
-  `"raise"`: strict behavior, useful for pipelines that require a full batch.
-  `"return_partial"`: more forgiving behavior, useful for exploratory generation.
+  This controls what the public method returns after feasibility processing has
+  finished and some requested slots are still missing.
+  `"raise"`: raise if the final result is incomplete.
+  `"return_partial"`: return only the graphs that survived.
+
+- `feasibility_rejection_mode`
+  `"fallback_unfiltered"` or `"strict"`.
+  This controls what happens when feasibility retries for one slot exhaust or
+  time out before the final `feasibility_failure_mode` is applied.
+  `"fallback_unfiltered"`: decode that slot once more without feasibility
+  filtering and include it in the result as an unfiltered graph.
+  `"strict"`: do not fall back; keep the slot rejected.
+
+- `max_feasibility_seconds_per_sample`
+  Optional wall-clock budget applied to each requested output when feasibility
+  filtering runs in timeout-protected mode.
+  Increase: more time for retries and oracle-guided decode, but slower worst-case
+  generation.
+  Decrease: faster failure or fallback per slot.
+  Set to `None`: use the batch-wide retry path without a per-sample timeout.
+
+Generation logging:
+- per-attempt feasibility logs now report the local attempt state only
+- final generation logs report aggregate counts and fractions for feasible,
+  unfiltered, and rejected outputs
 
 ### Main Public Methods
 
@@ -1287,6 +1312,13 @@ Parameters:
 
 - `apply_feasibility_filtering`
   Same filtering tradeoff as above.
+
+Runtime summary:
+- when feasibility filtering is active, the generator stores the last aggregate
+  outcome in `last_decode_summary_`
+- that summary includes `requested`, `returned`, `feasible`,
+  `feasible_fraction`, `unfiltered`, `unfiltered_fraction`, `rejected`, and
+  `rejected_fraction`
 
 #### `conditional_sample(...)`
 

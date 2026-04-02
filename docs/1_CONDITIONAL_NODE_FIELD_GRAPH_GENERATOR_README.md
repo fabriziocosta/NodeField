@@ -532,6 +532,12 @@ upgraded on load when possible so older demo feasibility-estimator composites
 pick up the masked interface and the default adaptive oracle-cut policy without
 requiring notebook changes.
 
+When `max_feasibility_seconds_per_sample` is configured, timeout-protected
+feasibility filtering is applied per requested output rather than across the
+whole batch. In that mode, each slot has its own retry budget and optional
+fallback path, and the generator emits one final aggregate generation summary at
+the end of the call.
+
 When resolving a saved generator, the persistence helper also accepts the
 original unsanitized model name used at save time. This matters for names that
 contain characters such as `.` which are normalized in persisted filenames.
@@ -541,6 +547,16 @@ contain characters such as `.` which are normalized in persisted filenames.
 Sample graph-level conditions from cached training conditioning, then decode them.
 
 By default, this samples stored graph-conditioning rows directly. When `interpolate_between_n_samples` is provided, each requested output first draws a small subset of cached training conditioning rows, scores candidate pairs by cosine similarity on the cached graph-vectorizer embeddings, samples a pair, and linearly interpolates graph embedding, node count, and edge count to form a new conditioning vector.
+
+When feasibility filtering is active, the final log line reports:
+
+- `requested`
+- `returned`
+- `feasible`
+- `unfiltered`
+- `rejected`
+
+along with fractions relative to `requested`.
 
 ### `conditional_sample(graphs, n_samples, ...)`
 
@@ -628,6 +644,12 @@ The graph generator now fails fast when:
 - node labels are inconsistently present,
 - feasibility filtering cannot fill outputs and failure mode is `raise`,
 - the decoder reports solver failure.
+
+For streamed fitting, a `None` value for `stream_batch_timeout_seconds` no
+longer disables protection for the fit call. The streamed path now uses a
+temporary safe default timeout so stalled post-warmup batch preparation is
+skipped instead of blocking indefinitely, while warmup batch preparation itself
+remains unbounded.
 
 That is operationally much safer than silent partial failure.
 

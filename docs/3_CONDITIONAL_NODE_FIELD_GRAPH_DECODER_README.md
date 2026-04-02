@@ -64,6 +64,11 @@ At generation time the overall flow is:
 5. Labels are attached to the final adjacency.
 6. If enabled, feasibility filtering accepts or rejects decoded graphs and may retry.
 
+If `max_feasibility_seconds_per_sample` is set on the graph generator, this
+retry loop is evaluated per requested output with its own timeout budget. In
+that mode, the final fallback or rejection behavior is controlled by
+`feasibility_rejection_mode`.
+
 ```mermaid
 flowchart LR
     GC[GraphConditioningBatch]

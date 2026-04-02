@@ -92,7 +92,6 @@ def log_feasibility_attempt(
             max_attempts=owner.max_feasibility_attempts,
             attempted_total=attempted_total,
             feasible_now=feasible_now,
-            filled_now=filled_now,
             pending_now=pending_now,
             acceptance_rate=acceptance_rate,
             attempt_elapsed_seconds=attempt_elapsed_seconds,

@@ -139,6 +139,9 @@ def test_decode_service_timeout_mode_records_final_summary_with_fallback(monkeyp
     assert owner.last_decode_summary_ == {
         "requested": 2,
         "returned": 2,
+        "generated": 0,
+        "candidate_feasible": 0,
+        "candidate_feasible_fraction": 0.0,
         "feasible": 1,
         "feasible_fraction": 0.5,
         "unfiltered": 1,
@@ -178,3 +181,6 @@ def test_decode_service_strict_mode_skips_unfiltered_fallback(monkeypatch):
     assert decoded == [None]
     assert fallback_called["value"] is False
     assert owner.last_decode_summary_["rejected"] == 1
+    assert owner.last_decode_summary_["generated"] == 0
+    assert owner.last_decode_summary_["candidate_feasible"] == 0
+    assert owner.last_decode_summary_["candidate_feasible_fraction"] == 0.0

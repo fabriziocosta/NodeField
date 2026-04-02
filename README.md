@@ -205,6 +205,13 @@ If training is interrupted, you can resume the training state by passing `ckpt_p
 
 By default, `.sample(...)` reuses cached graph-level conditioning rows from the training set. It can also be configured to stochastically interpolate between pairs of cached training embeddings in graph-conditioning space, with the same interpolation coefficient applied to graph embeddings, node counts, and edge counts.
 
+When feasibility filtering is enabled, generation now emits a final aggregate
+summary covering how many requested outputs were returned as feasible graphs,
+how many fell back to unfiltered decode, and how many were ultimately
+rejected. The fallback behavior is controlled separately from
+`feasibility_failure_mode` through `feasibility_rejection_mode`, which accepts
+`"fallback_unfiltered"` or `"strict"`.
+
 Full-generator persistence lives in `conditional_node_field_graph_generator.persistence`. `load_graph_generator(...)` accepts either the persisted filename or the original unsanitized `model_name` used during saving, so names containing characters such as `.` still resolve correctly after filename sanitization.
 
 When guidance targets are available, sampling can also use classifier-free conditioning through

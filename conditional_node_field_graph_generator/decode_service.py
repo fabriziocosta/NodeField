@@ -26,15 +26,21 @@ class DecodeService:
         self,
         *,
         requested_count: int,
+        generated_count: int,
+        candidate_feasible_count: int,
         feasible_count: int,
         unfiltered_count: int,
         rejected_count: int,
     ) -> dict[str, Union[int, float]]:
         returned_count = int(feasible_count) + int(unfiltered_count)
         denominator = max(1, int(requested_count))
+        generated_denominator = max(1, int(generated_count))
         summary = {
             "requested": int(requested_count),
             "returned": int(returned_count),
+            "generated": int(generated_count),
+            "candidate_feasible": int(candidate_feasible_count),
+            "candidate_feasible_fraction": float(candidate_feasible_count) / float(generated_denominator),
             "feasible": int(feasible_count),
             "feasible_fraction": float(feasible_count) / float(denominator),
             "unfiltered": int(unfiltered_count),
@@ -48,6 +54,9 @@ class DecodeService:
                 self.owner,
                 "Generation summary: "
                 f"requested={summary['requested']}, returned={summary['returned']}, "
+                f"generated={summary['generated']}, "
+                f"candidate_feasible={summary['candidate_feasible']} "
+                f"({summary['candidate_feasible_fraction']:.1%}), "
                 f"feasible={summary['feasible']} ({summary['feasible_fraction']:.1%}), "
                 f"unfiltered={summary['unfiltered']} ({summary['unfiltered_fraction']:.1%}), "
                 f"rejected={summary['rejected']} ({summary['rejected_fraction']:.1%}).",
@@ -70,7 +79,7 @@ class DecodeService:
         classifier_scale: float = 1.0,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         timeout_seconds: float,
-    ) -> tuple[Optional[nx.Graph], str]:
+    ) -> tuple[Optional[nx.Graph], str, int, int]:
         owner = self.owner
         previous_deadline = owner._set_generation_timeout_deadline(timeout_seconds)
         previous_active_time_limit = None if owner.graph_decoder is None else getattr(
@@ -83,7 +92,7 @@ class DecodeService:
                 getattr(owner.graph_decoder, "adjacency_time_limit_seconds", None)
         )
         try:
-            accepted, _, _ = decode_with_feasibility_slots_core(
+            accepted, total_generated, total_feasible = decode_with_feasibility_slots_core(
                 owner,
                 graph_conditioning,
                 decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self.decode_conditioning_batch(
@@ -101,15 +110,17 @@ class DecodeService:
             )
         except RuntimeError:
             accepted = [None]
+            total_generated = 0
+            total_feasible = 0
         finally:
             if owner.graph_decoder is not None:
                 owner.graph_decoder.active_time_limit_seconds = previous_active_time_limit
             owner._restore_generation_timeout_deadline(previous_deadline)
 
         if accepted and accepted[0] is not None:
-            return accepted[0], "feasible"
+            return accepted[0], "feasible", int(total_generated), int(total_feasible)
         if not self._should_fallback_to_unfiltered():
-            return None, "rejected"
+            return None, "rejected", int(total_generated), int(total_feasible)
         fallback_attempt_idx = max(
             0,
             int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0)),
@@ -126,8 +137,8 @@ class DecodeService:
             attempt_idx=fallback_attempt_idx,
         )
         if not fallback_graphs:
-            return None, "rejected"
-        return fallback_graphs[0], "unfiltered"
+            return None, "rejected", int(total_generated), int(total_feasible)
+        return fallback_graphs[0], "unfiltered", int(total_generated), int(total_feasible)
 
     def decode_generated_nodes(
         self,
@@ -226,11 +237,13 @@ class DecodeService:
         timeout_seconds = getattr(owner, "max_feasibility_seconds_per_sample", None)
         if timeout_seconds is not None:
             accepted_graphs: list[Optional[nx.Graph]] = []
+            total_generated = 0
+            total_candidate_feasible = 0
             feasible_count = 0
             unfiltered_count = 0
             rejected_count = 0
             for slot_idx in range(len(graph_conditioning)):
-                graph, status = self._decode_single_conditioning_with_timeout(
+                graph, status, generated_now, feasible_now = self._decode_single_conditioning_with_timeout(
                     owner._slice_graph_conditioning(graph_conditioning, [slot_idx]),
                     sampling_mode=sampling_mode,
                     desired_target=desired_target,
@@ -242,6 +255,8 @@ class DecodeService:
                     timeout_seconds=float(timeout_seconds),
                 )
                 accepted_graphs.append(graph)
+                total_generated += int(generated_now)
+                total_candidate_feasible += int(feasible_now)
                 if status == "feasible":
                     feasible_count += 1
                 elif status == "unfiltered":
@@ -250,12 +265,14 @@ class DecodeService:
                     rejected_count += 1
             self._record_decode_summary(
                 requested_count=len(graph_conditioning),
+                generated_count=total_generated,
+                candidate_feasible_count=total_candidate_feasible,
                 feasible_count=feasible_count,
                 unfiltered_count=unfiltered_count,
                 rejected_count=rejected_count,
             )
             return accepted_graphs
-        accepted_graphs, _, _ = decode_with_feasibility_slots_core(
+        accepted_graphs, total_generated, total_candidate_feasible = decode_with_feasibility_slots_core(
             owner,
             graph_conditioning,
             decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self.decode_conditioning_batch(
@@ -298,6 +315,8 @@ class DecodeService:
         rejected_count = sum(graph is None for graph in accepted_graphs)
         self._record_decode_summary(
             requested_count=len(graph_conditioning),
+            generated_count=int(total_generated),
+            candidate_feasible_count=int(total_candidate_feasible),
             feasible_count=feasible_count,
             unfiltered_count=unfiltered_count,
             rejected_count=rejected_count,
