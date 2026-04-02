@@ -22,6 +22,42 @@ from .runtime_utils import verbose_log
 class DecodeService:
     owner: Any
 
+    def _record_decode_summary(
+        self,
+        *,
+        requested_count: int,
+        feasible_count: int,
+        unfiltered_count: int,
+        rejected_count: int,
+    ) -> dict[str, Union[int, float]]:
+        returned_count = int(feasible_count) + int(unfiltered_count)
+        denominator = max(1, int(requested_count))
+        summary = {
+            "requested": int(requested_count),
+            "returned": int(returned_count),
+            "feasible": int(feasible_count),
+            "feasible_fraction": float(feasible_count) / float(denominator),
+            "unfiltered": int(unfiltered_count),
+            "unfiltered_fraction": float(unfiltered_count) / float(denominator),
+            "rejected": int(rejected_count),
+            "rejected_fraction": float(rejected_count) / float(denominator),
+        }
+        self.owner.last_decode_summary_ = summary
+        if int(getattr(self.owner, "verbose", 0)) >= 1:
+            verbose_log(
+                self.owner,
+                "Generation summary: "
+                f"requested={summary['requested']}, returned={summary['returned']}, "
+                f"feasible={summary['feasible']} ({summary['feasible_fraction']:.1%}), "
+                f"unfiltered={summary['unfiltered']} ({summary['unfiltered_fraction']:.1%}), "
+                f"rejected={summary['rejected']} ({summary['rejected_fraction']:.1%}).",
+                level=1,
+            )
+        return summary
+
+    def _should_fallback_to_unfiltered(self) -> bool:
+        return getattr(self.owner, "feasibility_rejection_mode", "fallback_unfiltered") == "fallback_unfiltered"
+
     def _decode_single_conditioning_with_timeout(
         self,
         graph_conditioning: GraphConditioningBatch,
@@ -34,7 +70,7 @@ class DecodeService:
         classifier_scale: float = 1.0,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         timeout_seconds: float,
-    ) -> Optional[nx.Graph]:
+    ) -> tuple[Optional[nx.Graph], str]:
         owner = self.owner
         previous_deadline = owner._set_generation_timeout_deadline(timeout_seconds)
         previous_active_time_limit = None if owner.graph_decoder is None else getattr(
@@ -45,9 +81,9 @@ class DecodeService:
         if owner.graph_decoder is not None:
             owner.graph_decoder.active_time_limit_seconds = owner._resolve_solver_time_limit_seconds(
                 getattr(owner.graph_decoder, "adjacency_time_limit_seconds", None)
-            )
+        )
         try:
-            accepted = decode_with_feasibility_slots_core(
+            accepted, _, _ = decode_with_feasibility_slots_core(
                 owner,
                 graph_conditioning,
                 decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self.decode_conditioning_batch(
@@ -61,6 +97,7 @@ class DecodeService:
                     feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
                     attempt_idx=attempt_idx,
                 ),
+                return_stats=True,
             )
         except RuntimeError:
             accepted = [None]
@@ -70,13 +107,9 @@ class DecodeService:
             owner._restore_generation_timeout_deadline(previous_deadline)
 
         if accepted and accepted[0] is not None:
-            return accepted[0]
-        if int(getattr(owner, "verbose", 0)) >= 1:
-            verbose_log(
-                owner,
-                "Feasibility filtering timed out or exhausted for one sample; falling back to unfiltered decode.",
-                level=1,
-            )
+            return accepted[0], "feasible"
+        if not self._should_fallback_to_unfiltered():
+            return None, "rejected"
         fallback_attempt_idx = max(
             0,
             int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0)),
@@ -92,7 +125,9 @@ class DecodeService:
             feasibility_oracle_candidates_per_attempt=0,
             attempt_idx=fallback_attempt_idx,
         )
-        return None if not fallback_graphs else fallback_graphs[0]
+        if not fallback_graphs:
+            return None, "rejected"
+        return fallback_graphs[0], "unfiltered"
 
     def decode_generated_nodes(
         self,
@@ -190,8 +225,12 @@ class DecodeService:
             )
         timeout_seconds = getattr(owner, "max_feasibility_seconds_per_sample", None)
         if timeout_seconds is not None:
-            return [
-                self._decode_single_conditioning_with_timeout(
+            accepted_graphs: list[Optional[nx.Graph]] = []
+            feasible_count = 0
+            unfiltered_count = 0
+            rejected_count = 0
+            for slot_idx in range(len(graph_conditioning)):
+                graph, status = self._decode_single_conditioning_with_timeout(
                     owner._slice_graph_conditioning(graph_conditioning, [slot_idx]),
                     sampling_mode=sampling_mode,
                     desired_target=desired_target,
@@ -202,9 +241,21 @@ class DecodeService:
                     feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
                     timeout_seconds=float(timeout_seconds),
                 )
-                for slot_idx in range(len(graph_conditioning))
-            ]
-        return decode_with_feasibility_slots_core(
+                accepted_graphs.append(graph)
+                if status == "feasible":
+                    feasible_count += 1
+                elif status == "unfiltered":
+                    unfiltered_count += 1
+                else:
+                    rejected_count += 1
+            self._record_decode_summary(
+                requested_count=len(graph_conditioning),
+                feasible_count=feasible_count,
+                unfiltered_count=unfiltered_count,
+                rejected_count=rejected_count,
+            )
+            return accepted_graphs
+        accepted_graphs, _, _ = decode_with_feasibility_slots_core(
             owner,
             graph_conditioning,
             decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self.decode_conditioning_batch(
@@ -218,7 +269,40 @@ class DecodeService:
                 feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
                 attempt_idx=attempt_idx,
             ),
+            return_stats=True,
         )
+        feasible_count = sum(graph is not None for graph in accepted_graphs)
+        unfiltered_count = 0
+        if self._should_fallback_to_unfiltered():
+            missing_slot_indices = [
+                slot_idx for slot_idx, graph in enumerate(accepted_graphs) if graph is None
+            ]
+            if missing_slot_indices:
+                fallback_graphs = list(
+                    self.decode_conditioning_batch(
+                        owner._slice_graph_conditioning(graph_conditioning, missing_slot_indices),
+                        sampling_mode=sampling_mode,
+                        desired_target=desired_target,
+                        guidance_scale=guidance_scale,
+                        predictor_scale=predictor_scale,
+                        desired_class=desired_class,
+                        classifier_scale=classifier_scale,
+                        feasibility_oracle_candidates_per_attempt=0,
+                        attempt_idx=max(0, int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0))),
+                    )
+                )
+                for slot_idx, graph in zip(missing_slot_indices, fallback_graphs):
+                    accepted_graphs[slot_idx] = graph
+                    if graph is not None:
+                        unfiltered_count += 1
+        rejected_count = sum(graph is None for graph in accepted_graphs)
+        self._record_decode_summary(
+            requested_count=len(graph_conditioning),
+            feasible_count=feasible_count,
+            unfiltered_count=unfiltered_count,
+            rejected_count=rejected_count,
+        )
+        return accepted_graphs
 
     def decode(
         self,

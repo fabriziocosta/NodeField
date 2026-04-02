@@ -23,8 +23,6 @@ def format_feasibility_attempt_status(
     filled_now: int,
     pending_now: int,
     acceptance_rate: float,
-    filled_total: int,
-    missing_total: int,
     attempt_elapsed_seconds: float,
     total_elapsed_seconds: float,
 ) -> str:
@@ -37,8 +35,6 @@ def format_feasibility_attempt_status(
         f"fulfilled_slots={filled_now:>2} | "
         f"pending_slots={pending_now:>2} | "
         f"feasible_rate={acceptance_rate:>6.1%} | "
-        f"fulfilled_total={filled_total:>2} | "
-        f"missing_total={missing_total:>2} | "
         f"attempt_time={format_elapsed_seconds(attempt_elapsed_seconds):>8} | "
         f"eta={format_elapsed_seconds(eta_seconds):>8}"
     )

@@ -88,7 +88,12 @@ def run_trainer_fit(trainer, model, train_loader, val_loader, context: str, ckpt
                 val_dataloaders=val_loader,
                 ckpt_path=ckpt_path,
             )
+    except KeyboardInterrupt:
+        raise
     except SystemExit as exc:
+        interrupt = exc.__context__ if isinstance(exc.__context__, KeyboardInterrupt) else None
+        if interrupt is not None:
+            raise interrupt
         code = exc.code if exc.code is not None else "None"
         argv_preview = " ".join(sys.argv[:5])
         raise RuntimeError(

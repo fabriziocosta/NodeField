@@ -356,6 +356,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts: int = 10,
             feasibility_candidates_per_attempt: int = 4,
             feasibility_failure_mode: str = "return_partial",
+            feasibility_rejection_mode: str = "fallback_unfiltered",
             max_feasibility_seconds_per_sample: Optional[float] = 10.0,
             model_name: Optional[str] = None,
             model_dir: Optional[str] = None,
@@ -391,6 +392,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts (int): Optional input value.
             feasibility_candidates_per_attempt (int): Optional input value.
             feasibility_failure_mode (str): Optional input value.
+            feasibility_rejection_mode (str): Optional input value.
             max_feasibility_seconds_per_sample (Optional[float]): Optional input value.
             model_name (Optional[str]): Optional input value.
             model_dir (Optional[str]): Optional input value.
@@ -437,6 +439,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.max_feasibility_attempts = int(max_feasibility_attempts)
         self.feasibility_candidates_per_attempt = int(feasibility_candidates_per_attempt)
         self.feasibility_failure_mode = str(feasibility_failure_mode)
+        self.feasibility_rejection_mode = str(feasibility_rejection_mode)
         self.max_feasibility_seconds_per_sample = (
             None if max_feasibility_seconds_per_sample is None else float(max_feasibility_seconds_per_sample)
         )
@@ -490,6 +493,12 @@ class ConditionalNodeFieldGraphGenerator(object):
                 f"feasibility_failure_mode must be one of {sorted(valid_feasibility_failure_modes)} "
                 f"(got {self.feasibility_failure_mode!r})."
             )
+        valid_feasibility_rejection_modes = {"fallback_unfiltered", "strict"}
+        if self.feasibility_rejection_mode not in valid_feasibility_rejection_modes:
+            raise ValueError(
+                f"feasibility_rejection_mode must be one of {sorted(valid_feasibility_rejection_modes)} "
+                f"(got {self.feasibility_rejection_mode!r})."
+            )
         self.locality_config_ = LocalityConfig(
             sample_fraction=float(self.locality_sample_fraction),
             horizon=int(self.locality_horizon),
@@ -503,6 +512,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_attempts=int(self.max_feasibility_attempts),
             candidates_per_attempt=int(self.feasibility_candidates_per_attempt),
             failure_mode=str(self.feasibility_failure_mode),
+            rejection_mode=str(self.feasibility_rejection_mode),
             max_seconds_per_sample=(
                 None
                 if self.max_feasibility_seconds_per_sample is None
@@ -524,6 +534,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_feasibility_attempts=int(self.max_feasibility_attempts),
             feasibility_candidates_per_attempt=int(self.feasibility_candidates_per_attempt),
             feasibility_failure_mode=str(self.feasibility_failure_mode),
+            feasibility_rejection_mode=str(self.feasibility_rejection_mode),
             max_feasibility_seconds_per_sample=(
                 None
                 if self.max_feasibility_seconds_per_sample is None
@@ -1716,18 +1727,9 @@ class ConditionalNodeFieldGraphGenerator(object):
             )
             return self.conditional_node_generator_model._collate_processed_payload(payload)
         except TimeoutError as exc:
-            verbose_log(
-                self,
-                "Streamed batch preparation exceeded "
-                f"{float(timeout_seconds):.1f}s; retrying in-process without the fork timeout.",
-                level=1,
-            )
-            try:
-                return self._prepare_stream_training_batch(graphs)
-            except Exception as fallback_exc:
-                raise _StreamBatchTimeoutError(
-                    f"Streamed batch preparation exceeded {float(timeout_seconds):.1f}s."
-                ) from fallback_exc
+            raise _StreamBatchTimeoutError(
+                f"Streamed batch preparation exceeded {float(timeout_seconds):.1f}s."
+            ) from exc
 
     def fit_from_stream(
         self,
@@ -1748,9 +1750,19 @@ class ConditionalNodeFieldGraphGenerator(object):
         self._require_fit_components(train_node_generator=train_node_generator)
         self._reset_stream_fit_stats()
         original_verbose = self.verbose
+        original_stream_batch_timeout_seconds = getattr(self, "stream_batch_timeout_seconds", None)
         try:
             if verbose:
                 self.verbose = verbose
+            if getattr(self, "stream_batch_timeout_seconds", None) is None:
+                self.stream_batch_timeout_seconds = 30.0
+                verbose_log(
+                    self,
+                    "Streaming batch timeout is disabled; using the safe default "
+                    f"{float(self.stream_batch_timeout_seconds):.1f}s for this fit so stalled "
+                    "batch-preparation steps are skipped instead of blocking indefinitely.",
+                    level=1,
+                )
             source_selected_quota: Optional[int] = None
             if isinstance(limit, float) and 0.0 < float(limit) < 1.0:
                 estimated_source_count = estimate_source_instance_count(uri, type)
@@ -1823,7 +1835,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         warmup_train_batches.append(
                             (
                                 int(len(warmup_batch_graphs)),
-                                self._prepare_stream_training_batch_with_timeout(warmup_batch_graphs),
+                                self._prepare_stream_training_batch(warmup_batch_graphs),
                             )
                         )
 
@@ -1999,6 +2011,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             self._finalize_stream_fit_stats()
             return self
         finally:
+            self.stream_batch_timeout_seconds = original_stream_batch_timeout_seconds
             self.verbose = original_verbose
 
     @timeit

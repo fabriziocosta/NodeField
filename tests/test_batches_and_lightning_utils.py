@@ -14,6 +14,7 @@ from conditional_node_field_graph_generator.conditional_node_field_generator imp
     GraphConditioningBatch,
     MetricsLogger,
     NodeGenerationBatch,
+    _StreamBatchTimeoutError,
 )
 from conditional_node_field_graph_generator.metrics_collection import (
     GraphGeneratorBatchAndEpochSnapshotCallback,
@@ -70,6 +71,14 @@ class _ExitTrainer:
         raise SystemExit(2)
 
 
+class _InterruptedExitTrainer:
+    def fit(self, model, train_dataloaders=None, val_dataloaders=None, ckpt_path=None):
+        try:
+            raise KeyboardInterrupt()
+        except KeyboardInterrupt as exc:
+            raise SystemExit(1) from exc
+
+
 def test_run_trainer_fit_calls_fit_with_named_loaders():
     trainer = _OkTrainer()
     model = object()
@@ -102,6 +111,11 @@ def test_run_trainer_fit_forwards_checkpoint_path():
 def test_run_trainer_fit_wraps_system_exit():
     with pytest.raises(RuntimeError, match="unit-test aborted with SystemExit\\(2\\)"):
         run_trainer_fit(_ExitTrainer(), object(), object(), object(), context="unit-test")
+
+
+def test_run_trainer_fit_reraises_keyboard_interrupt_wrapped_by_system_exit():
+    with pytest.raises(KeyboardInterrupt):
+        run_trainer_fit(_InterruptedExitTrainer(), object(), object(), object(), context="unit-test")
 
 
 class _WarnTrainer:
@@ -137,6 +151,35 @@ def test_run_trainer_fit_suppresses_lightning_worker_warnings():
 
     assert trainer.called is True
     assert caught == []
+
+
+def test_stream_batch_timeout_skips_immediately_without_in_process_retry(monkeypatch):
+    generator = ConditionalNodeFieldGenerator.__new__(ConditionalNodeFieldGenerator)
+    generator.stream_batch_timeout_seconds = 2.5
+    generator.conditional_node_generator_model = type(
+        "_DummyModel",
+        (),
+        {"_collate_processed_payload": staticmethod(lambda payload: payload)},
+    )()
+
+    retry_called = {"value": False}
+
+    def _unexpected_retry(graphs):
+        del graphs
+        retry_called["value"] = True
+        raise AssertionError("in-process retry should not run after a timeout")
+
+    generator._prepare_stream_training_batch = _unexpected_retry
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.conditional_node_field_graph_generator.run_with_fork_timeout",
+        lambda worker, *args, timeout_seconds=None: (_ for _ in ()).throw(TimeoutError("timed out")),
+    )
+
+    with pytest.raises(_StreamBatchTimeoutError, match=r"exceeded 2\.5s"):
+        generator._prepare_stream_training_batch_with_timeout(["g1", "g2"])
+
+    assert retry_called["value"] is False
 
 
 def test_find_latest_checkpoint_prefers_last_ckpt(tmp_path):

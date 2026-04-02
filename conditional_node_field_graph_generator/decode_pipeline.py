@@ -81,8 +81,6 @@ def log_feasibility_attempt(
     if int(getattr(owner, "verbose", 0)) < 1:
         return
     pending_now = len(rejected_slot_indices)
-    filled_total = sum(graph is not None for graph in accepted_graphs_by_slot)
-    missing_total = len(graph_conditioning) - filled_total
     attempted_total = len(decoded_graphs)
     acceptance_rate = (feasible_now / attempted_total) if attempted_total > 0 else 0.0
     attempt_elapsed_seconds = time.perf_counter() - attempt_started_at
@@ -97,8 +95,6 @@ def log_feasibility_attempt(
             filled_now=filled_now,
             pending_now=pending_now,
             acceptance_rate=acceptance_rate,
-            filled_total=filled_total,
-            missing_total=missing_total,
             attempt_elapsed_seconds=attempt_elapsed_seconds,
             total_elapsed_seconds=total_elapsed_seconds,
         ),

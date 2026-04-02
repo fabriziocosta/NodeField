@@ -2813,6 +2813,11 @@ def test_sample_passes_interpolation_parameter_to_condition_sampler(monkeypatch)
     assert captured == {"n_samples": 1, "interpolate_between_n_samples": 10}
 
 
+def test_graph_generator_rejects_invalid_feasibility_rejection_mode():
+    with pytest.raises(ValueError, match="feasibility_rejection_mode"):
+        ConditionalNodeFieldGraphGenerator(feasibility_rejection_mode="drop")
+
+
 def test_optimize_adjacency_matrix_raises_when_solver_status_is_not_optimal(monkeypatch):
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
 
