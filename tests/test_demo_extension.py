@@ -333,6 +333,7 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
         max_oracle_iterations=3,
         oracle_use_node_label_cuts=True,
         oracle_use_edge_label_cuts=True,
+        sparse_supervision_mask_ratio=0.4,
     )
 
     assert default_generator.feasibility_oracle_candidates_per_attempt == 2
@@ -342,6 +343,10 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
     assert overridden_generator.max_oracle_iterations == 3
     assert overridden_generator.oracle_use_node_label_cuts is True
     assert overridden_generator.oracle_use_edge_label_cuts is True
+    assert (
+        overridden_generator.conditional_node_generator_model.sparse_supervision_mask_ratio
+        == pytest.approx(0.4)
+    )
 
 
 def test_build_graph_generator_disables_feasibility_when_optional_dependencies_are_missing(monkeypatch):

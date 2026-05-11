@@ -79,7 +79,10 @@ Operationally:
 
 - acts on every valid feature dimension of every valid node,
 - is masked over padded rows,
+- can optionally mask a random fraction of active node-feature targets during training through `sparse_supervision_mask_ratio`,
 - is always present.
+
+The sparse-supervision option follows the same target-masking idea as sparsely supervised diffusion: it masks only the score-regression targets, not the noisy model input and not the structural heads. Validation keeps dense score supervision so runs remain comparable.
 
 This term is logged as:
 

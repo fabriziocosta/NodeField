@@ -587,6 +587,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         num_edge_label_classes: int = 0,
         use_edge_label_head: bool = False,
         node_field_sigma: float = 0.2,
+        sparse_supervision_mask_ratio: float = 0.0,
         sampling_step_size: float = 0.05,
         sampling_steps: int = 100,
         langevin_noise_scale: float = 0.0,
@@ -610,6 +611,11 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             raise ValueError("max_degree must be provided when initializing the Conditional Node Field model.")
         if node_field_sigma <= 0:
             raise ValueError(f"node_field_sigma must be positive (got {node_field_sigma}).")
+        if not 0.0 <= sparse_supervision_mask_ratio < 1.0:
+            raise ValueError(
+                "sparse_supervision_mask_ratio must be in [0, 1) "
+                f"(got {sparse_supervision_mask_ratio})."
+            )
         if sampling_step_size <= 0:
             raise ValueError(f"sampling_step_size must be positive (got {sampling_step_size}).")
         if sampling_steps <= 0:
@@ -670,6 +676,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         self.num_edge_label_classes = int(num_edge_label_classes)
         self.use_edge_label_head = bool(use_edge_label_head and num_edge_label_classes > 0)
         self.node_field_sigma = float(node_field_sigma)
+        self.sparse_supervision_mask_ratio = float(sparse_supervision_mask_ratio)
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
@@ -1001,6 +1008,35 @@ class ConditionalNodeFieldModule(pl.LightningModule):
     def _build_noise_scale(self, x: torch.Tensor) -> torch.Tensor:
         return torch.full_like(x, self.node_field_sigma)
 
+    def _build_node_field_score_mask(
+        self,
+        input_examples: torch.Tensor,
+        node_presence_mask: Optional[torch.Tensor],
+        *,
+        apply_sparse_supervision: bool,
+    ) -> torch.Tensor:
+        if node_presence_mask is not None:
+            score_mask = node_presence_mask.unsqueeze(-1).to(dtype=input_examples.dtype)
+            score_mask = score_mask.expand_as(input_examples).clone()
+        else:
+            score_mask = torch.ones_like(input_examples)
+
+        if not apply_sparse_supervision or self.sparse_supervision_mask_ratio <= 0.0:
+            return score_mask
+
+        keep_probability = 1.0 - self.sparse_supervision_mask_ratio
+        sparse_mask = (torch.rand_like(input_examples) < keep_probability).to(dtype=input_examples.dtype)
+        sparse_score_mask = score_mask * sparse_mask
+        if sparse_score_mask.sum() > 0:
+            return sparse_score_mask
+
+        valid_indices = torch.nonzero(score_mask > 0, as_tuple=False)
+        if valid_indices.numel() == 0:
+            return sparse_score_mask
+        selected = valid_indices[torch.randint(valid_indices.shape[0], (1,), device=valid_indices.device)[0]]
+        sparse_score_mask[selected[0], selected[1], selected[2]] = 1.0
+        return sparse_score_mask
+
     def _has_target_conditioning(self) -> bool:
         return self.guidance_enabled and self.target_condition_feature_count > 0
 
@@ -1059,14 +1095,15 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         node_label_targets: Optional[torch.Tensor] = None,
         *,
         create_graph: bool,
+        apply_sparse_supervision: bool = False,
     ) -> Tuple[dict, torch.Tensor]:
         eps = torch.randn_like(input_examples)
         noise_scale = self._build_noise_scale(input_examples)
         noisy_input = (input_examples + noise_scale * eps).detach().requires_grad_(True)
-        score_mask = (
-            node_presence_mask.unsqueeze(-1).to(dtype=input_examples.dtype)
-            if node_presence_mask is not None
-            else torch.ones_like(input_examples[..., :1])
+        score_mask = self._build_node_field_score_mask(
+            input_examples,
+            node_presence_mask,
+            apply_sparse_supervision=apply_sparse_supervision,
         )
 
         score, _, latent_noisy = self._compute_score_field(
@@ -1077,10 +1114,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         )
         target_score = -eps / noise_scale
         node_field_error = (score - target_score).pow(2) * score_mask
-        feature_dim = float(input_examples.shape[-1])
-        loss_node_field = node_field_error.sum() / (
-            score_mask.sum().clamp_min(1.0) * max(1.0, feature_dim)
-        )
+        loss_node_field = node_field_error.sum() / score_mask.sum().clamp_min(1.0)
 
         denoised = noisy_input + noise_scale.pow(2) * score
         latent_clean = self._encode_with_condition(denoised, global_condition, node_mask=node_presence_mask)
@@ -1191,6 +1225,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             node_degree_targets=node_degree_targets,
             node_label_targets=node_label_targets,
             create_graph=True,
+            apply_sparse_supervision=True,
         )
         total_loss = losses["total"]
 
@@ -1371,6 +1406,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                 node_degree_targets=node_degree_targets,
                 node_label_targets=node_label_targets,
                 create_graph=False,
+                apply_sparse_supervision=False,
             )
             total_loss = losses["total"]
 
@@ -1692,6 +1728,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         lambda_edge_label_importance: float = 1.0,
         pool_condition_tokens: bool = False,
         node_field_sigma: float = 0.2,
+        sparse_supervision_mask_ratio: float = 0.0,
         sampling_step_size: float = 0.05,
         sampling_steps: Optional[int] = None,
         langevin_noise_scale: float = 0.0,
@@ -1745,6 +1782,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.use_guidance = False
         self.use_locality_supervision = False
         self.node_field_sigma = float(node_field_sigma)
+        self.sparse_supervision_mask_ratio = float(sparse_supervision_mask_ratio)
         self.sampling_step_size = float(sampling_step_size)
         self.sampling_steps = int(sampling_steps if sampling_steps is not None else total_steps)
         self.langevin_noise_scale = float(langevin_noise_scale)
@@ -1756,6 +1794,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         if not 0.0 <= self.cfg_condition_dropout_prob <= 1.0:
             raise ValueError(
                 f"cfg_condition_dropout_prob must be in [0, 1] (got {self.cfg_condition_dropout_prob})."
+            )
+        if not 0.0 <= self.sparse_supervision_mask_ratio < 1.0:
+            raise ValueError(
+                "sparse_supervision_mask_ratio must be in [0, 1) "
+                f"(got {self.sparse_supervision_mask_ratio})."
             )
         if self.cfg_null_target_strategy not in {"zero"}:
             raise ValueError(
@@ -2428,6 +2471,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             num_edge_label_classes=0 if self.edge_label_classes_ is None else len(self.edge_label_classes_),
             use_edge_label_head=self.use_edge_label_head,
             node_field_sigma=self.node_field_sigma,
+            sparse_supervision_mask_ratio=self.sparse_supervision_mask_ratio,
             sampling_step_size=self.sampling_step_size,
             sampling_steps=self.sampling_steps,
             langevin_noise_scale=self.langevin_noise_scale,

@@ -422,7 +422,9 @@ The important implementation detail is that it averages per active node-feature,
 
 $$\mathcal{L}_{\mathrm{node\_field}} = \mathbb{E}_{x,\varepsilon}\left[\left\|g_\theta(\tilde{x}, c) + \frac{\varepsilon}{\sigma}\right\|^2\right]$$
 
-with masking applied to padded node positions.
+with masking applied to padded node positions. If `sparse_supervision_mask_ratio > 0`,
+training also applies a fresh random sparse-supervision mask over active node-feature
+coordinates, while validation remains densely supervised.
 
 Expanded with mask $m$ and feature dimension $D$:
 

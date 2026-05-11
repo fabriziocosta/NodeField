@@ -265,6 +265,7 @@ ConditionalNodeFieldGenerator(
     lambda_edge_label_importance: float = 1.0,
     pool_condition_tokens: bool = False,
     node_field_sigma: float = 0.2,
+    sparse_supervision_mask_ratio: float = 0.0,
     sampling_step_size: float = 0.05,
     sampling_steps: Optional[int] = None,
     langevin_noise_scale: float = 0.0,
@@ -453,6 +454,12 @@ ConditionalNodeFieldGenerator(
   Gaussian corruption scale used in score matching and also the default noise scale for the separate guidance predictor.
   Increase: harder denoising task, often smoother but less precise fields.
   Decrease: easier denoising task, sharper fitting, but less robustness.
+
+- `sparse_supervision_mask_ratio`
+  Fraction of active node-feature score targets to randomly mask during training.
+  This applies only to the node-field score-matching loss; validation and structural supervision remain dense.
+  Increase: stronger regularization on small datasets, but less signal per step.
+  Decrease: closer to the standard dense score-matching objective.
 
 - `sampling_step_size`
   Step size for iterative node-field sampling.
