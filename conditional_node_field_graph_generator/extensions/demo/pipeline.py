@@ -11,14 +11,22 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
-from abstractgraph_graphicalizer.chem import (
-    DEFAULT_ZINC_TARGET_COLUMNS,
-    PubChemAssayLoader,
-    SupervisedDataSetLoader,
-    ZINCLoader,
-    download_zinc_dataset,
-    draw_molecules,
-)
+try:
+    from abstractgraph_graphicalizer.chem import (
+        DEFAULT_ZINC_TARGET_COLUMNS,
+        PubChemAssayLoader,
+        SupervisedDataSetLoader,
+        ZINCLoader,
+        download_zinc_dataset,
+        draw_molecules,
+    )
+except ModuleNotFoundError:  # pragma: no cover - depends on optional chemistry extra
+    DEFAULT_ZINC_TARGET_COLUMNS = ("logP", "qed", "SAS")
+    PubChemAssayLoader = None
+    SupervisedDataSetLoader = None
+    ZINCLoader = None
+    download_zinc_dataset = None
+    draw_molecules = None
 from sklearn.model_selection import train_test_split
 
 try:
@@ -45,8 +53,6 @@ except ModuleNotFoundError:
     WithinRangeFeasibilityEstimatorFromNumericalFunction = None
     filter_graphs_without_node_and_edge_label_attribute = None
 
-from nsppk import NSPPK, NodeNSPPK
-
 from ...conditional_node_field_generator import ConditionalNodeFieldGenerator
 from ...conditional_node_field_graph_decoder import ConditionalNodeFieldGraphDecoder
 from ...conditional_node_field_graph_generator import (
@@ -54,10 +60,25 @@ from ...conditional_node_field_graph_generator import (
     GeneratedGuidanceBatch,
 )
 from ...persistence import save_graph_generator
-from ...runtime_paths import resolve_pubchem_data_root, resolve_zinc_data_root
+from ...runtime_paths import ensure_local_nsppk_on_syspath, resolve_pubchem_data_root, resolve_zinc_data_root
 from ..synthetic import ArtificialGraphDatasetConstructor
 from .storage import describe_resume_checkpoint, find_latest_checkpoint
 from .visualization import offset_neg_graphs, plot_networkx_graphs, select_pos_neg
+
+try:
+    from nsppk import NSPPK, NodeNSPPK
+except ModuleNotFoundError as exc:
+    if exc.name != "nsppk":
+        raise
+    ensure_local_nsppk_on_syspath()
+    from nsppk import NSPPK, NodeNSPPK
+
+
+def _require_chem_extra(feature_name: str) -> None:
+    raise ModuleNotFoundError(
+        f"{feature_name} requires the optional chemistry extra. "
+        "Install nodefield[chem] or nodefield[full]."
+    )
 
 
 def _has_demo_feasibility_support():
@@ -445,6 +466,8 @@ def build_dataset(dataset_type, dataset_size=50, size=5, assay_id="651610"):
         return graphs, targets
 
     if dataset_type == "MOLECULAR":
+        if PubChemAssayLoader is None or SupervisedDataSetLoader is None or draw_molecules is None:
+            _require_chem_extra("Molecular demo datasets")
         pubchem_dir = _resolve_pubchem_dir()
         loader = PubChemAssayLoader(pubchem_dir)
 
@@ -486,6 +509,8 @@ def build_zinc_dataset(
         dataset_dir = resolve_zinc_data_root()
     dataset_dir = resolve_zinc_data_root(dataset_dir)
 
+    if download_zinc_dataset is None or ZINCLoader is None:
+        _require_chem_extra("ZINC dataset loading")
     csv_path = download_zinc_dataset(dataset_dir)
     loader = ZINCLoader(root=dataset_dir)
     graphs, metadata = loader.load(

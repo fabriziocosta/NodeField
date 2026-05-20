@@ -11,7 +11,10 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import pandas as pd
-from abstractgraph_graphicalizer.chem import draw_molecules
+try:
+    from abstractgraph_graphicalizer.chem import draw_molecules
+except ModuleNotFoundError:  # pragma: no cover - depends on optional chemistry extra
+    draw_molecules = None
 
 try:
     from IPython.display import display
@@ -41,6 +44,11 @@ def show_molecules(graphs, n=12, title=None, legends=None, *, n_graphs_per_line=
     if not graph_list:
         print("No graphs to display.")
         return None
+    if draw_molecules is None:
+        raise ModuleNotFoundError(
+            "show_molecules requires the optional chemistry extra. "
+            "Install nodefield[chem] or nodefield[full]."
+        )
     figure = draw_molecules(graph_list, titles=legends, n_graphs_per_line=n_graphs_per_line)
     if return_figure:
         return figure
@@ -123,6 +131,11 @@ def plot_networkx_graphs(
     titles=None,
 ):
     if mode == "molecule":
+        if draw_molecules is None:
+            raise ModuleNotFoundError(
+                "Molecule rendering requires the optional chemistry extra. "
+                "Install nodefield[chem] or nodefield[full]."
+            )
         draw_molecules(graphs, n_graphs_per_line=max(1, n_cols or len(graphs)))
         return
     if isinstance(cmap, str):

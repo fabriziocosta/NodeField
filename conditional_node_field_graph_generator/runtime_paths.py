@@ -31,6 +31,43 @@ def ensure_repo_on_syspath(start: str | Path | None = None) -> Path:
     return repo_root
 
 
+def find_local_nsppk_repo(start: str | Path | None = None) -> Path | None:
+    """Return a likely local NSPPK checkout next to the NodeField repo."""
+    repo_root = ensure_repo_on_syspath(start)
+    candidates = [
+        repo_root.parent / "NSPPK",
+        repo_root.parent / "nsppk",
+        repo_root.parent / "INACTIVE" / "NSPPK",
+        repo_root.parent / "INACTIVE" / "nsppk",
+    ]
+    for candidate in candidates:
+        if (candidate / "pyproject.toml").exists() or (candidate / "setup.py").exists():
+            return candidate.resolve()
+    return None
+
+
+def find_local_nsppk_import_path(start: str | Path | None = None) -> Path | None:
+    """Return the importable path for a local NSPPK checkout if one exists."""
+    repo = find_local_nsppk_repo(start)
+    if repo is None:
+        return None
+    src_dir = repo / "src"
+    if src_dir.is_dir():
+        return src_dir.resolve()
+    return repo.resolve()
+
+
+def ensure_local_nsppk_on_syspath(start: str | Path | None = None) -> Path | None:
+    """Add a sibling local NSPPK checkout to sys.path when available."""
+    import_path = find_local_nsppk_import_path(start)
+    if import_path is None:
+        return None
+    resolved = str(import_path)
+    if resolved not in sys.path:
+        sys.path.insert(0, resolved)
+    return import_path
+
+
 def resolve_artifact_root(
     artifact_root: str | Path | None = None,
     *,
@@ -95,4 +132,3 @@ def resolve_zinc_data_root(
     if dataset_dir is not None:
         return Path(dataset_dir).expanduser().resolve()
     return resolve_notebook_data_root(repo_root=repo_root) / "zinc"
-

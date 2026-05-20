@@ -6,10 +6,15 @@ import sys
 import warnings
 from pathlib import Path
 
-from abstractgraph_graphicalizer.chem import download_zinc_dataset as _chem_download_zinc_dataset
+try:
+    from abstractgraph_graphicalizer.chem import download_zinc_dataset as _chem_download_zinc_dataset
+except ModuleNotFoundError:  # pragma: no cover - depends on optional chemistry extra
+    _chem_download_zinc_dataset = None
 
 from .runtime_paths import (
     ensure_repo_on_syspath as _ensure_repo_on_syspath,
+    ensure_local_nsppk_on_syspath,
+    find_local_nsppk_repo as _find_local_nsppk_repo,
     resolve_artifact_root,
     resolve_checkpoint_root,
     resolve_notebook_data_root,
@@ -34,7 +39,13 @@ def ensure_repo_on_syspath() -> Path:
 
 def import_nsppk():
     """Import the installed NSPPK entry points."""
-    import nsppk as module
+    try:
+        import nsppk as module
+    except ModuleNotFoundError as exc:
+        if exc.name != "nsppk":
+            raise
+        ensure_local_nsppk_on_syspath(Path.cwd())
+        import nsppk as module
 
     node_nsppk = getattr(module, "NodeNSPPK", None)
     return module.NSPPK, node_nsppk
@@ -42,17 +53,7 @@ def import_nsppk():
 
 def find_local_nsppk_repo(start: str | Path | None = None) -> Path | None:
     """Return a likely local NSPPK checkout if one exists near the repo."""
-    repo_root = _ensure_repo_on_syspath(Path.cwd() if start is None else Path(start))
-    candidates = [
-        repo_root.parent / "NSPPK",
-        repo_root.parent / "nsppk",
-        repo_root.parent / "INACTIVE" / "NSPPK",
-        repo_root.parent / "INACTIVE" / "nsppk",
-    ]
-    for candidate in candidates:
-        if (candidate / "pyproject.toml").exists() or (candidate / "setup.py").exists():
-            return candidate.resolve()
-    return None
+    return _find_local_nsppk_repo(Path.cwd() if start is None else Path(start))
 
 
 def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True) -> dict[str, Path]:
@@ -104,6 +105,11 @@ def download_zinc_dataset(dataset_dir: str | Path, filename: str | None = None) 
     dataset_path = Path(dataset_dir).expanduser()
     dataset_path.mkdir(parents=True, exist_ok=True)
     if filename is None:
+        if _chem_download_zinc_dataset is None:
+            raise ModuleNotFoundError(
+                "download_zinc_dataset requires the optional chemistry extra. "
+                "Install nodefield[chem] or nodefield[full]."
+            )
         return Path(_chem_download_zinc_dataset(dataset_path))
     requested_path = dataset_path / str(filename)
     if not requested_path.is_file():
