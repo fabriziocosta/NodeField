@@ -1,5 +1,6 @@
 """Synthetic dataset builders."""
 
+import random
 import networkx as nx
 import numpy as np
 from toolz import curry
@@ -121,6 +122,229 @@ class ArtificialGraphConstructor(object):
         if n_samples == 1:
             return samples[0]
         return samples
+
+
+def _make_alphabet(size, kind="int", offset=0):
+    if size <= 0:
+        raise ValueError("Alphabet size must be >= 1.")
+
+    if kind == "int":
+        return list(range(offset, offset + size))
+
+    if kind == "letter":
+        if offset + size > 26:
+            raise ValueError("Letter alphabet supports at most 26 symbols across all components.")
+        return [chr(ord("A") + i) for i in range(offset, offset + size)]
+
+    raise ValueError("kind must be 'int' or 'letter'.")
+
+
+def _make_component_alphabets(size, kind="int", component_specific_alphabets=True):
+    components = ("cycle", "path", "star")
+    if not component_specific_alphabets:
+        shared_alphabet = _make_alphabet(size, kind)
+        return {component: shared_alphabet for component in components}
+    return {
+        component: _make_alphabet(size, kind, offset=component_index * size)
+        for component_index, component in enumerate(components)
+    }
+
+
+def generate_cycle_path_star_graph(
+    cycle_length,
+    path_length,
+    num_rays,
+    ray_length,
+    node_alphabet_size=1,
+    edge_alphabet_size=1,
+    node_alphabet_kind="int",
+    edge_alphabet_kind="int",
+    component_specific_alphabets=True,
+    seed=None,
+):
+    """Generate one connected cycle -> path -> star-ray NetworkX graph."""
+
+    if cycle_length < 0 or path_length < 0 or num_rays < 0 or ray_length < 0:
+        raise ValueError("Structural parameters must be non-negative.")
+
+    rng = random.Random(seed)
+    node_labels_by_component = _make_component_alphabets(
+        node_alphabet_size,
+        node_alphabet_kind,
+        component_specific_alphabets=component_specific_alphabets,
+    )
+    edge_labels_by_component = _make_component_alphabets(
+        edge_alphabet_size,
+        edge_alphabet_kind,
+        component_specific_alphabets=component_specific_alphabets,
+    )
+
+    graph = nx.Graph()
+    next_node = 0
+
+    def assign_node_label(node, component):
+        graph.nodes[node]["label"] = rng.choice(node_labels_by_component[component])
+        graph.nodes[node]["label_component"] = component
+
+    def add_node(role, component):
+        nonlocal next_node
+        node = next_node
+        next_node += 1
+        graph.add_node(node, role=role)
+        assign_node_label(node, component)
+        return node
+
+    def add_edge(u, v, role, component):
+        graph.add_edge(
+            u,
+            v,
+            label=rng.choice(edge_labels_by_component[component]),
+            role=role,
+            label_component=component,
+        )
+
+    if cycle_length == 0:
+        cycle_nodes = [add_node("cycle_anchor", "cycle")]
+    elif cycle_length < 3:
+        raise ValueError("cycle_length must be 0 or >= 3 for a simple cycle.")
+    else:
+        cycle_nodes = [add_node("cycle", "cycle") for _ in range(cycle_length)]
+        for i in range(cycle_length):
+            add_edge(cycle_nodes[i], cycle_nodes[(i + 1) % cycle_length], "cycle", "cycle")
+
+    anchor = rng.choice(cycle_nodes)
+    graph.nodes[anchor]["role"] = "cycle_anchor"
+
+    current = anchor
+    for _ in range(path_length):
+        new_node = add_node("path", "path")
+        add_edge(current, new_node, "path", "path")
+        current = new_node
+
+    hub = current
+    graph.nodes[hub]["role"] = "star_hub"
+    assign_node_label(hub, "star")
+
+    for ray_id in range(num_rays):
+        current = hub
+        if ray_length == 0:
+            leaf = add_node(f"ray_{ray_id}_leaf", "star")
+            add_edge(hub, leaf, "star_ray", "star")
+            continue
+
+        for step in range(ray_length):
+            role = f"ray_{ray_id}_node"
+            if step == ray_length - 1:
+                role = f"ray_{ray_id}_leaf"
+            new_node = add_node(role, "star")
+            add_edge(current, new_node, "star_ray", "star")
+            current = new_node
+
+    graph.graph["metadata"] = {
+        "cycle_length": cycle_length,
+        "path_length": path_length,
+        "num_rays": num_rays,
+        "ray_length": ray_length,
+        "node_alphabet_size": node_alphabet_size,
+        "edge_alphabet_size": edge_alphabet_size,
+        "component_specific_alphabets": component_specific_alphabets,
+        "node_alphabets_by_component": node_labels_by_component,
+        "edge_alphabets_by_component": edge_labels_by_component,
+    }
+
+    assert nx.is_connected(graph)
+    return graph
+
+
+def _sample_int_parameter(value, rng, name, *, minimum=None, valid_values=None):
+    """Resolve either a fixed integer or an inclusive integer range."""
+    if isinstance(value, tuple):
+        if len(value) != 2:
+            raise ValueError(f"{name} range must be a 2-tuple: (min, max).")
+        low, high = value
+        if not isinstance(low, int) or not isinstance(high, int):
+            raise TypeError(f"{name} range bounds must be integers.")
+        if high < low:
+            raise ValueError(f"{name} range max must be >= min.")
+        candidates = list(range(low, high + 1))
+        if minimum is not None:
+            candidates = [candidate for candidate in candidates if candidate >= minimum]
+        if valid_values is not None:
+            candidates = [candidate for candidate in candidates if valid_values(candidate)]
+        if not candidates:
+            raise ValueError(f"{name} range {value!r} contains no valid values.")
+        return rng.choice(candidates)
+
+    if not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer or a 2-tuple integer range.")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}.")
+    if valid_values is not None and not valid_values(value):
+        raise ValueError(f"{name} has invalid value {value!r}.")
+    return value
+
+
+def generate_artificial_dataset(
+    num_graphs,
+    cycle_length,
+    path_length,
+    num_rays,
+    ray_length,
+    node_alphabet_size=1,
+    edge_alphabet_size=1,
+    node_alphabet_kind="int",
+    edge_alphabet_kind="int",
+    component_specific_alphabets=True,
+    seed=None,
+):
+    """Generate cycle -> path -> star-ray artificial NetworkX graphs."""
+
+    if not isinstance(num_graphs, int) or num_graphs < 0:
+        raise ValueError("num_graphs must be a non-negative integer.")
+
+    rng = random.Random(seed)
+    graphs = []
+
+    for _ in range(num_graphs):
+        sampled_cycle_length = _sample_int_parameter(
+            cycle_length,
+            rng,
+            "cycle_length",
+            minimum=0,
+            valid_values=lambda candidate: candidate == 0 or candidate >= 3,
+        )
+        sampled_path_length = _sample_int_parameter(path_length, rng, "path_length", minimum=0)
+        sampled_num_rays = _sample_int_parameter(num_rays, rng, "num_rays", minimum=0)
+        sampled_ray_length = _sample_int_parameter(ray_length, rng, "ray_length", minimum=0)
+        sampled_node_alphabet_size = _sample_int_parameter(
+            node_alphabet_size,
+            rng,
+            "node_alphabet_size",
+            minimum=1,
+        )
+        sampled_edge_alphabet_size = _sample_int_parameter(
+            edge_alphabet_size,
+            rng,
+            "edge_alphabet_size",
+            minimum=1,
+        )
+
+        graphs.append(
+            generate_cycle_path_star_graph(
+                cycle_length=sampled_cycle_length,
+                path_length=sampled_path_length,
+                num_rays=sampled_num_rays,
+                ray_length=sampled_ray_length,
+                node_alphabet_size=sampled_node_alphabet_size,
+                edge_alphabet_size=sampled_edge_alphabet_size,
+                node_alphabet_kind=node_alphabet_kind,
+                edge_alphabet_kind=edge_alphabet_kind,
+                component_specific_alphabets=component_specific_alphabets,
+                seed=rng.randint(0, 2**32 - 1),
+            )
+        )
+
+    return graphs
 
 
 def link_graphs(graph_source, graph_target, n_link_edges=0):
@@ -325,6 +549,8 @@ __all__ = [
     "ArtificialGraphConstructor",
     "ArtificialGraphDatasetConstructor",
     "AttributeGenerator",
+    "generate_artificial_dataset",
+    "generate_cycle_path_star_graph",
     "link_graphs",
     "make_graph",
     "make_graphs",

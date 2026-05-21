@@ -129,6 +129,7 @@ def plot_networkx_graphs(
     color_offset=200,
     mode="not_molecule",
     titles=None,
+    node_label_colors=None,
 ):
     if mode == "molecule":
         if draw_molecules is None:
@@ -158,6 +159,12 @@ def plot_networkx_graphs(
         axes = axes.flatten()
 
     def get_color_for_label(label):
+        if node_label_colors is not None:
+            if label in node_label_colors:
+                return node_label_colors[label]
+            label_key = str(label)
+            if label_key in node_label_colors:
+                return node_label_colors[label_key]
         hash_val = hashlib.md5(str(label).encode("utf-8")).hexdigest()
         numeric_hash = int(hash_val, 16) + color_offset
         normalized = (numeric_hash % 1000) / 999.0
