@@ -1530,6 +1530,133 @@ def test_decode_adjacency_matrix_enforces_desired_edge_count():
     assert int(np.sum(adj_mtx) // 2) == 1
 
 
+def test_decode_adjacency_matrix_direct_selects_top_edges_by_desired_count():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.70, 0.95, 0.10],
+                    [0.70, 0.0, 0.30, 0.80],
+                    [0.95, 0.30, 0.0, 0.20],
+                    [0.10, 0.80, 0.20, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adj_mtx = decoder.decode_adjacency_matrix_direct(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_edge_counts=[2],
+    )[0]
+
+    assert sorted(nx.from_numpy_array(adj_mtx).edges()) == [(0, 2), (1, 3)]
+
+
+def test_decode_adjacency_matrix_direct_uses_threshold_without_desired_count():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.90, 0.20, 0.10],
+                    [0.90, 0.0, 0.30, 0.20],
+                    [0.20, 0.30, 0.0, 0.85],
+                    [0.10, 0.20, 0.85, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adj_mtx = decoder.decode_adjacency_matrix_direct(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        edge_probability_threshold=0.8,
+    )[0]
+
+    graph = nx.from_numpy_array(adj_mtx)
+    assert sorted(graph.edges()) == [(0, 1), (2, 3)]
+    assert not nx.is_connected(graph)
+
+
+def test_decode_adjacency_matrix_direct_respects_desired_node_count():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[False, False, False, False]], dtype=bool),
+        node_existence_probabilities=np.asarray([[0.10, 0.95, 0.20, 0.90]], dtype=float),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.80, 0.70, 0.60],
+                    [0.80, 0.0, 0.40, 0.99],
+                    [0.70, 0.40, 0.0, 0.50],
+                    [0.60, 0.99, 0.50, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adj_mtx = decoder.decode_adjacency_matrix_direct(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_node_counts=[2],
+        desired_edge_counts=[1],
+    )[0]
+
+    assert sorted(nx.from_numpy_array(adj_mtx).edges()) == [(1, 3)]
+
+
+def test_decoder_direct_mode_attaches_labels_and_bypasses_optimizer(monkeypatch):
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True]], dtype=bool),
+        node_labels=[np.asarray(["C", "O", "N"], dtype=object)],
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.20, 0.95],
+                    [0.20, 0.0, 0.90],
+                    [0.95, 0.90, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+        edge_label_matrices=[
+            np.asarray(
+                [
+                    [None, "low", "single"],
+                    ["low", None, "double"],
+                    ["single", "double", None],
+                ],
+                dtype=object,
+            )
+        ],
+    )
+
+    def _raise_if_ilp_used(*args, **kwargs):
+        raise AssertionError("ILP optimizer should not be called in direct mode")
+
+    monkeypatch.setattr(decoder, "optimize_adjacency_matrix", _raise_if_ilp_used)
+
+    graph = decoder.decode(
+        generated_nodes,
+        predicted_node_labels_list=generated_nodes.node_labels,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        predicted_edge_label_matrices=generated_nodes.edge_label_matrices,
+        desired_edge_counts=[1],
+        use_ilp_decoder=False,
+    )[0]
+
+    assert sorted(graph.nodes(data="label")) == [(0, "C"), (1, "O"), (2, "N")]
+    assert sorted(graph.edges(data="label")) == [(0, 2, "single")]
+
+
 def test_decoder_decode_edge_labels_validates_edge_label_count():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
 
@@ -2771,7 +2898,9 @@ def test_sample_passes_direct_conditioning_to_decode(monkeypatch):
     monkeypatch.setattr(
         generator,
         "_sample_conditions",
-        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+        lambda n_samples, interpolate_between_n_samples=None: type(
+            generator.training_graph_conditioning_
+        )(
             graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
             node_counts=np.asarray([3], dtype=np.int64),
             edge_counts=np.asarray([2], dtype=np.int64),
@@ -2783,7 +2912,7 @@ def test_sample_passes_direct_conditioning_to_decode(monkeypatch):
         captured["conditioning"] = graph_conditioning
         return ["decoded"]
 
-    monkeypatch.setattr(generator, "_decode_with_feasibility", _fake_decode)
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
 
     result = generator.sample(1)
 
@@ -2805,12 +2934,48 @@ def test_sample_passes_interpolation_parameter_to_condition_sampler(monkeypatch)
         )
 
     monkeypatch.setattr(generator, "_sample_conditions", _fake_sample_conditions)
-    monkeypatch.setattr(generator, "_decode_with_feasibility", lambda graph_conditioning, **kwargs: [graph_conditioning])
+    monkeypatch.setattr(
+        generator.decode_service_,
+        "decode",
+        lambda graph_conditioning, **kwargs: [graph_conditioning],
+    )
 
     result = generator.sample(1, interpolate_between_n_samples=10)
 
     assert len(result) == 1
     assert captured == {"n_samples": 1, "interpolate_between_n_samples": 10}
+
+
+def test_sample_forwards_direct_decoder_options(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        return ["decoded"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(
+        1,
+        use_ilp_decoder=False,
+        edge_probability_threshold=0.7,
+    )
+
+    assert result == ["decoded"]
+    assert captured["use_ilp_decoder"] is False
+    assert captured["edge_probability_threshold"] == pytest.approx(0.7)
 
 
 def test_graph_generator_rejects_invalid_feasibility_rejection_mode():

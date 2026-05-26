@@ -92,6 +92,41 @@ Important behavior:
 
 This distinction is used to create positive and negative synthetic classes.
 
+### Cycle/path/star artificial datasets
+
+- `generate_artificial_dataset(...)`
+  Builds batches of connected cycle -> path -> star-ray graphs.
+
+By default, `generate_artificial_dataset` also writes a reproducibility config:
+
+```python
+graphs = generate_artificial_dataset(
+    num_graphs=100,
+    cycle_length=(3, 6),
+    path_length=(1, 4),
+    num_rays=3,
+    ray_length=(1, 3),
+    seed=13,
+)
+```
+
+The function prints the generated YAML file name, for example:
+
+```text
+Saved artificial dataset config: artificial_dataset_config_20260526_120000_000000.yaml
+```
+
+The same configuration can be loaded later:
+
+```python
+graphs = generate_artificial_dataset(
+    load_from_file="artificial_dataset_config_20260526_120000_000000.yaml",
+    save_config=False,
+)
+```
+
+Pass `save_config=False` when no config file should be written.
+
 ## 4. Synthetic classification datasets
 
 The main binary dataset builders are:

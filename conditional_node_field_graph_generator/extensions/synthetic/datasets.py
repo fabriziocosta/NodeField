@@ -1,6 +1,10 @@
 """Synthetic dataset builders."""
 
+import json
 import random
+from datetime import datetime
+from pathlib import Path
+
 import networkx as nx
 import numpy as np
 from toolz import curry
@@ -258,6 +262,9 @@ def generate_cycle_path_star_graph(
 
 def _sample_int_parameter(value, rng, name, *, minimum=None, valid_values=None):
     """Resolve either a fixed integer or an inclusive integer range."""
+    if isinstance(value, list):
+        value = tuple(value)
+
     if isinstance(value, tuple):
         if len(value) != 2:
             raise ValueError(f"{name} range must be a 2-tuple: (min, max).")
@@ -284,23 +291,150 @@ def _sample_int_parameter(value, rng, name, *, minimum=None, valid_values=None):
     return value
 
 
+_ARTIFICIAL_DATASET_CONFIG_KEYS = (
+    "num_graphs",
+    "cycle_length",
+    "path_length",
+    "num_rays",
+    "ray_length",
+    "node_alphabet_size",
+    "edge_alphabet_size",
+    "node_alphabet_kind",
+    "edge_alphabet_kind",
+    "component_specific_alphabets",
+    "seed",
+)
+
+
+def _normalize_config_value(value):
+    if isinstance(value, tuple):
+        return [_normalize_config_value(item) for item in value]
+    if isinstance(value, list):
+        return [_normalize_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_config_value(val) for key, val in value.items()}
+    if isinstance(value, (np.generic,)):
+        return value.item()
+    return value
+
+
+def _dump_simple_yaml(config):
+    return "".join(
+        f"{key}: {json.dumps(_normalize_config_value(value))}\n"
+        for key, value in config.items()
+    )
+
+
+def _load_simple_yaml(path):
+    config = {}
+    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            raise ValueError(f"Invalid config line {line_number}: {raw_line!r}")
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"Invalid empty config key on line {line_number}.")
+        if value == "":
+            config[key] = None
+            continue
+        try:
+            config[key] = json.loads(value)
+        except json.JSONDecodeError:
+            config[key] = value
+    return config
+
+
+def _read_artificial_dataset_config(path):
+    try:
+        import yaml
+    except ImportError:
+        return _load_simple_yaml(path)
+
+    with Path(path).open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    if not isinstance(config, dict):
+        raise ValueError("Artificial dataset config file must contain a mapping.")
+    return config
+
+
+def _write_artificial_dataset_config(config):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = Path(f"artificial_dataset_config_{timestamp}.yaml")
+    path.write_text(_dump_simple_yaml(config), encoding="utf-8")
+    print(f"Saved artificial dataset config: {path}")
+    return path
+
+
 def generate_artificial_dataset(
-    num_graphs,
-    cycle_length,
-    path_length,
-    num_rays,
-    ray_length,
+    num_graphs=None,
+    cycle_length=None,
+    path_length=None,
+    num_rays=None,
+    ray_length=None,
     node_alphabet_size=1,
     edge_alphabet_size=1,
     node_alphabet_kind="int",
     edge_alphabet_kind="int",
     component_specific_alphabets=True,
     seed=None,
+    save_config=True,
+    load_from_file=None,
 ):
     """Generate cycle -> path -> star-ray artificial NetworkX graphs."""
 
+    config = {
+        "num_graphs": num_graphs,
+        "cycle_length": cycle_length,
+        "path_length": path_length,
+        "num_rays": num_rays,
+        "ray_length": ray_length,
+        "node_alphabet_size": node_alphabet_size,
+        "edge_alphabet_size": edge_alphabet_size,
+        "node_alphabet_kind": node_alphabet_kind,
+        "edge_alphabet_kind": edge_alphabet_kind,
+        "component_specific_alphabets": component_specific_alphabets,
+        "seed": seed,
+    }
+
+    if load_from_file is not None:
+        loaded_config = {
+            key: value
+            for key, value in _read_artificial_dataset_config(load_from_file).items()
+            if key in _ARTIFICIAL_DATASET_CONFIG_KEYS
+        }
+        config.update(loaded_config)
+
+    missing_parameters = [
+        name
+        for name in ("num_graphs", "cycle_length", "path_length", "num_rays", "ray_length")
+        if config[name] is None
+    ]
+    if missing_parameters:
+        joined_names = ", ".join(missing_parameters)
+        raise TypeError(f"Missing required artificial dataset parameter(s): {joined_names}.")
+
+    num_graphs = config["num_graphs"]
+    cycle_length = config["cycle_length"]
+    path_length = config["path_length"]
+    num_rays = config["num_rays"]
+    ray_length = config["ray_length"]
+    node_alphabet_size = config["node_alphabet_size"]
+    edge_alphabet_size = config["edge_alphabet_size"]
+    node_alphabet_kind = config["node_alphabet_kind"]
+    edge_alphabet_kind = config["edge_alphabet_kind"]
+    component_specific_alphabets = config["component_specific_alphabets"]
+    seed = config["seed"]
+
     if not isinstance(num_graphs, int) or num_graphs < 0:
         raise ValueError("num_graphs must be a non-negative integer.")
+
+    if save_config:
+        _write_artificial_dataset_config(config)
 
     rng = random.Random(seed)
     graphs = []

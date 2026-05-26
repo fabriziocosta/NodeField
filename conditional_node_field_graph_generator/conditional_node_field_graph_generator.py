@@ -2538,12 +2538,16 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_conditioning: Optional[GraphConditioningBatch] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         return self.decode_service_.decode_generated_nodes(
             generated_nodes,
             graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     def _decode_with_feasibility_slots(
@@ -2553,6 +2557,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[Optional[nx.Graph]]:
         return self.decode_service_.decode_with_feasibility_slots(
             graph_conditioning,
@@ -2561,6 +2567,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     def _predict_generated_nodes(
@@ -2995,6 +3003,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         """Decode graph conditioning into concrete graphs, optionally using CFG and feasibility filtering."""
         self._require_fitted_for_generation()
@@ -3009,6 +3019,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     def decode_classifier_guided(
@@ -3018,6 +3030,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3034,6 +3048,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     def decode_regression_guided(
@@ -3043,6 +3059,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3059,6 +3077,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     @timeit
@@ -3070,6 +3090,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         """Sample random graph-conditioning vectors and decode them into graphs."""
         self._require_fitted_for_generation()
@@ -3095,6 +3117,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     def score_feasible_rate(
@@ -3155,6 +3179,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[List[nx.Graph]]:
         """Encode each input graph and sample one or more decoded variations per conditioning vector."""
         self._require_fitted_for_generation()
@@ -3170,6 +3196,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         return [
             [
@@ -3189,6 +3217,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3215,6 +3245,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     @timeit
@@ -3226,6 +3258,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[List[nx.Graph]]:
         self._require_fitted_for_generation()
         _, graph_conditioning = self.encode(graphs)
@@ -3240,6 +3274,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         return [
             [
@@ -3259,6 +3295,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
         if self.verbose:
@@ -3285,6 +3323,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     @timeit
@@ -3296,6 +3336,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[List[nx.Graph]]:
         self._require_fitted_for_generation()
         _, graph_conditioning = self.encode(graphs)
@@ -3310,6 +3352,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         return [
             [
@@ -3328,6 +3372,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ):
         self._require_fitted_for_generation()
         sampled_seed_graphs = random.choices(graphs, k=n_samples)
@@ -3338,6 +3384,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]
         return sampled_graphs
@@ -3350,6 +3398,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ):
         self._require_fitted_for_generation()
         sampled_seed_graphs = random.choices(graphs, k=n_samples)
@@ -3360,6 +3410,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]
         return sampled_graphs
@@ -3372,6 +3424,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         predictor_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ):
         self._require_fitted_for_generation()
         sampled_seed_graphs = random.choices(graphs, k=n_samples)
@@ -3382,6 +3436,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             predictor_scale=predictor_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         sampled_graphs = [reconstructed_graphs[0] for reconstructed_graphs in reconstructed_graphs_list if reconstructed_graphs]
         return sampled_graphs
@@ -3394,6 +3450,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         apply_feasibility_filtering: Optional[bool] = None,
         interpolation_mode: str = "slerp",
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Interpolate between two graph condition vectors and decode intermediate graphs.
 
@@ -3451,6 +3509,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             sampling_mode="unguided",
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         step_summary = pd.DataFrame(
             {

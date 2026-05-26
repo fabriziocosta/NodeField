@@ -923,9 +923,10 @@ class ConditionalNodeFieldGraphDecoder(object):
             raise RuntimeError("decode_adjacency_matrix requires explicit edge probability matrices.")
 
         existence_masks = np.asarray(generated_nodes.node_presence_mask, dtype=bool)
-        existence_scores = None if generated_nodes.node_existence_probabilities is None else np.asarray(
-            generated_nodes.node_existence_probabilities,
-            dtype=float,
+        existence_scores = (
+            None
+            if generated_nodes.node_existence_probabilities is None
+            else np.asarray(generated_nodes.node_existence_probabilities, dtype=float)
         )
         degree_predictions = np.asarray(generated_nodes.node_degree_predictions, dtype=float)
         if desired_node_counts is not None and len(desired_node_counts) != len(existence_masks):
@@ -1005,6 +1006,93 @@ class ConditionalNodeFieldGraphDecoder(object):
             timeout_fallback_label="parallel adjacency decode",
         )
 
+    def decode_adjacency_matrix_direct(
+        self,
+        generated_nodes: GeneratedNodeBatch,
+        predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
+        desired_node_counts: Optional[Sequence[int]] = None,
+        desired_edge_counts: Optional[Sequence[int]] = None,
+        edge_probability_threshold: Optional[float] = None,
+    ) -> List[np.ndarray]:
+        if generated_nodes.node_presence_mask is None:
+            raise RuntimeError("decode_adjacency_matrix_direct requires node presence predictions.")
+        if predicted_edge_probability_matrices is None:
+            raise RuntimeError(
+                "decode_adjacency_matrix_direct requires explicit edge probability matrices."
+            )
+
+        existence_masks = np.asarray(generated_nodes.node_presence_mask, dtype=bool)
+        existence_scores = None if generated_nodes.node_existence_probabilities is None else np.asarray(
+            generated_nodes.node_existence_probabilities,
+            dtype=float,
+        )
+        if desired_node_counts is not None and len(desired_node_counts) != len(existence_masks):
+            raise ValueError(
+                "desired_node_counts must align with generated_nodes "
+                f"(got {len(desired_node_counts)} counts for {len(existence_masks)} graphs)."
+            )
+        if desired_edge_counts is not None and len(desired_edge_counts) != len(existence_masks):
+            raise ValueError(
+                "desired_edge_counts must align with generated_nodes "
+                f"(got {len(desired_edge_counts)} counts for {len(existence_masks)} graphs)."
+            )
+
+        threshold = (
+            float(self.existence_threshold)
+            if edge_probability_threshold is None
+            else float(edge_probability_threshold)
+        )
+        adj_mtx_list = []
+        for graph_idx, (existence_mask, prob_matrix) in enumerate(
+            zip(existence_masks, predicted_edge_probability_matrices)
+        ):
+            prob_matrix = np.asarray(prob_matrix, dtype=float)
+            n_nodes = int(len(existence_mask))
+            if (
+                prob_matrix.ndim != 2
+                or prob_matrix.shape[0] != n_nodes
+                or prob_matrix.shape[1] != n_nodes
+            ):
+                raise ValueError(
+                    "Direct edge decoding requires square edge-probability matrices aligned "
+                    f"with node predictions; received {prob_matrix.shape} for n_nodes={n_nodes}."
+                )
+            resolved_mask = self.resolve_node_presence_mask(
+                np.asarray(existence_mask, dtype=bool),
+                desired_node_count=(
+                    None if desired_node_counts is None else int(desired_node_counts[graph_idx])
+                ),
+                node_existence_scores=None if existence_scores is None else np.asarray(
+                    existence_scores[graph_idx],
+                    dtype=float,
+                ),
+            )
+            active_indices = np.flatnonzero(resolved_mask)
+            adj_mtx = np.zeros((n_nodes, n_nodes), dtype=float)
+            edge_candidates = []
+            for local_i, i in enumerate(active_indices):
+                for j in active_indices[local_i + 1:]:
+                    probability = float((prob_matrix[i, j] + prob_matrix[j, i]) / 2.0)
+                    edge_candidates.append((probability, int(i), int(j)))
+
+            if desired_edge_counts is not None:
+                target_edge_count = max(0, int(desired_edge_counts[graph_idx]))
+                target_edge_count = min(target_edge_count, len(edge_candidates))
+                edge_candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+                selected_edges = edge_candidates[:target_edge_count]
+            else:
+                selected_edges = [
+                    (probability, i, j)
+                    for probability, i, j in edge_candidates
+                    if probability >= threshold
+                ]
+
+            for _, i, j in selected_edges:
+                adj_mtx[i, j] = 1.0
+                adj_mtx[j, i] = 1.0
+            adj_mtx_list.append(adj_mtx)
+        return adj_mtx_list
+
     def decode_node_labels(
         self,
         generated_nodes: GeneratedNodeBatch,
@@ -1071,13 +1159,24 @@ class ConditionalNodeFieldGraphDecoder(object):
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
         desired_node_counts: Optional[Sequence[int]] = None,
         desired_edge_counts: Optional[Sequence[int]] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
-        adj_mtx_list = self.decode_adjacency_matrix(
-            generated_nodes,
-            predicted_edge_probability_matrices=predicted_edge_probability_matrices,
-            desired_node_counts=desired_node_counts,
-            desired_edge_counts=desired_edge_counts,
-        )
+        if use_ilp_decoder:
+            adj_mtx_list = self.decode_adjacency_matrix(
+                generated_nodes,
+                predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+                desired_node_counts=desired_node_counts,
+                desired_edge_counts=desired_edge_counts,
+            )
+        else:
+            adj_mtx_list = self.decode_adjacency_matrix_direct(
+                generated_nodes,
+                predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+                desired_node_counts=desired_node_counts,
+                desired_edge_counts=desired_edge_counts,
+                edge_probability_threshold=edge_probability_threshold,
+            )
         predicted_node_labels_list = self.decode_node_labels(
             generated_nodes,
             predicted_node_labels_list=predicted_node_labels_list,
@@ -1269,9 +1368,11 @@ def decode_generated_nodes(
     graph_conditioning: Optional[GraphConditioningBatch] = None,
     feasibility_oracle_candidates_per_attempt: Optional[int] = None,
     attempt_idx: int = 0,
+    use_ilp_decoder: bool = True,
+    edge_probability_threshold: Optional[float] = None,
 ) -> List[nx.Graph]:
     """Dispatch generated-node decoding through either the oracle path or the plain decoder."""
-    if owner._can_use_feasibility_oracle(
+    if use_ilp_decoder and owner._can_use_feasibility_oracle(
         feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
         attempt_idx=attempt_idx,
     ):
@@ -1303,8 +1404,14 @@ def decode_generated_nodes(
         predicted_edge_probability_matrices=predicted_edge_probability_matrices,
         predicted_edge_labels_list=predicted_edge_labels_list,
         predicted_edge_label_matrices=predicted_edge_label_matrices,
-        desired_node_counts=None if graph_conditioning is None else np.asarray(graph_conditioning.node_counts, dtype=int),
-        desired_edge_counts=None if graph_conditioning is None else np.asarray(graph_conditioning.edge_counts, dtype=int),
+        desired_node_counts=(
+            None if graph_conditioning is None else np.asarray(graph_conditioning.node_counts, dtype=int)
+        ),
+        desired_edge_counts=(
+            None if graph_conditioning is None else np.asarray(graph_conditioning.edge_counts, dtype=int)
+        ),
+        use_ilp_decoder=use_ilp_decoder,
+        edge_probability_threshold=edge_probability_threshold,
     )
 
 

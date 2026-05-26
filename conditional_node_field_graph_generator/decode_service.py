@@ -78,6 +78,8 @@ class DecodeService:
         desired_class: Optional[Union[int, Sequence[Any]]] = None,
         classifier_scale: float = 1.0,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
         timeout_seconds: float,
     ) -> tuple[Optional[nx.Graph], str, int, int]:
         owner = self.owner
@@ -104,6 +106,8 @@ class DecodeService:
                     desired_class=desired_class,
                     classifier_scale=classifier_scale,
                     feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                    use_ilp_decoder=use_ilp_decoder,
+                    edge_probability_threshold=edge_probability_threshold,
                     attempt_idx=attempt_idx,
                 ),
                 return_stats=True,
@@ -134,6 +138,8 @@ class DecodeService:
             desired_class=desired_class,
             classifier_scale=classifier_scale,
             feasibility_oracle_candidates_per_attempt=0,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
             attempt_idx=fallback_attempt_idx,
         )
         if not fallback_graphs:
@@ -146,6 +152,8 @@ class DecodeService:
         graph_conditioning: Optional[GraphConditioningBatch] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> list[nx.Graph]:
         return decode_generated_nodes(
             self.owner,
@@ -153,6 +161,8 @@ class DecodeService:
             graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     def decode_conditioning_batch(
@@ -167,6 +177,8 @@ class DecodeService:
         classifier_scale: float = 1.0,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         attempt_idx: int = 0,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> list[nx.Graph]:
         owner = self.owner
         if int(getattr(owner, "verbose", 0)) >= 3:
@@ -204,6 +216,8 @@ class DecodeService:
             graph_conditioning=graph_conditioning,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
             attempt_idx=attempt_idx,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
 
     def decode_with_feasibility_slots(
@@ -218,6 +232,8 @@ class DecodeService:
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> list[Optional[nx.Graph]]:
         owner = self.owner
         use_filtering = should_apply_feasibility_filtering(owner, apply_feasibility_filtering)
@@ -232,6 +248,8 @@ class DecodeService:
                     desired_class=desired_class,
                     classifier_scale=classifier_scale,
                     feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                    use_ilp_decoder=use_ilp_decoder,
+                    edge_probability_threshold=edge_probability_threshold,
                 )
             )
         timeout_seconds = getattr(owner, "max_feasibility_seconds_per_sample", None)
@@ -252,6 +270,8 @@ class DecodeService:
                     desired_class=desired_class,
                     classifier_scale=classifier_scale,
                     feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                    use_ilp_decoder=use_ilp_decoder,
+                    edge_probability_threshold=edge_probability_threshold,
                     timeout_seconds=float(timeout_seconds),
                 )
                 accepted_graphs.append(graph)
@@ -284,6 +304,8 @@ class DecodeService:
                 desired_class=desired_class,
                 classifier_scale=classifier_scale,
                 feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                use_ilp_decoder=use_ilp_decoder,
+                edge_probability_threshold=edge_probability_threshold,
                 attempt_idx=attempt_idx,
             ),
             return_stats=True,
@@ -305,6 +327,8 @@ class DecodeService:
                         desired_class=desired_class,
                         classifier_scale=classifier_scale,
                         feasibility_oracle_candidates_per_attempt=0,
+                        use_ilp_decoder=use_ilp_decoder,
+                        edge_probability_threshold=edge_probability_threshold,
                         attempt_idx=max(0, int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0))),
                     )
                 )
@@ -335,6 +359,8 @@ class DecodeService:
         classifier_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
     ) -> list[nx.Graph]:
         accepted = self.decode_with_feasibility_slots(
             graph_conditioning,
@@ -346,5 +372,7 @@ class DecodeService:
             classifier_scale=classifier_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
             feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            use_ilp_decoder=use_ilp_decoder,
+            edge_probability_threshold=edge_probability_threshold,
         )
         return finalize_feasibility_graphs(self.owner, accepted, len(graph_conditioning))
