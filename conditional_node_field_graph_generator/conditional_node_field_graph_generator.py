@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import inspect
 import logging
+import os
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -2021,8 +2022,16 @@ class ConditionalNodeFieldGraphGenerator(object):
         train_node_generator: bool = True,
         targets: Optional[Sequence[Any]] = None,
         ckpt_path: Optional[str] = None,
+        sample_training_progress: bool = False,
+        sample_training_progress_n_samples: int = 7,
+        sample_training_progress_every_n_epochs: int = 1,
+        sample_training_progress_pdf_path: Optional[str] = None,
     ) -> 'ConditionalNodeFieldGraphGenerator':
         """Fit vectorizers, derive supervision, and optionally train the node generator."""
+        if int(sample_training_progress_n_samples) < 1:
+            raise ValueError("sample_training_progress_n_samples must be >= 1.")
+        if int(sample_training_progress_every_n_epochs) < 1:
+            raise ValueError("sample_training_progress_every_n_epochs must be >= 1.")
         if self.model_name is not None:
             verbose_log(
                 self,
@@ -2138,12 +2147,75 @@ class ConditionalNodeFieldGraphGenerator(object):
             )
             if "ckpt_path" in fit_signature.parameters or accepts_kwargs:
                 fit_kwargs["ckpt_path"] = ckpt_path
-            self.conditional_node_generator_model.fit(
-                **fit_kwargs,
-            )
+            previous_sample_progress_state = {
+                name: getattr(self.conditional_node_generator_model, name, None)
+                for name in (
+                    "_graph_generator_sample_progress_enabled",
+                    "_graph_generator_sample_progress_n_samples",
+                    "_graph_generator_sample_progress_every_n_epochs",
+                    "_graph_generator_sample_progress_pdf_path",
+                )
+            }
+            previous_sample_progress_present = {
+                name: hasattr(self.conditional_node_generator_model, name)
+                for name in previous_sample_progress_state
+            }
+            try:
+                setattr(
+                    self.conditional_node_generator_model,
+                    "_graph_generator_sample_progress_enabled",
+                    bool(sample_training_progress),
+                )
+                setattr(
+                    self.conditional_node_generator_model,
+                    "_graph_generator_sample_progress_n_samples",
+                    int(sample_training_progress_n_samples),
+                )
+                setattr(
+                    self.conditional_node_generator_model,
+                    "_graph_generator_sample_progress_every_n_epochs",
+                    int(sample_training_progress_every_n_epochs),
+                )
+                setattr(
+                    self.conditional_node_generator_model,
+                    "_graph_generator_sample_progress_pdf_path",
+                    self._resolve_sample_training_progress_pdf_path(
+                        sample_training_progress_pdf_path
+                    ),
+                )
+                self.conditional_node_generator_model.fit(
+                    **fit_kwargs,
+                )
+            finally:
+                for name, previous_value in previous_sample_progress_state.items():
+                    if previous_sample_progress_present[name]:
+                        setattr(self.conditional_node_generator_model, name, previous_value)
+                    else:
+                        try:
+                            delattr(self.conditional_node_generator_model, name)
+                        except AttributeError:
+                            pass
 
         self.is_fitted_ = True
         return self
+
+    def _resolve_sample_training_progress_pdf_path(
+        self,
+        sample_training_progress_pdf_path: Optional[str],
+    ) -> str:
+        if sample_training_progress_pdf_path is not None:
+            return os.path.expanduser(str(sample_training_progress_pdf_path))
+        artifact_root = getattr(
+            self.conditional_node_generator_model,
+            "artifact_root_dir",
+            None,
+        )
+        if artifact_root is None:
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            artifact_root = os.path.join(repo_root, ".artifacts")
+        name = self.model_name or self.__class__.__name__
+        sample_dir = os.path.join(str(artifact_root), "samples", sanitize_model_token(str(name)))
+        return os.path.join(sample_dir, "training_samples.pdf")
 
     def set_guidance_predictor(
         self,

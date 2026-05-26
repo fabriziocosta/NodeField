@@ -76,6 +76,26 @@ def test_training_coordinator_restores_best_checkpoint_and_plots(monkeypatch):
     assert owner.plot_calls == 1
 
 
+def test_training_coordinator_builds_sample_progress_callback(monkeypatch, tmp_path):
+    owner = _Owner()
+    sample_owner = types.SimpleNamespace(model_name=None)
+    owner._graph_generator_snapshot_owner = sample_owner
+    owner._graph_generator_sample_progress_enabled = True
+    owner._graph_generator_sample_progress_n_samples = 4
+    owner._graph_generator_sample_progress_every_n_epochs = 2
+    owner._graph_generator_sample_progress_pdf_path = tmp_path / "samples.pdf"
+    coordinator = TrainingCoordinator(owner)
+
+    callback = coordinator._build_sample_progress_callback("epoch")
+
+    assert callback is not None
+    assert callback.owner_graph_generator is sample_owner
+    assert callback.n_samples == 4
+    assert callback.every_n_epochs == 2
+    assert callback.output_path == tmp_path / "samples.pdf"
+    assert coordinator._build_sample_progress_callback("batch") is None
+
+
 def test_training_coordinator_stream_batch_logging_uses_snapshot_owner_verbose(monkeypatch):
     owner = _Owner()
     owner.verbose = False

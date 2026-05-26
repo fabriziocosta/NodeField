@@ -1,4 +1,5 @@
 import io
+import os
 import types
 from concurrent.futures.process import BrokenProcessPool
 
@@ -793,6 +794,67 @@ def test_fit_forwards_resume_checkpoint_path_to_node_generator():
     assert len(node_model.setup_calls) == 1
     assert len(node_model.fit_calls) == 1
     assert node_model.fit_calls[0]["ckpt_path"] == "/tmp/resume.ckpt"
+
+
+def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
+    class _ProgressNodeModel(_TrainableNodeModel):
+        def fit(self, **kwargs):
+            self.progress_state = {
+                "enabled": self._graph_generator_sample_progress_enabled,
+                "n_samples": self._graph_generator_sample_progress_n_samples,
+                "every": self._graph_generator_sample_progress_every_n_epochs,
+                "pdf_path": self._graph_generator_sample_progress_pdf_path,
+            }
+            super().fit(**kwargs)
+
+    node_model = _ProgressNodeModel(verbose=False)
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=node_model,
+        graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False),
+        verbose=False,
+    )
+
+    generator.fit(
+        [_labeled_graph()],
+        train_node_generator=True,
+        sample_training_progress=True,
+        sample_training_progress_n_samples=5,
+        sample_training_progress_every_n_epochs=2,
+        sample_training_progress_pdf_path=tmp_path / "samples.pdf",
+    )
+
+    assert node_model.progress_state == {
+        "enabled": True,
+        "n_samples": 5,
+        "every": 2,
+        "pdf_path": os.path.expanduser(str(tmp_path / "samples.pdf")),
+    }
+    assert not hasattr(node_model, "_graph_generator_sample_progress_enabled")
+
+
+def test_fit_rejects_invalid_training_sample_progress_options():
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_GraphVectorizer(),
+        node_graph_vectorizer=_NodeVectorizer(),
+        conditional_node_generator_model=_TrainableNodeModel(verbose=False),
+        graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False),
+        verbose=False,
+    )
+
+    with pytest.raises(ValueError, match="sample_training_progress_n_samples"):
+        generator.fit(
+            [_labeled_graph()],
+            train_node_generator=False,
+            sample_training_progress_n_samples=0,
+        )
+    with pytest.raises(ValueError, match="sample_training_progress_every_n_epochs"):
+        generator.fit(
+            [_labeled_graph()],
+            train_node_generator=False,
+            sample_training_progress_every_n_epochs=0,
+        )
 
 
 def test_toggle_verbose_updates_nested_components():

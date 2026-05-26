@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import networkx as nx
 import numpy as np
 import pytest
 import torch
@@ -19,6 +20,7 @@ from conditional_node_field_graph_generator.conditional_node_field_generator imp
 from conditional_node_field_graph_generator.metrics_collection import (
     GraphGeneratorBatchAndEpochSnapshotCallback,
     GraphGeneratorEpochSnapshotCallback,
+    GraphGeneratorTrainingSampleCallback,
 )
 from conditional_node_field_graph_generator.extensions.demo.pipeline import fit_graph_generator
 from conditional_node_field_graph_generator.extensions.demo.storage import find_latest_checkpoint
@@ -464,6 +466,145 @@ def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(m
             "is_fitted": True,
         }
     ]
+
+
+def test_training_sample_callback_samples_direct_and_ilp(monkeypatch, tmp_path):
+    write_calls = []
+
+    monkeypatch.setattr(
+        GraphGeneratorTrainingSampleCallback,
+        "_write_pdf",
+        lambda self: write_calls.append(len(self.epoch_samples)),
+    )
+
+    class _Owner:
+        def __init__(self):
+            self.is_fitted_ = False
+            self.calls = []
+
+        def sample(self, **kwargs):
+            self.calls.append(kwargs)
+            graph = nx.Graph()
+            graph.add_node(0, label="C")
+            return [graph] * int(kwargs["n_samples"])
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 0
+
+    owner = _Owner()
+    callback = GraphGeneratorTrainingSampleCallback(
+        owner,
+        n_samples=3,
+        every_n_epochs=1,
+        output_path=tmp_path / "samples.pdf",
+    )
+
+    callback.on_validation_epoch_end(_Trainer(), object())
+
+    assert owner.is_fitted_ is False
+    assert write_calls == [1]
+    assert len(owner.calls) == 2
+    assert owner.calls[0]["apply_feasibility_filtering"] is False
+    assert owner.calls[0]["use_ilp_decoder"] is False
+    assert owner.calls[1]["apply_feasibility_filtering"] is False
+    assert owner.calls[1]["use_ilp_decoder"] is True
+
+
+def test_training_sample_callback_respects_epoch_interval(monkeypatch, tmp_path):
+    write_calls = []
+
+    monkeypatch.setattr(
+        GraphGeneratorTrainingSampleCallback,
+        "_write_pdf",
+        lambda self: write_calls.append(len(self.epoch_samples)),
+    )
+
+    class _Owner:
+        is_fitted_ = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def sample(self, **kwargs):
+            del kwargs
+            self.calls += 1
+            return []
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 0
+
+    owner = _Owner()
+    callback = GraphGeneratorTrainingSampleCallback(
+        owner,
+        n_samples=1,
+        every_n_epochs=2,
+        output_path=tmp_path / "samples.pdf",
+    )
+
+    callback.on_validation_epoch_end(_Trainer(), object())
+    _Trainer.current_epoch = 1
+    callback.on_validation_epoch_end(_Trainer(), object())
+
+    assert owner.calls == 2
+    assert write_calls == [1]
+
+
+def test_training_sample_callback_writes_incremental_pdf(tmp_path):
+    class _Owner:
+        is_fitted_ = False
+
+        def sample(self, **kwargs):
+            graphs = []
+            for idx in range(int(kwargs["n_samples"])):
+                graph = nx.path_graph(2)
+                graph.nodes[0]["label"] = "C"
+                graph.nodes[1]["label"] = str(idx)
+                graphs.append(graph)
+            return graphs
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 0
+
+    output_path = tmp_path / "samples.pdf"
+    callback = GraphGeneratorTrainingSampleCallback(
+        _Owner(),
+        n_samples=2,
+        every_n_epochs=1,
+        output_path=output_path,
+    )
+
+    callback.on_validation_epoch_end(_Trainer(), object())
+    first_size = output_path.stat().st_size
+    _Trainer.current_epoch = 1
+    callback.on_validation_epoch_end(_Trainer(), object())
+
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+    assert len(callback.epoch_samples) == 2
+    assert output_path.stat().st_size >= first_size
+
+
+def test_training_sample_callback_validates_configuration(tmp_path):
+    with pytest.raises(ValueError, match="sample_training_progress_n_samples"):
+        GraphGeneratorTrainingSampleCallback(
+            object(),
+            n_samples=0,
+            every_n_epochs=1,
+            output_path=tmp_path / "x.pdf",
+        )
+    with pytest.raises(ValueError, match="sample_training_progress_every_n_epochs"):
+        GraphGeneratorTrainingSampleCallback(
+            object(),
+            n_samples=1,
+            every_n_epochs=0,
+            output_path=tmp_path / "x.pdf",
+        )
 
 
 def test_build_train_val_subsets_reuses_single_example_for_train_and_val():

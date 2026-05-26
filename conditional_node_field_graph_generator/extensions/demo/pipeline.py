@@ -1141,6 +1141,10 @@ def fit_graph_generator(
     ckpt_path=None,
     resume_latest_checkpoint=False,
     checkpoint_root=None,
+    sample_training_progress=False,
+    sample_training_progress_n_samples=7,
+    sample_training_progress_every_n_epochs=1,
+    sample_training_progress_pdf_path=None,
 ):
     if ckpt_path is not None and resume_latest_checkpoint:
         raise ValueError("Provide either ckpt_path or resume_latest_checkpoint, not both.")
@@ -1149,7 +1153,15 @@ def fit_graph_generator(
         resolved_ckpt_path = find_latest_checkpoint(checkpoint_root=checkpoint_root)
     describe_resume_checkpoint(resolved_ckpt_path)
     try:
-        graph_generator.fit(train_graphs, targets=targets, ckpt_path=resolved_ckpt_path)
+        graph_generator.fit(
+            train_graphs,
+            targets=targets,
+            ckpt_path=resolved_ckpt_path,
+            sample_training_progress=sample_training_progress,
+            sample_training_progress_n_samples=sample_training_progress_n_samples,
+            sample_training_progress_every_n_epochs=sample_training_progress_every_n_epochs,
+            sample_training_progress_pdf_path=sample_training_progress_pdf_path,
+        )
     except RuntimeError as exc:
         if resolved_ckpt_path is None or not _is_incompatible_resume_error(exc):
             raise

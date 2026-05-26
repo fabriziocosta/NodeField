@@ -43,6 +43,7 @@ lightning_logs/
 .artifacts/
 **/.artifacts/
 notebooks/datasets/
+notebooks/artificial_dataset_config_*.yaml
 
 # ---- IDE / OS clutter ----
 .DS_Store

@@ -1,8 +1,12 @@
 """Metric collection callbacks for Conditional Node Field training."""
 
+from pathlib import Path
 from typing import Dict
 import time
 
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+import networkx as nx
 import pytorch_lightning as pl
 import torch
 
@@ -303,6 +307,141 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
                 f"epoch {epoch_label}: finished generator snapshot in {max(0.0, time.time() - snapshot_started_at):.2f}s",
                 level=2,
             )
+        finally:
+            owner.is_fitted_ = previous_fit_state
+
+
+class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
+    """Render direct-vs-ILP generation samples after selected validation epochs."""
+
+    def __init__(
+        self,
+        owner_graph_generator,
+        *,
+        n_samples: int,
+        every_n_epochs: int,
+        output_path,
+    ):
+        if int(n_samples) < 1:
+            raise ValueError("sample_training_progress_n_samples must be >= 1.")
+        if int(every_n_epochs) < 1:
+            raise ValueError("sample_training_progress_every_n_epochs must be >= 1.")
+        self.owner_graph_generator = owner_graph_generator
+        self.n_samples = int(n_samples)
+        self.every_n_epochs = int(every_n_epochs)
+        self.output_path = Path(output_path)
+        self.epoch_samples = []
+
+    @staticmethod
+    def _node_color(label):
+        if label is None:
+            return "#d1d5db"
+        label_hash = abs(hash(str(label)))
+        cmap = plt.get_cmap("tab20")
+        return cmap(label_hash % 20)
+
+    def _draw_graph(self, ax, graph, title):
+        ax.axis("off")
+        ax.set_title(str(title), fontsize=9)
+        if graph is None:
+            ax.text(0.5, 0.5, "None", ha="center", va="center")
+            return
+        if graph.number_of_nodes() == 0:
+            ax.text(0.5, 0.5, "empty", ha="center", va="center")
+            return
+        pos = nx.kamada_kawai_layout(graph)
+        labels = {
+            node: str(attrs.get("label", ""))
+            for node, attrs in graph.nodes(data=True)
+        }
+        node_colors = [
+            self._node_color(attrs.get("label"))
+            for _, attrs in graph.nodes(data=True)
+        ]
+        nx.draw_networkx_edges(graph, pos, width=1.5, ax=ax)
+        nx.draw_networkx_nodes(
+            graph,
+            pos,
+            ax=ax,
+            node_color=node_colors,
+            edgecolors="black",
+            linewidths=1.2,
+            node_size=420,
+        )
+        if any(labels.values()):
+            nx.draw_networkx_labels(graph, pos, labels=labels, font_size=8, ax=ax)
+
+    def _write_pdf(self):
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        n_rows = max(1, 2 * len(self.epoch_samples))
+        n_cols = max(1, self.n_samples)
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(3.0 * n_cols, 2.8 * n_rows),
+            squeeze=False,
+        )
+        for row_idx, (epoch_label, mode_label, graphs) in enumerate(
+            row
+            for epoch_record in self.epoch_samples
+            for row in (
+                (epoch_record["epoch"], "direct", epoch_record["direct"]),
+                (epoch_record["epoch"], "ILP", epoch_record["ilp"]),
+            )
+        ):
+            for col_idx in range(n_cols):
+                graph = graphs[col_idx] if col_idx < len(graphs) else None
+                title = f"epoch {epoch_label} {mode_label} #{col_idx + 1}"
+                self._draw_graph(axes[row_idx, col_idx], graph, title)
+        fig.tight_layout()
+        with PdfPages(self.output_path) as pdf:
+            pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if getattr(trainer, "sanity_checking", False):
+            return
+        if hasattr(trainer, "is_global_zero") and not bool(trainer.is_global_zero):
+            return
+        epoch_label = int(getattr(trainer, "current_epoch", -1)) + 1
+        if epoch_label < 1 or (epoch_label % self.every_n_epochs) != 0:
+            return
+        owner = self.owner_graph_generator
+        previous_fit_state = bool(getattr(owner, "is_fitted_", False))
+        owner.is_fitted_ = True
+        try:
+            verbose_log(
+                owner,
+                f"epoch {epoch_label}: sampling training progress graphs",
+                level=2,
+            )
+            direct_graphs = owner.sample(
+                n_samples=self.n_samples,
+                apply_feasibility_filtering=False,
+                use_ilp_decoder=False,
+            )
+            ilp_graphs = owner.sample(
+                n_samples=self.n_samples,
+                apply_feasibility_filtering=False,
+                use_ilp_decoder=True,
+            )
+            self.epoch_samples.append(
+                {
+                    "epoch": epoch_label,
+                    "direct": list(direct_graphs),
+                    "ilp": list(ilp_graphs),
+                }
+            )
+            try:
+                self._write_pdf()
+            except Exception as exc:
+                logger.warning("Unable to render training sample PDF: %s", exc)
+            else:
+                verbose_log(
+                    owner,
+                    f"epoch {epoch_label}: wrote training sample PDF to {self.output_path}",
+                    level=2,
+                )
         finally:
             owner.is_fitted_ = previous_fit_state
 

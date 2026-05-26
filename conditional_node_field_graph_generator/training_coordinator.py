@@ -13,6 +13,7 @@ from .metrics_collection import (
     GraphGeneratorBatchAndEpochSnapshotCallback,
     GraphGeneratorBatchSnapshotCallback,
     GraphGeneratorEpochSnapshotCallback,
+    GraphGeneratorTrainingSampleCallback,
     MetricsLogger,
 )
 from .runtime_utils import verbose_log, run_trainer_fit
@@ -41,6 +42,26 @@ class TrainingCoordinator:
             return GraphGeneratorEpochSnapshotCallback(snapshot_owner)
         return None
 
+    def _build_sample_progress_callback(self, snapshot_frequency: Optional[str]):
+        if snapshot_frequency != "epoch":
+            return None
+        if not bool(getattr(self.owner, "_graph_generator_sample_progress_enabled", False)):
+            return None
+        snapshot_owner = getattr(self.owner, "_graph_generator_snapshot_owner", None)
+        if snapshot_owner is None:
+            return None
+        output_path = getattr(self.owner, "_graph_generator_sample_progress_pdf_path", None)
+        if output_path is None:
+            return None
+        return GraphGeneratorTrainingSampleCallback(
+            snapshot_owner,
+            n_samples=int(getattr(self.owner, "_graph_generator_sample_progress_n_samples", 7)),
+            every_n_epochs=int(
+                getattr(self.owner, "_graph_generator_sample_progress_every_n_epochs", 1)
+            ),
+            output_path=output_path,
+        )
+
     def run_training(
         self,
         train_loader,
@@ -56,6 +77,7 @@ class TrainingCoordinator:
     ) -> None:
         owner = self.owner
         snapshot_callback = self._build_snapshot_callback(snapshot_frequency)
+        sample_progress_callback = self._build_sample_progress_callback(snapshot_frequency)
         callbacks, checkpoint_dir, checkpoint_callback = build_training_callbacks(
             generator_name=owner.__class__.__name__,
             checkpoint_root_dir=checkpoint_policy.checkpoint_root_dir,
@@ -66,6 +88,7 @@ class TrainingCoordinator:
             early_stopping_min_delta=training_policy.early_stopping_min_delta,
             metrics_logger=MetricsLogger(),
             epoch_snapshot_callback=snapshot_callback,
+            sample_progress_callback=sample_progress_callback,
         )
         if owner.model_name is not None:
             verbose_log(owner, f"Save target model_name={owner.model_name} model_dir={owner.model_dir}")
