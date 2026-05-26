@@ -2026,6 +2026,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         sample_training_progress_n_samples: int = 7,
         sample_training_progress_every_n_epochs: int = 1,
         sample_training_progress_pdf_path: Optional[str] = None,
+        sample_training_progress_plot_kwargs: Optional[Dict[str, Any]] = None,
     ) -> 'ConditionalNodeFieldGraphGenerator':
         """Fit vectorizers, derive supervision, and optionally train the node generator."""
         if int(sample_training_progress_n_samples) < 1:
@@ -2154,6 +2155,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     "_graph_generator_sample_progress_n_samples",
                     "_graph_generator_sample_progress_every_n_epochs",
                     "_graph_generator_sample_progress_pdf_path",
+                    "_graph_generator_sample_progress_plot_kwargs",
                 )
             }
             previous_sample_progress_present = {
@@ -2182,6 +2184,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                     self._resolve_sample_training_progress_pdf_path(
                         sample_training_progress_pdf_path
                     ),
+                )
+                setattr(
+                    self.conditional_node_generator_model,
+                    "_graph_generator_sample_progress_plot_kwargs",
+                    dict(sample_training_progress_plot_kwargs or {}),
                 )
                 self.conditional_node_generator_model.fit(
                     **fit_kwargs,

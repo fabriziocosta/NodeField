@@ -1,7 +1,8 @@
 """Metric collection callbacks for Conditional Node Field training."""
 
+import hashlib
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Mapping
 import time
 
 import matplotlib.pyplot as plt
@@ -321,6 +322,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         n_samples: int,
         every_n_epochs: int,
         output_path,
+        plot_kwargs: Mapping | None = None,
     ):
         if int(n_samples) < 1:
             raise ValueError("sample_training_progress_n_samples must be >= 1.")
@@ -330,26 +332,52 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         self.n_samples = int(n_samples)
         self.every_n_epochs = int(every_n_epochs)
         self.output_path = Path(output_path)
+        self.plot_kwargs = dict(plot_kwargs or {})
         self.epoch_samples = []
 
-    @staticmethod
-    def _node_color(label):
-        if label is None:
-            return "#d1d5db"
-        label_hash = abs(hash(str(label)))
-        cmap = plt.get_cmap("tab20")
-        return cmap(label_hash % 20)
+    def _node_color(self, label):
+        node_label_colors = self.plot_kwargs.get("node_label_colors")
+        if node_label_colors is not None:
+            if label in node_label_colors:
+                return node_label_colors[label]
+            label_key = str(label)
+            if label_key in node_label_colors:
+                return node_label_colors[label_key]
+        cmap = self.plot_kwargs.get("cmap", "tab20")
+        if isinstance(cmap, str):
+            cmap = plt.get_cmap(cmap)
+        light = float(self.plot_kwargs.get("light", 0.4))
+        color_offset = int(self.plot_kwargs.get("color_offset", 200))
+        hash_val = hashlib.md5(str(label).encode("utf-8")).hexdigest()
+        normalized = ((int(hash_val, 16) + color_offset) % 1000) / 999.0
+        base_color = cmap(normalized)
+        lightened = tuple((1 - light) * base_color[i] + light for i in range(3))
+        if len(base_color) == 4:
+            lightened += (base_color[3],)
+        return lightened
+
+    def _graph_layout(self, graph):
+        layout = self.plot_kwargs.get("layout", "kamada_kawai")
+        if callable(layout):
+            return layout(graph)
+        if layout == "spring":
+            return nx.spring_layout(graph)
+        if layout == "circular":
+            return nx.circular_layout(graph)
+        if layout == "shell":
+            return nx.shell_layout(graph)
+        return nx.kamada_kawai_layout(graph)
 
     def _draw_graph(self, ax, graph, title):
         ax.axis("off")
-        ax.set_title(str(title), fontsize=9)
+        ax.set_title(str(title), fontsize=self.plot_kwargs.get("title_font_size", 9))
         if graph is None:
             ax.text(0.5, 0.5, "None", ha="center", va="center")
             return
         if graph.number_of_nodes() == 0:
             ax.text(0.5, 0.5, "empty", ha="center", va="center")
             return
-        pos = nx.kamada_kawai_layout(graph)
+        pos = self._graph_layout(graph)
         labels = {
             node: str(attrs.get("label", ""))
             for node, attrs in graph.nodes(data=True)
@@ -358,27 +386,39 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
             self._node_color(attrs.get("label"))
             for _, attrs in graph.nodes(data=True)
         ]
-        nx.draw_networkx_edges(graph, pos, width=1.5, ax=ax)
+        nx.draw_networkx_edges(
+            graph,
+            pos,
+            width=self.plot_kwargs.get("edge_width", 2),
+            ax=ax,
+        )
         nx.draw_networkx_nodes(
             graph,
             pos,
             ax=ax,
             node_color=node_colors,
-            edgecolors="black",
-            linewidths=1.2,
-            node_size=420,
+            edgecolors=self.plot_kwargs.get("node_edgecolors", "black"),
+            linewidths=self.plot_kwargs.get("node_linewidths", 2),
+            node_size=self.plot_kwargs.get("node_size", 300),
         )
-        if any(labels.values()):
-            nx.draw_networkx_labels(graph, pos, labels=labels, font_size=8, ax=ax)
+        if self.plot_kwargs.get("show_label", True):
+            nx.draw_networkx_labels(
+                graph,
+                pos,
+                labels=labels,
+                font_size=self.plot_kwargs.get("label_font_size", 8),
+                ax=ax,
+            )
 
     def _write_pdf(self):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         n_rows = max(1, 2 * len(self.epoch_samples))
         n_cols = max(1, self.n_samples)
+        size = float(self.plot_kwargs.get("size", 3.0))
         fig, axes = plt.subplots(
             n_rows,
             n_cols,
-            figsize=(3.0 * n_cols, 2.8 * n_rows),
+            figsize=(size * n_cols, size * n_rows),
             squeeze=False,
         )
         for row_idx, (epoch_label, mode_label, graphs) in enumerate(

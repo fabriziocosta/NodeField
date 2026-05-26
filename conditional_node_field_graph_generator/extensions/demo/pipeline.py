@@ -1145,6 +1145,7 @@ def fit_graph_generator(
     sample_training_progress_n_samples=7,
     sample_training_progress_every_n_epochs=1,
     sample_training_progress_pdf_path=None,
+    sample_training_progress_plot_kwargs=None,
 ):
     if ckpt_path is not None and resume_latest_checkpoint:
         raise ValueError("Provide either ckpt_path or resume_latest_checkpoint, not both.")
@@ -1161,6 +1162,7 @@ def fit_graph_generator(
             sample_training_progress_n_samples=sample_training_progress_n_samples,
             sample_training_progress_every_n_epochs=sample_training_progress_every_n_epochs,
             sample_training_progress_pdf_path=sample_training_progress_pdf_path,
+            sample_training_progress_plot_kwargs=sample_training_progress_plot_kwargs,
         )
     except RuntimeError as exc:
         if resolved_ckpt_path is None or not _is_incompatible_resume_error(exc):

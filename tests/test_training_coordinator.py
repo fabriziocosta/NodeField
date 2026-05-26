@@ -84,6 +84,7 @@ def test_training_coordinator_builds_sample_progress_callback(monkeypatch, tmp_p
     owner._graph_generator_sample_progress_n_samples = 4
     owner._graph_generator_sample_progress_every_n_epochs = 2
     owner._graph_generator_sample_progress_pdf_path = tmp_path / "samples.pdf"
+    owner._graph_generator_sample_progress_plot_kwargs = {"size": 2.0}
     coordinator = TrainingCoordinator(owner)
 
     callback = coordinator._build_sample_progress_callback("epoch")
@@ -93,6 +94,7 @@ def test_training_coordinator_builds_sample_progress_callback(monkeypatch, tmp_p
     assert callback.n_samples == 4
     assert callback.every_n_epochs == 2
     assert callback.output_path == tmp_path / "samples.pdf"
+    assert callback.plot_kwargs == {"size": 2.0}
     assert coordinator._build_sample_progress_callback("batch") is None
 
 

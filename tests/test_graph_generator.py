@@ -804,6 +804,7 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
                 "n_samples": self._graph_generator_sample_progress_n_samples,
                 "every": self._graph_generator_sample_progress_every_n_epochs,
                 "pdf_path": self._graph_generator_sample_progress_pdf_path,
+                "plot_kwargs": self._graph_generator_sample_progress_plot_kwargs,
             }
             super().fit(**kwargs)
 
@@ -823,6 +824,10 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
         sample_training_progress_n_samples=5,
         sample_training_progress_every_n_epochs=2,
         sample_training_progress_pdf_path=tmp_path / "samples.pdf",
+        sample_training_progress_plot_kwargs={
+            "node_label_colors": {0: "#ffffff"},
+            "size": 2.5,
+        },
     )
 
     assert node_model.progress_state == {
@@ -830,6 +835,10 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
         "n_samples": 5,
         "every": 2,
         "pdf_path": os.path.expanduser(str(tmp_path / "samples.pdf")),
+        "plot_kwargs": {
+            "node_label_colors": {0: "#ffffff"},
+            "size": 2.5,
+        },
     }
     assert not hasattr(node_model, "_graph_generator_sample_progress_enabled")
 

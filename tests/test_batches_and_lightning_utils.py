@@ -554,6 +554,8 @@ def test_training_sample_callback_respects_epoch_interval(monkeypatch, tmp_path)
 
 
 def test_training_sample_callback_writes_incremental_pdf(tmp_path):
+    write_calls = []
+
     class _Owner:
         is_fitted_ = False
 
@@ -577,17 +579,31 @@ def test_training_sample_callback_writes_incremental_pdf(tmp_path):
         n_samples=2,
         every_n_epochs=1,
         output_path=output_path,
+        plot_kwargs={
+            "node_label_colors": {"C": "#ffaaaa", "0": "#00ff00", "1": "#0000ff"},
+            "size": 2.0,
+            "node_size": 250,
+            "edge_width": 1.5,
+            "show_label": True,
+        },
     )
 
     callback.on_validation_epoch_end(_Trainer(), object())
+    write_calls.append((output_path, [record["epoch"] for record in callback.epoch_samples]))
     first_size = output_path.stat().st_size
     _Trainer.current_epoch = 1
     callback.on_validation_epoch_end(_Trainer(), object())
+    write_calls.append((output_path, [record["epoch"] for record in callback.epoch_samples]))
 
     assert output_path.exists()
     assert output_path.stat().st_size > 0
     assert len(callback.epoch_samples) == 2
+    assert write_calls == [
+        (output_path, [1]),
+        (output_path, [1, 2]),
+    ]
     assert output_path.stat().st_size >= first_size
+    assert callback.plot_kwargs["node_label_colors"]["C"] == "#ffaaaa"
 
 
 def test_training_sample_callback_validates_configuration(tmp_path):

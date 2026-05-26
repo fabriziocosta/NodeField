@@ -60,6 +60,7 @@ class TrainingCoordinator:
                 getattr(self.owner, "_graph_generator_sample_progress_every_n_epochs", 1)
             ),
             output_path=output_path,
+            plot_kwargs=getattr(self.owner, "_graph_generator_sample_progress_plot_kwargs", None),
         )
 
     def run_training(

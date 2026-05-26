@@ -130,6 +130,13 @@ def plot_networkx_graphs(
     mode="not_molecule",
     titles=None,
     node_label_colors=None,
+    node_size=300,
+    node_edgecolors="black",
+    node_linewidths=2,
+    edge_width=2,
+    label_font_size=None,
+    title_font_size=None,
+    layout="kamada_kawai",
 ):
     if mode == "molecule":
         if draw_molecules is None:
@@ -174,22 +181,44 @@ def plot_networkx_graphs(
             lightened += (base_color[3],)
         return lightened
 
+    def get_layout(graph):
+        if callable(layout):
+            return layout(graph)
+        if layout == "spring":
+            return nx.spring_layout(graph)
+        if layout == "circular":
+            return nx.circular_layout(graph)
+        if layout == "shell":
+            return nx.shell_layout(graph)
+        return nx.kamada_kawai_layout(graph)
+
     for i, graph in enumerate(graphs):
         ax = axes[i]
         ax.axis("off")
         if titles is not None:
-            ax.set_title(str(titles[i]))
-        pos = nx.kamada_kawai_layout(graph)
+            ax.set_title(str(titles[i]), fontsize=title_font_size)
+        pos = get_layout(graph)
         node_colors = []
         labels = {}
         for node in graph.nodes():
             label = graph.nodes[node].get("label", "")
             node_colors.append(get_color_for_label(label))
             labels[node] = str(label)
-        nx.draw_networkx_edges(graph, pos, width=2, ax=ax)
-        nx.draw_networkx_nodes(graph, pos, ax=ax, node_color=node_colors, edgecolors="black", linewidths=2)
+        nx.draw_networkx_edges(graph, pos, width=edge_width, ax=ax)
+        nx.draw_networkx_nodes(
+            graph,
+            pos,
+            ax=ax,
+            node_color=node_colors,
+            edgecolors=node_edgecolors,
+            linewidths=node_linewidths,
+            node_size=node_size,
+        )
         if show_label:
-            nx.draw_networkx_labels(graph, pos, labels=labels, ax=ax)
+            label_kwargs = {"labels": labels, "ax": ax}
+            if label_font_size is not None:
+                label_kwargs["font_size"] = label_font_size
+            nx.draw_networkx_labels(graph, pos, **label_kwargs)
     for j in range(i + 1, len(axes)):
         axes[j].axis("off")
     plt.tight_layout()
