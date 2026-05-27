@@ -20,6 +20,8 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset, TensorDataset
 from .naming_utils import sanitize_model_token
 from .runtime_utils import get_runtime_logger, verbose_log
 from .graph_generator_state import CheckpointPolicy, MetricsPolicy, TrainingPolicy
+from .metrics_collection import MetricsLogger
+from .stream_fit import _StreamBatchTimeoutError
 
 try:
     import pytorch_lightning as pl
@@ -3268,5 +3270,7 @@ __all__ = [
     "GeneratedNodeBatch",
     "GraphConditioningBatch",
     "GuidancePredictorMLP",
+    "MetricsLogger",
     "NodeGenerationBatch",
+    "_StreamBatchTimeoutError",
 ]

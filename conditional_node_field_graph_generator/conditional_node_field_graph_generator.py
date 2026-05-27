@@ -12,7 +12,7 @@ import threading
 import time
 import pulp
 import dill as pickle
-from .runtime_utils import get_runtime_logger, run_with_fork_timeout, timeit, verbose_log
+from .runtime_utils import get_runtime_logger, timeit, verbose_log
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union, FrozenSet, Iterable, Callable
 from .conditional_node_field_generator import (
     ConditionalNodeGeneratorBase,
@@ -50,8 +50,17 @@ from .graph_generator_state import (
     TrainingProgressSamplingConfig,
 )
 from .decode_service import DecodeService
+from .conditioning_sampler import ConditioningSampler
 from .encoding_pipeline import EncodingPipeline
 from .fit_artifacts import build_fit_artifacts
+from .node_batch_builder import NodeBatchBuilder
+from .stream_fit import (
+    StreamFitService,
+    _StreamBatchTimeoutError,
+    _StreamSupervisionError,
+    _StreamTransformError,
+)
+from .supervision import SupervisionChannelPlan, SupervisionPlan, SupervisionPlanner
 from .decode_pipeline import (
     accept_feasible_candidates_by_slot as _accept_feasible_candidates_by_slot,
     decode_with_feasibility_slots_core as _decode_with_feasibility_slots_core,
@@ -110,56 +119,6 @@ def _plot_decoder_diagnostics(**kwargs) -> None:
     )
 
 
-class _StreamTransformError(RuntimeError):
-    pass
-
-
-class _StreamSupervisionError(RuntimeError):
-    pass
-
-
-class _StreamBatchTimeoutError(RuntimeError):
-    pass
-
-
-def _prepare_stream_training_payload_worker(graph_generator, graphs: List[nx.Graph]):
-    return graph_generator._prepare_stream_training_payload(graphs)
-
-
-def _prepare_stream_training_batch_worker(graph_generator, graphs: List[nx.Graph]):
-    return graph_generator._prepare_stream_training_batch(graphs)
-
-
-@dataclass(frozen=True)
-class SupervisionChannelPlan:
-    """Description of how one prediction channel should be handled during training."""
-
-    name: str
-    mode: str
-    reason: str
-    constant_value: Optional[Any] = None
-    horizon: Optional[int] = None
-    enabled: bool = False
-
-
-@dataclass(frozen=True)
-class SupervisionPlan:
-    """Single source of truth for supervision decisions in the orchestration layer."""
-
-    node_labels: SupervisionChannelPlan
-    edge_labels: SupervisionChannelPlan
-    direct_edges: SupervisionChannelPlan
-    auxiliary_locality: SupervisionChannelPlan
-
-    def as_dict(self) -> Dict[str, SupervisionChannelPlan]:
-        return {
-            "node_labels": self.node_labels,
-            "edge_labels": self.edge_labels,
-            "direct_edges": self.direct_edges,
-            "auxiliary_locality": self.auxiliary_locality,
-        }
-
-
 @dataclass
 class GeneratedGuidanceBatch:
     """Generated examples paired with feasibility-derived guidance targets."""
@@ -189,6 +148,34 @@ class ConditionalNodeFieldGraphGenerator(object):
             pipeline = EncodingPipeline(self)
             self.encoding_pipeline_ = pipeline
         return pipeline
+
+    def _ensure_supervision_planner(self) -> SupervisionPlanner:
+        planner = getattr(self, "supervision_planner_", None)
+        if planner is None:
+            planner = SupervisionPlanner(self)
+            self.supervision_planner_ = planner
+        return planner
+
+    def _ensure_node_batch_builder(self) -> NodeBatchBuilder:
+        builder = getattr(self, "node_batch_builder_", None)
+        if builder is None:
+            builder = NodeBatchBuilder(self)
+            self.node_batch_builder_ = builder
+        return builder
+
+    def _ensure_conditioning_sampler(self) -> ConditioningSampler:
+        sampler = getattr(self, "conditioning_sampler_", None)
+        if sampler is None:
+            sampler = ConditioningSampler(self)
+            self.conditioning_sampler_ = sampler
+        return sampler
+
+    def _ensure_stream_fit_service(self) -> StreamFitService:
+        service = getattr(self, "stream_fit_service_", None)
+        if service is None:
+            service = StreamFitService(self)
+            self.stream_fit_service_ = service
+        return service
 
     def _ensure_stream_fit_stats(self) -> StreamFitStats:
         stats = getattr(self, "stream_fit_stats_", None)
@@ -427,6 +414,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.node_embedding_effective_dimension_ = None
         self.graph_embedding_effective_dimension_ = None
         self.encoding_pipeline_ = EncodingPipeline(self)
+        self.supervision_planner_ = SupervisionPlanner(self)
+        self.node_batch_builder_ = NodeBatchBuilder(self)
+        self.conditioning_sampler_ = ConditioningSampler(self)
+        self.stream_fit_service_ = StreamFitService(self)
         self.conditional_node_generator_model = conditional_node_generator_model
         self.graph_decoder = graph_decoder
         self.verbose = verbose
@@ -1182,123 +1173,20 @@ class ConditionalNodeFieldGraphGenerator(object):
         node_label_targets: List[np.ndarray],
         edge_label_targets: Optional[np.ndarray],
     ) -> SupervisionPlan:
-        """Build a single explicit supervision plan for the whole fit() call.
-
-        Args:
-            graphs (List[nx.Graph]): Input value.
-            node_label_targets (List[np.ndarray]): Input value.
-            edge_label_targets (Optional[np.ndarray]): Input value.
-
-        Returns:
-            SupervisionPlan: Computed result.
-        """
-        del graphs
-
-        flat_node_labels = [
-            label
-            for labels in node_label_targets
-            for label in np.asarray(labels, dtype=object).tolist()
-        ]
-        if len(flat_node_labels) == 0:
-            node_label_mode = "disabled"
-            node_label_reason = "No node labels were provided."
-            node_label_constant = None
-        else:
-            unique_node_labels = np.unique(np.asarray(flat_node_labels, dtype=object))
-            if len(unique_node_labels) == 1:
-                node_label_mode = "constant"
-                node_label_reason = "All training nodes share one label."
-                node_label_constant = unique_node_labels[0]
-            else:
-                node_label_mode = "learned"
-                node_label_reason = f"{len(unique_node_labels)} node labels detected."
-                node_label_constant = None
-
-        if edge_label_targets is None:
-            edge_label_mode = "disabled"
-            edge_label_reason = "No usable edge labels were provided."
-            edge_label_constant = None
-        else:
-            unique_edge_labels = np.unique(np.asarray(edge_label_targets, dtype=object))
-            if len(unique_edge_labels) == 1:
-                edge_label_mode = "constant"
-                edge_label_reason = "All labelled edges share one label."
-                edge_label_constant = unique_edge_labels[0]
-            else:
-                edge_label_mode = "learned"
-                edge_label_reason = f"{len(unique_edge_labels)} edge labels detected."
-                edge_label_constant = None
-
-        direct_edges_enabled = True
-        direct_edges_mode = "learned"
-        direct_edges_reason = "Generator should learn horizon-1 edge presence for the decoder."
-
-        aux_enabled = bool(self.locality_horizon > 1)
-        if aux_enabled:
-            auxiliary_mode = "learned"
-            auxiliary_reason = f"Use horizon-{self.locality_horizon} locality as auxiliary regularization."
-        else:
-            auxiliary_mode = "disabled"
-            auxiliary_reason = "No auxiliary locality is needed when locality_horizon=1."
-
-        return SupervisionPlan(
-            node_labels=SupervisionChannelPlan(
-                name="node_labels",
-                mode=node_label_mode,
-                reason=node_label_reason,
-                constant_value=node_label_constant,
-                enabled=node_label_mode != "disabled",
-            ),
-            edge_labels=SupervisionChannelPlan(
-                name="edge_labels",
-                mode=edge_label_mode,
-                reason=edge_label_reason,
-                constant_value=edge_label_constant,
-                enabled=edge_label_mode != "disabled",
-            ),
-            direct_edges=SupervisionChannelPlan(
-                name="direct_edges",
-                mode=direct_edges_mode,
-                reason=direct_edges_reason,
-                horizon=1,
-                enabled=direct_edges_enabled,
-            ),
-            auxiliary_locality=SupervisionChannelPlan(
-                name="auxiliary_locality",
-                mode=auxiliary_mode,
-                reason=auxiliary_reason,
-                horizon=self.locality_horizon if aux_enabled else None,
-                enabled=aux_enabled,
-            ),
+        """Build a single explicit supervision plan for the whole fit() call."""
+        return self._ensure_supervision_planner().build_supervision_plan(
+            graphs,
+            node_label_targets=node_label_targets,
+            edge_label_targets=edge_label_targets,
         )
 
     def _log_supervision_plan(self, supervision_plan: SupervisionPlan) -> None:
-        """Print the current supervision plan when verbose logging is enabled.
-
-        Args:
-            supervision_plan (SupervisionPlan): Input value.
-        """
-        if not self.verbose:
-            return
-        verbose_log(self, "Supervision plan:")
-        for channel in supervision_plan.as_dict().values():
-            enabled_text = "enabled" if channel.enabled else "disabled"
-            horizon_text = f", horizon={channel.horizon}" if channel.horizon is not None else ""
-            verbose_log(self, f"  {channel.name}: mode={channel.mode}, {enabled_text}{horizon_text}. {channel.reason}")
+        """Print the current supervision plan when verbose logging is enabled."""
+        self._ensure_supervision_planner().log_supervision_plan(supervision_plan)
 
     def _plan_channel(self, channel_name: str) -> Optional[SupervisionChannelPlan]:
-        """Return the named supervision channel when a plan is available.
-
-        Args:
-            channel_name (str): Input value.
-
-        Returns:
-            Optional[SupervisionChannelPlan]: Computed result.
-        """
-        plan = getattr(self, "supervision_plan_", None)
-        if plan is None:
-            return None
-        return getattr(plan, channel_name, None)
+        """Return the named supervision channel when a plan is available."""
+        return self._ensure_supervision_planner().plan_channel(channel_name)
 
     def _resolve_predicted_node_labels(
         self,
@@ -1382,21 +1270,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             )
 
     def _sample_conditioning_rows(self, source: GraphConditioningBatch, indices: np.ndarray) -> GraphConditioningBatch:
-        """Slice a conditioning batch by row indices.
-
-        Args:
-            source (GraphConditioningBatch): Input value.
-            indices (np.ndarray): Input value.
-
-        Returns:
-            GraphConditioningBatch: Computed result.
-        """
-        idx = np.asarray(indices, dtype=np.int64)
-        return GraphConditioningBatch(
-            graph_embeddings=np.asarray(source.graph_embeddings)[idx],
-            node_counts=np.asarray(source.node_counts)[idx],
-            edge_counts=np.asarray(source.edge_counts)[idx],
-        )
+        """Slice a conditioning batch by row indices."""
+        return self._ensure_conditioning_sampler().sample_conditioning_rows(source, indices)
 
     def _interpolated_conditioning_from_pair(
         self,
@@ -1405,111 +1280,23 @@ class ConditionalNodeFieldGraphGenerator(object):
         second_idx: int,
         t: float,
     ) -> Tuple[np.ndarray, np.int64, np.int64]:
-        """Linearly interpolate one conditioning pair and clamp integer counts.
-
-        Args:
-            conditioning (GraphConditioningBatch): Input value.
-            first_idx (int): Input value.
-            second_idx (int): Input value.
-            t (float): Input value.
-
-        Returns:
-            Tuple[np.ndarray, np.int64, np.int64]: Computed result.
-        """
-        graph_embeddings = np.asarray(conditioning.graph_embeddings, dtype=float)
-        node_counts = np.asarray(conditioning.node_counts, dtype=float)
-        edge_counts = np.asarray(conditioning.edge_counts, dtype=float)
-
-        interpolated_embedding = (1.0 - t) * graph_embeddings[first_idx] + t * graph_embeddings[second_idx]
-        interpolated_node_count = np.int64(max(1, int(np.rint((1.0 - t) * node_counts[first_idx] + t * node_counts[second_idx]))))
-        interpolated_edge_count = np.int64(max(0, int(np.rint((1.0 - t) * edge_counts[first_idx] + t * edge_counts[second_idx]))))
-        return interpolated_embedding, interpolated_node_count, interpolated_edge_count
+        """Linearly interpolate one conditioning pair and clamp integer counts."""
+        return self._ensure_conditioning_sampler().interpolated_conditioning_from_pair(
+            conditioning,
+            first_idx,
+            second_idx,
+            t,
+        )
 
     def _sample_conditions(
         self,
         n_samples: int,
         interpolate_between_n_samples: Optional[int] = None,
     ) -> GraphConditioningBatch:
-        """Sample graph-level conditioning from cached training embeddings.
-
-        Args:
-            n_samples (int): Input value.
-            interpolate_between_n_samples (Optional[int]): Optional input value.
-
-        Returns:
-            GraphConditioningBatch: Computed result.
-        """
-        conditioning = self._require_training_graph_conditioning()
-        if interpolate_between_n_samples is not None and int(interpolate_between_n_samples) < 2:
-            raise ValueError("interpolate_between_n_samples must be >= 2 when provided.")
-
-        n_training = len(conditioning)
-        if interpolate_between_n_samples is None or n_training == 1:
-            sample_indices = np.random.choice(n_training, size=int(n_samples), replace=True)
-            return self._sample_conditioning_rows(conditioning, sample_indices)
-
-        subset_size = min(int(interpolate_between_n_samples), n_training)
-        if subset_size < 2:
-            sample_indices = np.random.choice(n_training, size=int(n_samples), replace=True)
-            return self._sample_conditioning_rows(conditioning, sample_indices)
-
-        graph_embeddings = np.asarray(conditioning.graph_embeddings, dtype=float)
-        sampled_embeddings = []
-        sampled_node_counts = []
-        sampled_edge_counts = []
-
-        for _ in range(int(n_samples)):
-            candidate_indices = np.random.choice(n_training, size=subset_size, replace=False)
-            if len(candidate_indices) < 2:
-                fallback_idx = int(np.random.choice(n_training))
-                direct_conditioning = self._sample_conditioning_rows(conditioning, np.asarray([fallback_idx], dtype=np.int64))
-                sampled_embeddings.append(np.asarray(direct_conditioning.graph_embeddings[0], dtype=float))
-                sampled_node_counts.append(np.int64(direct_conditioning.node_counts[0]))
-                sampled_edge_counts.append(np.int64(direct_conditioning.edge_counts[0]))
-                continue
-
-            pair_indices = []
-            pair_weights = []
-            raw_pair_cosines = []
-            for local_i in range(len(candidate_indices)):
-                for local_j in range(local_i + 1, len(candidate_indices)):
-                    first_idx = int(candidate_indices[local_i])
-                    second_idx = int(candidate_indices[local_j])
-                    first_embedding = graph_embeddings[first_idx]
-                    second_embedding = graph_embeddings[second_idx]
-                    denom = float(np.linalg.norm(first_embedding) * np.linalg.norm(second_embedding))
-                    cosine = 0.0 if denom == 0.0 else float(np.dot(first_embedding, second_embedding) / denom)
-                    pair_indices.append((first_idx, second_idx))
-                    raw_pair_cosines.append(cosine)
-                    pair_weights.append(max(cosine, 0.0))
-
-            pair_weights_array = np.asarray(pair_weights, dtype=float)
-            if np.all(pair_weights_array == 0.0):
-                raw_pair_cosines_array = np.asarray(raw_pair_cosines, dtype=float)
-                max_cosine = float(np.max(raw_pair_cosines_array))
-                candidate_pair_choices = np.flatnonzero(np.isclose(raw_pair_cosines_array, max_cosine))
-                pair_choice = int(np.random.choice(candidate_pair_choices))
-            else:
-                pair_probabilities = pair_weights_array / pair_weights_array.sum()
-                pair_choice = int(np.random.choice(len(pair_indices), p=pair_probabilities))
-            first_idx, second_idx = pair_indices[pair_choice]
-            t = float(np.random.uniform(0.0, 1.0))
-            interpolated_embedding, interpolated_node_count, interpolated_edge_count = (
-                self._interpolated_conditioning_from_pair(
-                    conditioning,
-                    first_idx,
-                    second_idx,
-                    t,
-                )
-            )
-            sampled_embeddings.append(interpolated_embedding)
-            sampled_node_counts.append(interpolated_node_count)
-            sampled_edge_counts.append(interpolated_edge_count)
-
-        return GraphConditioningBatch(
-            graph_embeddings=np.asarray(sampled_embeddings, dtype=float),
-            node_counts=np.asarray(sampled_node_counts, dtype=np.int64),
-            edge_counts=np.asarray(sampled_edge_counts, dtype=np.int64),
+        """Sample graph-level conditioning from cached training embeddings."""
+        return self._ensure_conditioning_sampler().sample_conditions(
+            n_samples,
+            interpolate_between_n_samples=interpolate_between_n_samples,
         )
 
     def _reset_stream_fit_stats(self) -> None:
@@ -1551,176 +1338,36 @@ class ConditionalNodeFieldGraphGenerator(object):
         supervision_plan,
         log_details: bool = True,
     ) -> NodeGenerationBatch:
-        edge_pairs_for_cond_gen = None
-        edge_targets_for_cond_gen = None
-        auxiliary_edge_pairs_for_cond_gen = None
-        auxiliary_edge_targets_for_cond_gen = None
-        decoder_verbose = None
-        if not log_details and self.graph_decoder is not None and hasattr(self.graph_decoder, "verbose"):
-            decoder_verbose = getattr(self.graph_decoder, "verbose")
-            self.graph_decoder.verbose = False
-        if supervision_plan.direct_edges.enabled:
-            if self.graph_decoder is None:
-                raise RuntimeError("Locality supervision requested but graph_decoder is None.")
-            if log_details:
-                self._log_supervision_plan(supervision_plan)
-            try:
-                edge_targets_for_cond_gen, edge_pairs_for_cond_gen = self.graph_decoder.compute_edge_supervision(
-                    graphs,
-                    node_embeddings_list,
-                    locality_sample_fraction=self.locality_sample_fraction,
-                    negative_sample_factor=self.negative_sample_factor,
-                    locality_sampling_strategy=self.locality_sampling_strategy,
-                    locality_target_positive_ratio=self.locality_target_positive_ratio,
-                    horizon=1,
-                    supervision_name="direct_edge",
-                )
-                if supervision_plan.auxiliary_locality.enabled:
-                    auxiliary_edge_targets_for_cond_gen, auxiliary_edge_pairs_for_cond_gen = (
-                        self.graph_decoder.compute_edge_supervision(
-                            graphs,
-                            node_embeddings_list,
-                            locality_sample_fraction=self.locality_sample_fraction,
-                            negative_sample_factor=self.negative_sample_factor,
-                            locality_sampling_strategy=self.locality_sampling_strategy,
-                            locality_target_positive_ratio=self.locality_target_positive_ratio,
-                            horizon=supervision_plan.auxiliary_locality.horizon,
-                            supervision_name="aux_locality",
-                        )
-                    )
-            finally:
-                if decoder_verbose is not None:
-                    self.graph_decoder.verbose = decoder_verbose
-        else:
-            if log_details:
-                self._log_supervision_plan(supervision_plan)
-        return self._build_node_batch(
+        return self._ensure_node_batch_builder().build_training_node_batch(
             graphs,
-            node_embeddings_list,
-            node_label_targets=node_label_targets if supervision_plan.node_labels.enabled else None,
-            edge_pairs=edge_pairs_for_cond_gen,
-            edge_targets=edge_targets_for_cond_gen,
-            edge_label_pairs=edge_label_pairs if supervision_plan.edge_labels.enabled else None,
-            edge_label_targets=edge_label_targets if supervision_plan.edge_labels.enabled else None,
-            auxiliary_edge_pairs=auxiliary_edge_pairs_for_cond_gen,
-            auxiliary_edge_targets=auxiliary_edge_targets_for_cond_gen,
+            node_embeddings_list=node_embeddings_list,
+            node_label_targets=node_label_targets,
+            edge_label_targets=edge_label_targets,
+            edge_label_pairs=edge_label_pairs,
+            supervision_plan=supervision_plan,
+            log_details=log_details,
         )
 
     def _stream_rejection_reason(self, graph: nx.Graph) -> Optional[str]:
-        node_model = self.conditional_node_generator_model
-        max_rows = getattr(node_model, "number_of_rows_per_example", None)
-        if max_rows is not None and graph.number_of_nodes() > int(max_rows):
-            return "too_large"
-        node_label_vocab = getattr(node_model, "node_label_to_index_", None)
-        if node_label_vocab:
-            for node in graph.nodes():
-                label = graph.nodes[node].get("label", DEFAULT_DUMMY_NODE_LABEL)
-                if label not in node_label_vocab:
-                    return "unknown_node_label"
-        supervision_plan = getattr(self, "supervision_plan_", None)
-        edge_label_vocab = getattr(node_model, "edge_label_to_index_", None)
-        edge_label_mode = None if supervision_plan is None else getattr(supervision_plan.edge_labels, "mode", None)
-        if edge_label_vocab and edge_label_mode == "learned":
-            for _, _, attrs in graph.edges(data=True):
-                if "label" not in attrs or attrs["label"] not in edge_label_vocab:
-                    return "unknown_edge_label"
-        return None
+        return self._ensure_stream_fit_service().stream_rejection_reason(graph)
 
     def _increment_stream_skip(self, reason: str) -> None:
-        self.stream_training_skipped_ += 1
-        self.stream_epoch_training_skipped_ += 1
-        if reason == "too_large":
-            self.stream_skipped_too_large_ += 1
-        elif reason == "unknown_node_label":
-            self.stream_skipped_unknown_node_label_ += 1
-        elif reason == "unknown_edge_label":
-            self.stream_skipped_unknown_edge_label_ += 1
-        elif reason == "transform_error":
-            self.stream_skipped_transform_error_ += 1
-        elif reason == "supervision_error":
-            self.stream_skipped_supervision_error_ += 1
+        self._ensure_stream_fit_service().increment_stream_skip(reason)
 
     def _log_stream_skip(self, reason: str, graph: nx.Graph) -> None:
-        if int(self.verbose) < 2:
-            return
-        verbose_log(
-            self,
-            "Skipping streamed graph "
-            f"(nodes={graph.number_of_nodes()}, edges={graph.number_of_edges()}) due to {reason}.",
-            level=2,
-        )
+        self._ensure_stream_fit_service().log_stream_skip(reason, graph)
 
     def _finalize_stream_fit_stats(self) -> None:
-        with self._ensure_stream_runtime_lock():
-            denominator = max(1, int(self.stream_training_seen_))
-            self.stream_acceptance_rate_ = float(self.stream_training_accepted_) / float(denominator)
-            self.warmup_schema_frozen_ = True
-            if int(self.verbose) >= 1:
-                verbose_log(
-                    self,
-                    "Streaming fit summary: "
-                    f"seen={self.stream_seen_}, warmup={self.stream_warmup_count_}, "
-                    f"train_seen={self.stream_training_seen_}, accepted={self.stream_training_accepted_}, "
-                    f"skipped={self.stream_training_skipped_}, acceptance_rate={self.stream_acceptance_rate_:.1%}.",
-                )
-            if self.stream_training_seen_ > 0 and self.stream_acceptance_rate_ < 0.5:
-                logger.warning(
-                    "Low streamed training acceptance rate: %.1f%% (%d/%d accepted).",
-                    100.0 * self.stream_acceptance_rate_,
-                    self.stream_training_accepted_,
-                    self.stream_training_seen_,
-                )
+        self._ensure_stream_fit_service().finalize_stream_fit_stats()
 
     def _prepare_stream_training_payload(self, graphs: List[nx.Graph]):
-        with self._ensure_stream_runtime_lock():
-            supervision_plan = getattr(self, "supervision_plan_", None)
-            if supervision_plan is None:
-                raise RuntimeError("supervision_plan_ is not initialized.")
-            try:
-                node_embeddings_list, graph_conditioning = self.encode(graphs)
-            except Exception as exc:
-                raise _StreamTransformError("Failed to encode streamed graphs under the frozen warmup schema.") from exc
-            try:
-                node_label_targets = self.graphs_to_node_label_targets(graphs)
-                edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
-                node_batch = self._build_training_node_batch(
-                    graphs,
-                    node_embeddings_list=node_embeddings_list,
-                    node_label_targets=node_label_targets,
-                    edge_label_targets=edge_label_targets,
-                    edge_label_pairs=edge_label_pairs,
-                    supervision_plan=supervision_plan,
-                    log_details=False,
-                )
-                payload = self.conditional_node_generator_model._build_processed_training_payload(
-                    node_batch=node_batch,
-                    graph_conditioning=graph_conditioning,
-                    targets=None,
-                )
-                return payload
-            except Exception as exc:
-                raise _StreamSupervisionError("Failed to derive streamed supervision under the frozen warmup schema.") from exc
+        return self._ensure_stream_fit_service().prepare_stream_training_payload(graphs)
 
     def _prepare_stream_training_batch(self, graphs: List[nx.Graph]):
-        payload = self._prepare_stream_training_payload(graphs)
-        return self.conditional_node_generator_model._collate_processed_payload(payload)
+        return self._ensure_stream_fit_service().prepare_stream_training_batch(graphs)
 
     def _prepare_stream_training_batch_with_timeout(self, graphs: List[nx.Graph]):
-        timeout_seconds = getattr(self, "stream_batch_timeout_seconds", None)
-        if timeout_seconds is None:
-            return self._prepare_stream_training_batch(graphs)
-        try:
-            payload = run_with_fork_timeout(
-                _prepare_stream_training_payload_worker,
-                self,
-                graphs,
-                timeout_seconds=float(timeout_seconds),
-            )
-            return self.conditional_node_generator_model._collate_processed_payload(payload)
-        except TimeoutError as exc:
-            raise _StreamBatchTimeoutError(
-                f"Streamed batch preparation exceeded {float(timeout_seconds):.1f}s."
-            ) from exc
+        return self._ensure_stream_fit_service().prepare_stream_training_batch_with_timeout(graphs)
 
     def fit_from_stream(
         self,
@@ -2408,37 +2055,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         auxiliary_edge_pairs: Optional[List[Tuple[int, int, int]]] = None,
         auxiliary_edge_targets: Optional[np.ndarray] = None,
     ) -> NodeGenerationBatch:
-        """Assemble a padded node-generation batch from embeddings and any enabled supervision signals."""
-        frozen_num_rows = None
-        if self.conditional_node_generator_model is not None:
-            frozen_num_rows = getattr(
-                self.conditional_node_generator_model,
-                "number_of_rows_per_example",
-                None,
-            )
-        max_num_rows = (
-            int(frozen_num_rows)
-            if frozen_num_rows is not None
-            else max(emb.shape[0] for emb in node_embeddings_list)
-        )
-        node_presence_mask = np.zeros((len(graphs), max_num_rows), dtype=bool)
-        node_degree_targets = np.zeros((len(graphs), max_num_rows), dtype=np.int64)
-        for graph_idx, graph in enumerate(graphs):
-            nodes = list(graph.nodes())
-            if len(nodes) > max_num_rows:
-                raise ValueError(
-                    "Graph exceeds the configured number_of_rows_per_example "
-                    f"({len(nodes)} > {max_num_rows})."
-                )
-            node_presence_mask[graph_idx, :len(nodes)] = True
-            node_degree_targets[graph_idx, :len(nodes)] = np.asarray(
-                [graph.degree(node) for node in nodes],
-                dtype=np.int64,
-            )
-        return NodeGenerationBatch(
-            node_embeddings_list=node_embeddings_list,
-            node_presence_mask=node_presence_mask,
-            node_degree_targets=node_degree_targets,
+        """Assemble a padded node-generation batch from embeddings and supervision signals."""
+        return self._ensure_node_batch_builder().build_node_batch(
+            graphs,
+            node_embeddings_list,
             node_label_targets=node_label_targets,
             edge_pairs=edge_pairs,
             edge_targets=edge_targets,

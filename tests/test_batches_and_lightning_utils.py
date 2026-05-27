@@ -156,7 +156,7 @@ def test_run_trainer_fit_suppresses_lightning_worker_warnings():
 
 
 def test_stream_batch_timeout_skips_immediately_without_in_process_retry(monkeypatch):
-    generator = ConditionalNodeFieldGenerator.__new__(ConditionalNodeFieldGenerator)
+    generator = graphgen.ConditionalNodeFieldGraphGenerator.__new__(graphgen.ConditionalNodeFieldGraphGenerator)
     generator.stream_batch_timeout_seconds = 2.5
     generator.conditional_node_generator_model = type(
         "_DummyModel",
@@ -174,7 +174,7 @@ def test_stream_batch_timeout_skips_immediately_without_in_process_retry(monkeyp
     generator._prepare_stream_training_batch = _unexpected_retry
 
     monkeypatch.setattr(
-        "conditional_node_field_graph_generator.conditional_node_field_graph_generator.run_with_fork_timeout",
+        "conditional_node_field_graph_generator.stream_fit.run_with_fork_timeout",
         lambda worker, *args, timeout_seconds=None: (_ for _ in ()).throw(TimeoutError("timed out")),
     )
 

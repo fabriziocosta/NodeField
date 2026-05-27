@@ -19,6 +19,10 @@ from conditional_node_field_graph_generator.persistence import (
     save_graph_generator,
 )
 from conditional_node_field_graph_generator.encoding_pipeline import EncodingPipeline
+from conditional_node_field_graph_generator.conditioning_sampler import ConditioningSampler
+from conditional_node_field_graph_generator.node_batch_builder import NodeBatchBuilder
+from conditional_node_field_graph_generator.stream_fit import StreamFitService
+from conditional_node_field_graph_generator.supervision import SupervisionPlanner
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
@@ -2315,6 +2319,14 @@ def test_load_graph_generator_restores_legacy_encoding_pipeline_defaults(tmp_pat
     assert restored.use_embedding_svd is False
     assert isinstance(restored.encoding_pipeline_, EncodingPipeline)
     assert restored.encoding_pipeline_.owner is restored
+    assert isinstance(restored.supervision_planner_, SupervisionPlanner)
+    assert restored.supervision_planner_.owner is restored
+    assert isinstance(restored.node_batch_builder_, NodeBatchBuilder)
+    assert restored.node_batch_builder_.owner is restored
+    assert isinstance(restored.conditioning_sampler_, ConditioningSampler)
+    assert restored.conditioning_sampler_.owner is restored
+    assert isinstance(restored.stream_fit_service_, StreamFitService)
+    assert restored.stream_fit_service_.owner is restored
 
 
 def test_adj_mtx_to_targets_preserves_expected_locality_pairs():

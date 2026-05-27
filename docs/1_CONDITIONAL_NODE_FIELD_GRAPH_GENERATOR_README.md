@@ -7,6 +7,10 @@ Implementation anchors:
 - [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py)
 - [`../conditional_node_field_graph_generator/encoding_pipeline.py`](../conditional_node_field_graph_generator/encoding_pipeline.py)
 - [`../conditional_node_field_graph_generator/fit_artifacts.py`](../conditional_node_field_graph_generator/fit_artifacts.py)
+- [`../conditional_node_field_graph_generator/supervision.py`](../conditional_node_field_graph_generator/supervision.py)
+- [`../conditional_node_field_graph_generator/node_batch_builder.py`](../conditional_node_field_graph_generator/node_batch_builder.py)
+- [`../conditional_node_field_graph_generator/conditioning_sampler.py`](../conditional_node_field_graph_generator/conditioning_sampler.py)
+- [`../conditional_node_field_graph_generator/stream_fit.py`](../conditional_node_field_graph_generator/stream_fit.py)
 - [`../conditional_node_field_graph_generator/graph_generator_state.py`](../conditional_node_field_graph_generator/graph_generator_state.py)
 - [`../conditional_node_field_graph_generator/training_coordinator.py`](../conditional_node_field_graph_generator/training_coordinator.py)
 - [`../conditional_node_field_graph_generator/decode_service.py`](../conditional_node_field_graph_generator/decode_service.py)
@@ -53,6 +57,18 @@ The maintained implementation is no longer just one monolithic orchestration fil
 
 - `fit_artifacts.py`
   owns fit-time artifact assembly: vectorizer fitting, encoded batches, label targets, supervision plan attachment, and cached training conditioning.
+
+- `supervision.py`
+  owns supervision-channel planning and verbose supervision-plan reporting.
+
+- `node_batch_builder.py`
+  owns padded `NodeGenerationBatch` assembly. It documents the node-order contract: vectorizer rows, graph node iteration, masks, labels, edge pairs, and decoded graph assembly must stay aligned.
+
+- `conditioning_sampler.py`
+  owns cached graph-conditioning row sampling and interpolation used by `sample(...)`.
+
+- `stream_fit.py`
+  owns stream-specific rejection checks, skip counters, frozen-schema batch preparation, and batch-preparation timeout handling used by `fit_from_stream(...)`.
 
 - `training_coordinator.py`
   owns Lightning training orchestration and callback construction, including checkpoint, metric, snapshot, and training-progress callbacks.

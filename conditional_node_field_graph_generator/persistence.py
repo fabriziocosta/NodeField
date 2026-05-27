@@ -11,9 +11,13 @@ from contextlib import nullcontext
 import dill as pickle
 
 from .encoding_pipeline import EncodingPipeline
+from .conditioning_sampler import ConditioningSampler
 from .naming_utils import sanitize_model_token
+from .node_batch_builder import NodeBatchBuilder
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
 from .runtime_utils import get_runtime_logger, run_with_fork_timeout
+from .stream_fit import StreamFitService
+from .supervision import SupervisionPlanner
 
 
 GRAPH_GENERATOR_PERSISTENCE_VERSION = 3
@@ -86,6 +90,14 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
             setattr(graph_generator, attr_name, default_value)
     if not hasattr(graph_generator, "encoding_pipeline_"):
         graph_generator.encoding_pipeline_ = EncodingPipeline(graph_generator)
+    if not hasattr(graph_generator, "supervision_planner_"):
+        graph_generator.supervision_planner_ = SupervisionPlanner(graph_generator)
+    if not hasattr(graph_generator, "node_batch_builder_"):
+        graph_generator.node_batch_builder_ = NodeBatchBuilder(graph_generator)
+    if not hasattr(graph_generator, "conditioning_sampler_"):
+        graph_generator.conditioning_sampler_ = ConditioningSampler(graph_generator)
+    if not hasattr(graph_generator, "stream_fit_service_"):
+        graph_generator.stream_fit_service_ = StreamFitService(graph_generator)
     graph_decoder = getattr(graph_generator, "graph_decoder", None)
     if graph_decoder is not None:
         if not hasattr(graph_decoder, "parallel_decode_timeout_seconds"):
