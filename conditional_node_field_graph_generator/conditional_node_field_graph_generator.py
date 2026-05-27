@@ -354,7 +354,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             stream_snapshot_every_n_batches: int = 10,
             stream_batch_timeout_seconds: Optional[float] = 30.0,
             stream_snapshot_timeout_seconds: Optional[float] = 30.0,
-            stream_pdf_timeout_seconds: Optional[float] = 15.0,
+            stream_pdf_timeout_seconds: Optional[float] = 60.0,
             stream_max_consecutive_stalls: int = 3,
             use_embedding_svd: bool = True,
             node_embedding_svd_dimension: int = 256,
@@ -2784,17 +2784,16 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> List[nx.Graph]:
         """Sample random graph-conditioning vectors and decode them into graphs."""
         self._require_fitted_for_generation()
-        if self.verbose:
-            verbose_log(self, f"Sampling {n_samples} graphs", level=1)
-            if interpolate_between_n_samples is not None:
-                verbose_log(
-                    self,
-                    "Sampling conditioning via stochastic interpolation over "
-                    f"{interpolate_between_n_samples} cached training embeddings per output.",
-                    level=1,
-                )
-            if desired_target is not None:
-                verbose_log(self, f"Using CFG target guidance: {desired_target} (scale={guidance_scale})", level=1)
+        self._log_sampling_request(n_samples, use_ilp_decoder=use_ilp_decoder)
+        if interpolate_between_n_samples is not None:
+            verbose_log(
+                self,
+                "Sampling conditioning via stochastic interpolation over "
+                f"{interpolate_between_n_samples} cached training embeddings per output.",
+                level=2,
+            )
+        if desired_target is not None:
+            verbose_log(self, f"Using CFG target guidance: {desired_target} (scale={guidance_scale})", level=2)
         sampled_conditioning = self._sample_conditions(
             n_samples,
             interpolate_between_n_samples=interpolate_between_n_samples,
@@ -2859,6 +2858,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             return None
         return exporter(output_path=output_path, window=window, alpha=alpha)
 
+    def _log_sampling_request(self, n_samples: int, *, use_ilp_decoder: bool) -> None:
+        decoder_label = "ILP" if use_ilp_decoder else "raw"
+        verbose_log(self, f"Sampling {n_samples} {decoder_label} graphs", level=2)
+
     @timeit
     def conditional_sample(
         self,
@@ -2910,20 +2913,19 @@ class ConditionalNodeFieldGraphGenerator(object):
         edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
-        if self.verbose:
-            verbose_log(self, f"Sampling {n_samples} graphs", level=1)
-            if interpolate_between_n_samples is not None:
-                verbose_log(
-                    self,
-                    "Sampling conditioning via stochastic interpolation over "
-                    f"{interpolate_between_n_samples} cached training embeddings per output.",
-                    level=1,
-                )
+        self._log_sampling_request(n_samples, use_ilp_decoder=use_ilp_decoder)
+        if interpolate_between_n_samples is not None:
             verbose_log(
                 self,
-                f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})",
-                level=1,
+                "Sampling conditioning via stochastic interpolation over "
+                f"{interpolate_between_n_samples} cached training embeddings per output.",
+                level=2,
             )
+        verbose_log(
+            self,
+            f"Using classifier guidance toward class(es): {desired_class} (scale={classifier_scale})",
+            level=2,
+        )
         sampled_conditioning = self._sample_conditions(
             n_samples,
             interpolate_between_n_samples=interpolate_between_n_samples,
@@ -2988,20 +2990,19 @@ class ConditionalNodeFieldGraphGenerator(object):
         edge_probability_threshold: Optional[float] = None,
     ) -> List[nx.Graph]:
         self._require_fitted_for_generation()
-        if self.verbose:
-            verbose_log(self, f"Sampling {n_samples} graphs", level=1)
-            if interpolate_between_n_samples is not None:
-                verbose_log(
-                    self,
-                    "Sampling conditioning via stochastic interpolation over "
-                    f"{interpolate_between_n_samples} cached training embeddings per output.",
-                    level=1,
-                )
+        self._log_sampling_request(n_samples, use_ilp_decoder=use_ilp_decoder)
+        if interpolate_between_n_samples is not None:
             verbose_log(
                 self,
-                f"Using regression guidance toward target(s): {desired_target} (scale={predictor_scale})",
-                level=1,
+                "Sampling conditioning via stochastic interpolation over "
+                f"{interpolate_between_n_samples} cached training embeddings per output.",
+                level=2,
             )
+        verbose_log(
+            self,
+            f"Using regression guidance toward target(s): {desired_target} (scale={predictor_scale})",
+            level=2,
+        )
         sampled_conditioning = self._sample_conditions(
             n_samples,
             interpolate_between_n_samples=interpolate_between_n_samples,

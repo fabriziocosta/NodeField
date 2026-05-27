@@ -67,7 +67,7 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
     if not hasattr(graph_generator, "stream_snapshot_timeout_seconds"):
         graph_generator.stream_snapshot_timeout_seconds = 30.0
     if not hasattr(graph_generator, "stream_pdf_timeout_seconds"):
-        graph_generator.stream_pdf_timeout_seconds = 15.0
+        graph_generator.stream_pdf_timeout_seconds = 60.0
     if not hasattr(graph_generator, "stream_max_consecutive_stalls"):
         graph_generator.stream_max_consecutive_stalls = 3
     if not hasattr(graph_generator, "use_embedding_svd"):
@@ -174,7 +174,13 @@ def _atomic_pickle_dump(obj, output_path: Path) -> None:
             temp_path.unlink(missing_ok=True)
 
 
-def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
+def save_graph_generator(
+    graph_generator,
+    model_name=None,
+    model_dir=None,
+    log=True,
+    save_loss_curves_pdf=True,
+):
     resolved_model_name = model_name if model_name is not None else getattr(graph_generator, "model_name", None)
     if resolved_model_name is None:
         logger.info("Skipping graph generator save because model_name is None.")
@@ -204,18 +210,19 @@ def save_graph_generator(graph_generator, model_name=None, model_dir=None, log=T
         except Exception as exc:
             logger.warning("Unable to save graph generator snapshot %s: %s", path, exc)
             return None
-        try:
-            run_with_fork_timeout(
-                _save_graph_generator_loss_curves_pdf_worker,
-                graph_generator,
-                str(pdf_path),
-                log,
-                timeout_seconds=pdf_timeout_seconds,
-            )
-        except TimeoutError:
-            logger.warning("Timed out while saving graph generator loss curves PDF %s; skipping PDF.", pdf_path)
-        except Exception as exc:
-            logger.warning("Unable to save graph generator loss curves PDF %s: %s", pdf_path, exc)
+        if save_loss_curves_pdf:
+            try:
+                run_with_fork_timeout(
+                    _save_graph_generator_loss_curves_pdf_worker,
+                    graph_generator,
+                    str(pdf_path),
+                    log,
+                    timeout_seconds=pdf_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning("Timed out while saving graph generator loss curves PDF %s; skipping PDF.", pdf_path)
+            except Exception as exc:
+                logger.warning("Unable to save graph generator loss curves PDF %s: %s", pdf_path, exc)
     if log:
         logger.info("Saved graph generator as: %s", filename)
         logger.info("%s", path)

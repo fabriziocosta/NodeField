@@ -180,6 +180,7 @@ class MetricsLogger(pl.callbacks.Callback):
                     f"{max(0.0, time.time() - float(started_at)):.2f}s",
                     level=2,
                 )
+        if verbose_level >= 1:
             interval = int(getattr(pl_module, "verbose_epoch_interval", 10))
             current_epoch = int(getattr(trainer, "current_epoch", -1)) + 1
             if interval > 0 and (current_epoch % interval == 0):
@@ -293,6 +294,11 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
         from .persistence import save_graph_generator
 
         epoch_label = int(getattr(trainer, "current_epoch", -1)) + 1
+        verbose_epoch_interval = int(getattr(pl_module, "verbose_epoch_interval", 10))
+        save_loss_curves_pdf = (
+            verbose_epoch_interval > 0
+            and (epoch_label % verbose_epoch_interval) == 0
+        )
         previous_fit_state = bool(getattr(owner, "is_fitted_", False))
         owner.is_fitted_ = True
         try:
@@ -303,6 +309,7 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
                 model_name=model_name,
                 model_dir=getattr(owner, "model_dir", None),
                 log=False,
+                save_loss_curves_pdf=save_loss_curves_pdf,
             )
             verbose_log(
                 owner,
@@ -337,6 +344,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         self.plot_kwargs = dict(plot_kwargs or {})
         self.plot_fn = plot_fn
         self.epoch_samples = []
+        self._pdf = None
 
     def _node_color(self, label):
         node_label_colors = self.plot_kwargs.get("node_label_colors")
@@ -472,9 +480,23 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
             positional_kwargs["title"] = title
         return self.plot_fn(graph, **positional_kwargs)
 
-    def _write_pdf(self):
+    def _ensure_pdf(self):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        n_rows = max(1, 2 * len(self.epoch_samples))
+        if self._pdf is None:
+            self._pdf = PdfPages(self.output_path)
+        return self._pdf
+
+    def _close_pdf(self):
+        if self._pdf is None:
+            return
+        try:
+            self._pdf.close()
+        finally:
+            self._pdf = None
+
+    def _write_pdf_page(self, epoch_record):
+        pdf = self._ensure_pdf()
+        n_rows = 2
         n_cols = max(1, self.n_samples)
         cell_size = self.plot_kwargs.get("cell_size", self.plot_kwargs.get("size", 3.0))
         try:
@@ -487,22 +509,36 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
             figsize=(size * n_cols, size * n_rows),
             squeeze=False,
         )
-        for row_idx, (epoch_label, mode_label, graphs) in enumerate(
-            row
-            for epoch_record in self.epoch_samples
-            for row in (
-                (epoch_record["epoch"], "direct", epoch_record["direct"]),
-                (epoch_record["epoch"], "ILP", epoch_record["ilp"]),
-            )
-        ):
-            for col_idx in range(n_cols):
-                graph = graphs[col_idx] if col_idx < len(graphs) else None
-                title = f"epoch {epoch_label} {mode_label} #{col_idx + 1}"
-                self._draw_graph(axes[row_idx, col_idx], graph, title)
-        fig.tight_layout()
-        with PdfPages(self.output_path) as pdf:
+        try:
+            for row_idx, (mode_label, graphs) in enumerate(
+                (
+                    ("raw", epoch_record["direct"]),
+                    ("ILP", epoch_record["ilp"]),
+                )
+            ):
+                for col_idx in range(n_cols):
+                    graph = graphs[col_idx] if col_idx < len(graphs) else None
+                    title = f"epoch {epoch_record['epoch']} {mode_label} #{col_idx + 1}"
+                    self._draw_graph(axes[row_idx, col_idx], graph, title)
+            fig.tight_layout()
             pdf.savefig(fig, bbox_inches="tight")
-        plt.close(fig)
+        finally:
+            plt.close(fig)
+
+    def on_fit_end(self, trainer, pl_module):
+        self._close_pdf()
+
+    def on_exception(self, trainer, pl_module, exception):
+        self._close_pdf()
+
+    def teardown(self, trainer, pl_module, stage):
+        self._close_pdf()
+
+    def __del__(self):
+        try:
+            self._close_pdf()
+        except Exception:
+            pass
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if getattr(trainer, "sanity_checking", False):
@@ -531,21 +567,20 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                 apply_feasibility_filtering=False,
                 use_ilp_decoder=True,
             )
-            self.epoch_samples.append(
-                {
-                    "epoch": epoch_label,
-                    "direct": list(direct_graphs),
-                    "ilp": list(ilp_graphs),
-                }
-            )
+            epoch_record = {
+                "epoch": epoch_label,
+                "direct": list(direct_graphs),
+                "ilp": list(ilp_graphs),
+            }
+            self.epoch_samples.append({"epoch": epoch_label})
             try:
-                self._write_pdf()
+                self._write_pdf_page(epoch_record)
             except Exception as exc:
                 logger.warning("Unable to render training sample PDF: %s", exc)
             else:
                 verbose_log(
                     owner,
-                    f"epoch {epoch_label}: wrote training sample PDF to {self.output_path}",
+                    f"epoch {epoch_label}: appended training sample PDF page to {self.output_path}",
                     level=2,
                 )
         finally:
@@ -586,6 +621,7 @@ class GraphGeneratorBatchSnapshotCallback(pl.callbacks.Callback):
                 model_name=model_name,
                 model_dir=getattr(owner, "model_dir", None),
                 log=False,
+                save_loss_curves_pdf=False,
             )
             verbose_log(
                 owner,
