@@ -4,6 +4,7 @@ from pathlib import Path
 import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 import pytest
 import torch
 import warnings
@@ -633,6 +634,31 @@ def test_training_sample_callback_uses_custom_plot_function(tmp_path):
     assert calls[0][0] is graph
     assert calls[0][1] == (500, 350)
     assert (tmp_path / "samples.pdf").exists()
+
+
+def test_training_sample_callback_displays_pil_image_result(tmp_path):
+    def _plot_fn(graph, size=None):
+        del graph
+        width, height = size
+        return Image.new("RGB", (width, height), color="white")
+
+    graph = nx.Graph()
+    graph.add_node(0, label="C")
+
+    callback = GraphGeneratorTrainingSampleCallback(
+        object(),
+        n_samples=1,
+        every_n_epochs=1,
+        output_path=tmp_path / "samples.pdf",
+        plot_kwargs={"size": (32, 24), "cell_size": 2.0},
+        plot_fn=_plot_fn,
+    )
+
+    callback.epoch_samples.append({"epoch": 1, "direct": [graph], "ilp": [graph]})
+    callback._write_pdf()
+
+    assert (tmp_path / "samples.pdf").exists()
+    assert (tmp_path / "samples.pdf").stat().st_size > 0
 
 
 def test_training_sample_callback_validates_configuration(tmp_path):

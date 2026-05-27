@@ -420,15 +420,21 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         result = self._call_plot_fn(ax=ax, graph=graph, title=title)
         if result is None:
             return
-        if hasattr(result, "__array__"):
-            ax.imshow(result)
-            ax.axis("off")
-            return
         if hasattr(result, "savefig"):
             logger.warning(
                 "Training sample plot function returned a matplotlib Figure; "
                 "draw on the provided axis or return an image array instead."
             )
+            return
+        try:
+            ax.imshow(result)
+        except TypeError:
+            logger.warning(
+                "Training sample plot function returned unsupported image type %s.",
+                type(result).__name__,
+            )
+            return
+        ax.axis("off")
 
     def _call_plot_fn(self, *, ax, graph, title):
         signature = inspect.signature(self.plot_fn)
