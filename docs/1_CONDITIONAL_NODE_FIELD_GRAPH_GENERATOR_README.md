@@ -5,7 +5,11 @@ This document explains the architecture of `ConditionalNodeFieldGraphGenerator`,
 Implementation anchors:
 
 - [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py)
+- [`../conditional_node_field_graph_generator/encoding_pipeline.py`](../conditional_node_field_graph_generator/encoding_pipeline.py)
+- [`../conditional_node_field_graph_generator/fit_artifacts.py`](../conditional_node_field_graph_generator/fit_artifacts.py)
 - [`../conditional_node_field_graph_generator/graph_generator_state.py`](../conditional_node_field_graph_generator/graph_generator_state.py)
+- [`../conditional_node_field_graph_generator/training_coordinator.py`](../conditional_node_field_graph_generator/training_coordinator.py)
+- [`../conditional_node_field_graph_generator/decode_service.py`](../conditional_node_field_graph_generator/decode_service.py)
 - [`../conditional_node_field_graph_generator/interpolation_utils.py`](../conditional_node_field_graph_generator/interpolation_utils.py)
 - [`../conditional_node_field_graph_generator/oracle_utils.py`](../conditional_node_field_graph_generator/oracle_utils.py)
 - [`../conditional_node_field_graph_generator/feasibility_utils.py`](../conditional_node_field_graph_generator/feasibility_utils.py)
@@ -44,6 +48,18 @@ The maintained implementation is no longer just one monolithic orchestration fil
 - `graph_generator_state.py`
   groups long-lived generator configuration and mutable streamed-fit counters into dedicated dataclasses.
 
+- `encoding_pipeline.py`
+  owns raw graph/node vectorizer transforms and optional `TruncatedSVD` compression before embeddings reach the neural model.
+
+- `fit_artifacts.py`
+  owns fit-time artifact assembly: vectorizer fitting, encoded batches, label targets, supervision plan attachment, and cached training conditioning.
+
+- `training_coordinator.py`
+  owns Lightning training orchestration and callback construction, including checkpoint, metric, snapshot, and training-progress callbacks.
+
+- `decode_service.py`
+  owns public decode/sampling control flow and feasibility retry behavior.
+
 - `interpolation_utils.py`
   owns graph-conditioning interpolation primitives such as magnitude-aware spherical interpolation and integer count interpolation.
 
@@ -56,7 +72,7 @@ The maintained implementation is no longer just one monolithic orchestration fil
 - `persistence.py`
   owns full-generator save/load behavior, schema checks, and saved-generator name resolution.
 
-The class is still large, but the support logic is now split into smaller modules with clearer ownership.
+The class is still large, but the support logic is now split into smaller modules with clearer ownership. These internal boundaries preserve the public `ConditionalNodeFieldGraphGenerator` API while isolating encoding, training coordination, decode flow, and feasibility/oracle policy.
 
 ## Main Components
 

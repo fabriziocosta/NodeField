@@ -1042,56 +1042,92 @@ class ConditionalNodeFieldGraphDecoder(object):
             if edge_probability_threshold is None
             else float(edge_probability_threshold)
         )
-        adj_mtx_list = []
-        for graph_idx, (existence_mask, prob_matrix) in enumerate(
-            zip(existence_masks, predicted_edge_probability_matrices)
-        ):
-            prob_matrix = np.asarray(prob_matrix, dtype=float)
-            n_nodes = int(len(existence_mask))
-            if (
-                prob_matrix.ndim != 2
-                or prob_matrix.shape[0] != n_nodes
-                or prob_matrix.shape[1] != n_nodes
-            ):
-                raise ValueError(
-                    "Direct edge decoding requires square edge-probability matrices aligned "
-                    f"with node predictions; received {prob_matrix.shape} for n_nodes={n_nodes}."
-                )
-            resolved_mask = self.resolve_node_presence_mask(
-                np.asarray(existence_mask, dtype=bool),
+        return [
+            self._decode_single_adjacency_matrix_direct(
+                existence_mask=existence_mask,
+                existence_scores=None if existence_scores is None else existence_scores[graph_idx],
+                prob_matrix=prob_matrix,
                 desired_node_count=(
                     None if desired_node_counts is None else int(desired_node_counts[graph_idx])
                 ),
-                node_existence_scores=None if existence_scores is None else np.asarray(
-                    existence_scores[graph_idx],
-                    dtype=float,
+                desired_edge_count=(
+                    None if desired_edge_counts is None else int(desired_edge_counts[graph_idx])
                 ),
+                threshold=threshold,
             )
-            active_indices = np.flatnonzero(resolved_mask)
-            adj_mtx = np.zeros((n_nodes, n_nodes), dtype=float)
-            edge_candidates = []
-            for local_i, i in enumerate(active_indices):
-                for j in active_indices[local_i + 1:]:
-                    probability = float((prob_matrix[i, j] + prob_matrix[j, i]) / 2.0)
-                    edge_candidates.append((probability, int(i), int(j)))
+            for graph_idx, (existence_mask, prob_matrix) in enumerate(
+                zip(existence_masks, predicted_edge_probability_matrices)
+            )
+        ]
 
-            if desired_edge_counts is not None:
-                target_edge_count = max(0, int(desired_edge_counts[graph_idx]))
-                target_edge_count = min(target_edge_count, len(edge_candidates))
-                edge_candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
-                selected_edges = edge_candidates[:target_edge_count]
-            else:
-                selected_edges = [
-                    (probability, i, j)
-                    for probability, i, j in edge_candidates
-                    if probability >= threshold
-                ]
+    @staticmethod
+    def _direct_edge_candidates(active_indices: np.ndarray, prob_matrix: np.ndarray):
+        edge_candidates = []
+        for local_i, i in enumerate(active_indices):
+            for j in active_indices[local_i + 1:]:
+                probability = float((prob_matrix[i, j] + prob_matrix[j, i]) / 2.0)
+                edge_candidates.append((probability, int(i), int(j)))
+        return edge_candidates
 
-            for _, i, j in selected_edges:
-                adj_mtx[i, j] = 1.0
-                adj_mtx[j, i] = 1.0
-            adj_mtx_list.append(adj_mtx)
-        return adj_mtx_list
+    @staticmethod
+    def _select_direct_edges_top_k(edge_candidates, desired_edge_count: int):
+        target_edge_count = max(0, int(desired_edge_count))
+        target_edge_count = min(target_edge_count, len(edge_candidates))
+        return sorted(edge_candidates, key=lambda item: (-item[0], item[1], item[2]))[:target_edge_count]
+
+    @staticmethod
+    def _select_direct_edges_by_threshold(edge_candidates, threshold: float):
+        threshold = float(threshold)
+        return [
+            (probability, i, j)
+            for probability, i, j in edge_candidates
+            if probability >= threshold
+        ]
+
+    @staticmethod
+    def _adjacency_from_selected_edges(n_nodes: int, selected_edges) -> np.ndarray:
+        adj_mtx = np.zeros((int(n_nodes), int(n_nodes)), dtype=float)
+        for _, i, j in selected_edges:
+            adj_mtx[i, j] = 1.0
+            adj_mtx[j, i] = 1.0
+        return adj_mtx
+
+    def _decode_single_adjacency_matrix_direct(
+        self,
+        *,
+        existence_mask: np.ndarray,
+        existence_scores: Optional[np.ndarray],
+        prob_matrix: np.ndarray,
+        desired_node_count: Optional[int],
+        desired_edge_count: Optional[int],
+        threshold: float,
+    ) -> np.ndarray:
+        prob_matrix = np.asarray(prob_matrix, dtype=float)
+        n_nodes = int(len(existence_mask))
+        if (
+            prob_matrix.ndim != 2
+            or prob_matrix.shape[0] != n_nodes
+            or prob_matrix.shape[1] != n_nodes
+        ):
+            raise ValueError(
+                "Direct edge decoding requires square edge-probability matrices aligned "
+                f"with node predictions; received {prob_matrix.shape} for n_nodes={n_nodes}."
+            )
+        resolved_mask = self.resolve_node_presence_mask(
+            np.asarray(existence_mask, dtype=bool),
+            desired_node_count=desired_node_count,
+            node_existence_scores=None if existence_scores is None else np.asarray(
+                existence_scores,
+                dtype=float,
+            ),
+        )
+        active_indices = np.flatnonzero(resolved_mask)
+        edge_candidates = self._direct_edge_candidates(active_indices, prob_matrix)
+        if desired_edge_count is not None:
+            selected_edges = self._select_direct_edges_top_k(edge_candidates, desired_edge_count)
+        else:
+            selected_edges = self._select_direct_edges_by_threshold(edge_candidates, threshold)
+        return self._adjacency_from_selected_edges(n_nodes, selected_edges)
 
     def decode_node_labels(
         self,

@@ -7,6 +7,7 @@ from conditional_node_field_graph_generator.graph_generator_state import (
     CheckpointPolicy,
     MetricsPolicy,
     TrainingPolicy,
+    TrainingProgressSamplingConfig,
 )
 from conditional_node_field_graph_generator.training_coordinator import TrainingCoordinator
 
@@ -80,11 +81,13 @@ def test_training_coordinator_builds_sample_progress_callback(monkeypatch, tmp_p
     owner = _Owner()
     sample_owner = types.SimpleNamespace(model_name=None)
     owner._graph_generator_snapshot_owner = sample_owner
-    owner._graph_generator_sample_progress_enabled = True
-    owner._graph_generator_sample_progress_n_samples = 4
-    owner._graph_generator_sample_progress_every_n_epochs = 2
-    owner._graph_generator_sample_progress_pdf_path = tmp_path / "samples.pdf"
-    owner._graph_generator_sample_progress_plot_kwargs = {"size": 2.0}
+    owner._graph_generator_sample_progress_config = TrainingProgressSamplingConfig(
+        enabled=True,
+        n_samples=4,
+        every_n_epochs=2,
+        output_path=tmp_path / "samples.pdf",
+        plot_kwargs={"size": 2.0},
+    )
     coordinator = TrainingCoordinator(owner)
 
     callback = coordinator._build_sample_progress_callback("epoch")

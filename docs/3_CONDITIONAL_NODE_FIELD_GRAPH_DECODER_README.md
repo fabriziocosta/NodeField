@@ -6,7 +6,8 @@ This document explains the reconstruction stage used by
 The key idea is:
 
 - the neural model predicts soft structural signals,
-- the decoder projects those signals into a discrete graph with a MILP,
+- the decoder projects those signals into a discrete graph with either a MILP
+  strategy or a direct neural-probability strategy,
 - an optional feasibility estimator can now participate twice:
   - inside the structural solve as a separation oracle through
     `violating_edge_sets(...)`,
@@ -59,8 +60,10 @@ At generation time the overall flow is:
 
 1. `ConditionalNodeFieldGraphGenerator.decode(...)` receives graph-level conditioning.
 2. The conditional node generator predicts a `GeneratedNodeBatch`.
-3. Structural decode solves a MILP from node existence, degree targets, and edge probabilities.
-4. If enabled, a feasibility oracle adds no-good cuts and the MILP is re-solved.
+3. Structural decode uses the ILP strategy by default, or the direct strategy
+   when `use_ilp_decoder=False`.
+4. If enabled and ILP decoding is active, a feasibility oracle adds no-good cuts
+   and the MILP is re-solved.
 5. Labels are attached to the final adjacency.
 6. If enabled, feasibility filtering accepts or rejects decoded graphs and may retry.
 
@@ -68,6 +71,11 @@ If `max_feasibility_seconds_per_sample` is set on the graph generator, this
 retry loop is evaluated per requested output with its own timeout budget. In
 that mode, the final fallback or rejection behavior is controlled by
 `feasibility_rejection_mode`.
+
+Direct structural decoding is intentionally factored as its own strategy: it
+selects top-k edges when desired edge counts are available and thresholded edges
+otherwise. It still uses the same node-presence resolution, edge-label assembly,
+and graph construction path as ILP decoding.
 
 ```mermaid
 flowchart LR

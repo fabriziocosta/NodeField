@@ -18,6 +18,7 @@ from conditional_node_field_graph_generator.persistence import (
     load_graph_generator,
     save_graph_generator,
 )
+from conditional_node_field_graph_generator.encoding_pipeline import EncodingPipeline
 from conditional_node_field_graph_generator.conditional_node_field_graph_generator import (
     DEFAULT_DUMMY_NODE_LABEL,
     ConditionalNodeFieldGraphDecoder,
@@ -860,12 +861,13 @@ def test_fit_forwards_resume_checkpoint_path_to_node_generator():
 def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
     class _ProgressNodeModel(_TrainableNodeModel):
         def fit(self, **kwargs):
+            config = self._graph_generator_sample_progress_config
             self.progress_state = {
-                "enabled": self._graph_generator_sample_progress_enabled,
-                "n_samples": self._graph_generator_sample_progress_n_samples,
-                "every": self._graph_generator_sample_progress_every_n_epochs,
-                "pdf_path": self._graph_generator_sample_progress_pdf_path,
-                "plot_kwargs": self._graph_generator_sample_progress_plot_kwargs,
+                "enabled": config.enabled,
+                "n_samples": config.n_samples,
+                "every": config.every_n_epochs,
+                "pdf_path": config.output_path,
+                "plot_kwargs": config.plot_kwargs,
             }
             super().fit(**kwargs)
 
@@ -901,7 +903,7 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
             "size": 2.5,
         },
     }
-    assert not hasattr(node_model, "_graph_generator_sample_progress_enabled")
+    assert not hasattr(node_model, "_graph_generator_sample_progress_config")
 
 
 def test_fit_rejects_invalid_training_sample_progress_options():
@@ -2296,6 +2298,23 @@ def test_load_graph_generator_accepts_unsanitized_model_name(tmp_path):
 
     assert isinstance(restored, ConditionalNodeFieldGraphGenerator)
     assert restored.model_name == "zinc-streaming-n64-s0-05-w2048-b256-e5"
+
+
+def test_load_graph_generator_restores_legacy_encoding_pipeline_defaults(tmp_path):
+    generator = _make_fitted_sampling_generator()
+    generator.model_name = "legacy-encoding"
+    if hasattr(generator, "encoding_pipeline_"):
+        delattr(generator, "encoding_pipeline_")
+    if hasattr(generator, "use_embedding_svd"):
+        delattr(generator, "use_embedding_svd")
+
+    save_graph_generator(generator, model_dir=tmp_path, log=False)
+
+    restored = load_graph_generator("legacy-encoding", model_dir=tmp_path)
+
+    assert restored.use_embedding_svd is False
+    assert isinstance(restored.encoding_pipeline_, EncodingPipeline)
+    assert restored.encoding_pipeline_.owner is restored
 
 
 def test_adj_mtx_to_targets_preserves_expected_locality_pairs():

@@ -71,6 +71,21 @@ class TrainingPolicy:
 
 
 @dataclass
+class TrainingProgressSamplingConfig:
+    enabled: bool = False
+    n_samples: int = 7
+    every_n_epochs: int = 1
+    output_path: Optional[str] = None
+    plot_kwargs: Optional[dict] = None
+
+    def __post_init__(self):
+        if int(self.n_samples) < 1:
+            raise ValueError("sample_training_progress_n_samples must be >= 1.")
+        if int(self.every_n_epochs) < 1:
+            raise ValueError("sample_training_progress_every_n_epochs must be >= 1.")
+
+
+@dataclass
 class StreamFitStats:
     seen: int = 0
     warmup_count: int = 0

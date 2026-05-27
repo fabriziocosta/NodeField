@@ -10,6 +10,7 @@ from contextlib import nullcontext
 
 import dill as pickle
 
+from .encoding_pipeline import EncodingPipeline
 from .naming_utils import sanitize_model_token
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
 from .runtime_utils import get_runtime_logger, run_with_fork_timeout
@@ -83,6 +84,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
     ):
         if not hasattr(graph_generator, attr_name):
             setattr(graph_generator, attr_name, default_value)
+    if not hasattr(graph_generator, "encoding_pipeline_"):
+        graph_generator.encoding_pipeline_ = EncodingPipeline(graph_generator)
     graph_decoder = getattr(graph_generator, "graph_decoder", None)
     if graph_decoder is not None:
         if not hasattr(graph_decoder, "parallel_decode_timeout_seconds"):

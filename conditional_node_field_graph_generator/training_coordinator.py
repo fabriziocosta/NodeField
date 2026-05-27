@@ -8,7 +8,12 @@ from typing import Any, Optional
 import torch
 from torch.utils.data import DataLoader
 
-from .graph_generator_state import CheckpointPolicy, MetricsPolicy, TrainingPolicy
+from .graph_generator_state import (
+    CheckpointPolicy,
+    MetricsPolicy,
+    TrainingPolicy,
+    TrainingProgressSamplingConfig,
+)
 from .metrics_collection import (
     GraphGeneratorBatchAndEpochSnapshotCallback,
     GraphGeneratorBatchSnapshotCallback,
@@ -45,22 +50,30 @@ class TrainingCoordinator:
     def _build_sample_progress_callback(self, snapshot_frequency: Optional[str]):
         if snapshot_frequency != "epoch":
             return None
-        if not bool(getattr(self.owner, "_graph_generator_sample_progress_enabled", False)):
+        config = getattr(self.owner, "_graph_generator_sample_progress_config", None)
+        if config is None:
+            config = TrainingProgressSamplingConfig(
+                enabled=bool(getattr(self.owner, "_graph_generator_sample_progress_enabled", False)),
+                n_samples=int(getattr(self.owner, "_graph_generator_sample_progress_n_samples", 7)),
+                every_n_epochs=int(
+                    getattr(self.owner, "_graph_generator_sample_progress_every_n_epochs", 1)
+                ),
+                output_path=getattr(self.owner, "_graph_generator_sample_progress_pdf_path", None),
+                plot_kwargs=getattr(self.owner, "_graph_generator_sample_progress_plot_kwargs", None),
+            )
+        if not bool(config.enabled):
             return None
         snapshot_owner = getattr(self.owner, "_graph_generator_snapshot_owner", None)
         if snapshot_owner is None:
             return None
-        output_path = getattr(self.owner, "_graph_generator_sample_progress_pdf_path", None)
-        if output_path is None:
+        if config.output_path is None:
             return None
         return GraphGeneratorTrainingSampleCallback(
             snapshot_owner,
-            n_samples=int(getattr(self.owner, "_graph_generator_sample_progress_n_samples", 7)),
-            every_n_epochs=int(
-                getattr(self.owner, "_graph_generator_sample_progress_every_n_epochs", 1)
-            ),
-            output_path=output_path,
-            plot_kwargs=getattr(self.owner, "_graph_generator_sample_progress_plot_kwargs", None),
+            n_samples=int(config.n_samples),
+            every_n_epochs=int(config.every_n_epochs),
+            output_path=config.output_path,
+            plot_kwargs=config.plot_kwargs,
         )
 
     def run_training(
