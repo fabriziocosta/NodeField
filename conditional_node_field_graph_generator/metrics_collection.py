@@ -2,7 +2,9 @@
 
 import hashlib
 import inspect
+import os
 from pathlib import Path
+import tempfile
 from typing import Callable, Dict, Mapping
 import time
 
@@ -21,7 +23,12 @@ class MetricsLogger(pl.callbacks.Callback):
     """Collect end-of-epoch metrics into the module's history lists."""
 
     def on_fit_start(self, trainer, pl_module):
-        pl_module._fit_start_time = time.time()
+        now = time.time()
+        pl_module._fit_start_time = now
+        pl_module._epoch_started_at = None
+        pl_module._epoch_duration_seconds = []
+        pl_module._last_eta_seconds = None
+        pl_module._last_eta_logged_at = None
         pl_module._ema_metrics = {}
 
     @staticmethod
@@ -110,6 +117,21 @@ class MetricsLogger(pl.callbacks.Callback):
             trainer.logged_metrics[ema_key] = ema_tensor
         return float(ema_value)
 
+    @staticmethod
+    def _recent_epoch_seconds(pl_module) -> float | None:
+        durations = getattr(pl_module, "_epoch_duration_seconds", [])
+        if not durations:
+            return None
+        window = durations[-min(5, len(durations)):]
+        ordered = sorted(float(value) for value in window)
+        middle = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[middle]
+        return 0.5 * (ordered[middle - 1] + ordered[middle])
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        pl_module._epoch_started_at = time.time()
+
     def on_train_epoch_end(self, trainer, pl_module):
         m = trainer.callback_metrics
         pl_module.train_losses.append(m.get("train_total", torch.tensor(0.0)).item())
@@ -138,6 +160,15 @@ class MetricsLogger(pl.callbacks.Callback):
         verbose_log(pl_module, f"epoch {current_epoch}: starting validation", level=2)
 
     def on_validation_epoch_end(self, trainer, pl_module):
+        now = time.time()
+        epoch_started_at = getattr(pl_module, "_epoch_started_at", None)
+        if epoch_started_at is not None:
+            durations = getattr(pl_module, "_epoch_duration_seconds", None)
+            if durations is None:
+                durations = []
+                pl_module._epoch_duration_seconds = durations
+            durations.append(max(0.0, now - float(epoch_started_at)))
+            del durations[:-20]
         m = trainer.callback_metrics
         pl_module.val_losses.append(m.get("val_total", torch.tensor(0.0)).item())
         pl_module.val_deg_ce.append(m.get("val_deg_ce", torch.tensor(0.0)).item())
@@ -187,19 +218,32 @@ class MetricsLogger(pl.callbacks.Callback):
                 train_total, train_components, train_dominant, train_dominant_share = self._component_summary(pl_module, m, "train")
                 val_total, val_components, val_dominant, val_dominant_share = self._component_summary(pl_module, m, "val")
                 max_epochs = getattr(trainer, "max_epochs", None)
-                fit_start_time = getattr(pl_module, "_fit_start_time", None)
                 eta_label = None
                 if (
                     isinstance(max_epochs, int)
                     and max_epochs > 0
-                    and fit_start_time is not None
                     and current_epoch > 0
                 ):
-                    elapsed_seconds = max(0.0, time.time() - float(fit_start_time))
-                    average_epoch_seconds = elapsed_seconds / float(current_epoch)
                     remaining_epochs = max(0, max_epochs - current_epoch)
-                    eta_seconds = remaining_epochs * average_epoch_seconds
-                    eta_label = self._format_duration(eta_seconds)
+                    recent_epoch_seconds = self._recent_epoch_seconds(pl_module)
+                    if recent_epoch_seconds is None:
+                        fit_start_time = getattr(pl_module, "_fit_start_time", None)
+                        if fit_start_time is not None:
+                            elapsed_seconds = max(0.0, now - float(fit_start_time))
+                            recent_epoch_seconds = elapsed_seconds / float(current_epoch)
+                    if recent_epoch_seconds is not None:
+                        eta_seconds = remaining_epochs * float(recent_epoch_seconds)
+                        previous_eta = getattr(pl_module, "_last_eta_seconds", None)
+                        previous_eta_logged_at = getattr(pl_module, "_last_eta_logged_at", None)
+                        if previous_eta is not None and previous_eta_logged_at is not None:
+                            elapsed_since_eta = max(0.0, now - float(previous_eta_logged_at))
+                            eta_seconds = min(
+                                eta_seconds,
+                                max(0.0, float(previous_eta) - elapsed_since_eta),
+                            )
+                        pl_module._last_eta_seconds = eta_seconds
+                        pl_module._last_eta_logged_at = now
+                        eta_label = self._format_duration(eta_seconds)
                 epoch_label = (
                     f"Epoch {current_epoch}/{max_epochs}"
                     if isinstance(max_epochs, int) and max_epochs > 0
@@ -344,7 +388,6 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         self.plot_kwargs = dict(plot_kwargs or {})
         self.plot_fn = plot_fn
         self.epoch_samples = []
-        self._pdf = None
 
     def _node_color(self, label):
         node_label_colors = self.plot_kwargs.get("node_label_colors")
@@ -480,22 +523,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
             positional_kwargs["title"] = title
         return self.plot_fn(graph, **positional_kwargs)
 
-    def _ensure_pdf(self):
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        if self._pdf is None:
-            self._pdf = PdfPages(self.output_path)
-        return self._pdf
-
-    def _close_pdf(self):
-        if self._pdf is None:
-            return
-        try:
-            self._pdf.close()
-        finally:
-            self._pdf = None
-
-    def _write_pdf_page(self, epoch_record):
-        pdf = self._ensure_pdf()
+    def _render_pdf_page(self, epoch_record, page_path: Path):
         n_rows = 2
         n_cols = max(1, self.n_samples)
         cell_size = self.plot_kwargs.get("cell_size", self.plot_kwargs.get("size", 3.0))
@@ -521,24 +549,61 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                     title = f"epoch {epoch_record['epoch']} {mode_label} #{col_idx + 1}"
                     self._draw_graph(axes[row_idx, col_idx], graph, title)
             fig.tight_layout()
-            pdf.savefig(fig, bbox_inches="tight")
+            with PdfPages(page_path) as pdf:
+                pdf.savefig(fig, bbox_inches="tight")
         finally:
             plt.close(fig)
 
-    def on_fit_end(self, trainer, pl_module):
-        self._close_pdf()
-
-    def on_exception(self, trainer, pl_module, exception):
-        self._close_pdf()
-
-    def teardown(self, trainer, pl_module, stage):
-        self._close_pdf()
-
-    def __del__(self):
+    def _append_pdf_page(self, page_path: Path):
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.output_path.exists() or self.output_path.stat().st_size == 0:
+            os.replace(page_path, self.output_path)
+            return
         try:
-            self._close_pdf()
-        except Exception:
-            pass
+            from pypdf import PdfReader, PdfWriter
+        except ModuleNotFoundError:
+            logger.warning(
+                "pypdf is unavailable; replacing training sample PDF with the latest page."
+            )
+            os.replace(page_path, self.output_path)
+            return
+
+        writer = PdfWriter()
+        for source_path in (self.output_path, page_path):
+            reader = PdfReader(str(source_path))
+            for page in reader.pages:
+                writer.add_page(page)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=self.output_path.suffix,
+            prefix=f".{self.output_path.stem}.",
+            dir=self.output_path.parent,
+            delete=False,
+        ) as handle:
+            merged_path = Path(handle.name)
+            writer.write(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(merged_path, self.output_path)
+
+    def _write_pdf_page(self, epoch_record):
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                suffix=self.output_path.suffix,
+                prefix=f".{self.output_path.stem}.page.",
+                dir=self.output_path.parent,
+                delete=False,
+            ) as handle:
+                page_path = Path(handle.name)
+            self._render_pdf_page(epoch_record, page_path)
+            self._append_pdf_page(page_path)
+            page_path = None
+        finally:
+            if page_path is not None:
+                page_path.unlink(missing_ok=True)
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if getattr(trainer, "sanity_checking", False):
