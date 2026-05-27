@@ -43,6 +43,7 @@ def test_generate_artificial_dataset_saves_config_and_prints_filename(
 
     assert match is not None
     assert (tmp_path / match.group(1)).exists()
+    assert match.group(1) == "artificial-cycle-path-star-n1-c3-4-p2-r2x1-2-na1-2.yaml"
 
 
 def test_generate_artificial_dataset_loads_saved_config(tmp_path, monkeypatch):
@@ -58,9 +59,10 @@ def test_generate_artificial_dataset_loads_saved_config(tmp_path, monkeypatch):
         edge_alphabet_size=(1, 2),
         seed=11,
     )
-    config_path = next(tmp_path.glob("artificial_dataset_config_*.yaml"))
+    config_path = tmp_path / "artificial-cycle-path-star-n3-c3-5-p0-2-r2x1-2-na1-2-ea1-2.yaml"
+    assert config_path.exists()
 
     loaded_graphs = generate_artificial_dataset(load_from_file=config_path, save_config=False)
 
     assert _graphs_equal(loaded_graphs, expected_graphs)
-    assert len(list(tmp_path.glob("artificial_dataset_config_*.yaml"))) == 1
+    assert len(list(tmp_path.glob("artificial-cycle-path-star-*.yaml"))) == 1

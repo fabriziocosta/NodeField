@@ -334,6 +334,9 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
         oracle_use_node_label_cuts=True,
         oracle_use_edge_label_cuts=True,
         sparse_supervision_mask_ratio=0.4,
+        use_embedding_svd=True,
+        node_embedding_svd_dimension=123,
+        graph_embedding_svd_dimension=45,
     )
 
     assert default_generator.feasibility_oracle_candidates_per_attempt == 2
@@ -343,6 +346,9 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
     assert overridden_generator.max_oracle_iterations == 3
     assert overridden_generator.oracle_use_node_label_cuts is True
     assert overridden_generator.oracle_use_edge_label_cuts is True
+    assert overridden_generator.use_embedding_svd is True
+    assert overridden_generator.node_embedding_svd_dimension == 123
+    assert overridden_generator.graph_embedding_svd_dimension == 45
     assert (
         overridden_generator.conditional_node_generator_model.sparse_supervision_mask_ratio
         == pytest.approx(0.4)

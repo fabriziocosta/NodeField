@@ -12,6 +12,8 @@ import threading
 import time
 import pulp
 import dill as pickle
+from scipy import sparse
+from sklearn.decomposition import TruncatedSVD
 from .runtime_utils import get_runtime_logger, run_with_fork_timeout, timeit, verbose_log
 from typing import List, Tuple, Optional, Any, Sequence, Dict, Union, FrozenSet, Iterable, Callable
 from .conditional_node_field_generator import (
@@ -366,6 +368,9 @@ class ConditionalNodeFieldGraphGenerator(object):
             stream_snapshot_timeout_seconds: Optional[float] = 30.0,
             stream_pdf_timeout_seconds: Optional[float] = 15.0,
             stream_max_consecutive_stalls: int = 3,
+            use_embedding_svd: bool = True,
+            node_embedding_svd_dimension: int = 256,
+            graph_embedding_svd_dimension: Optional[int] = None,
             ) -> None:
         """Store the collaborating components and configuration used for the pipeline.
 
@@ -405,6 +410,21 @@ class ConditionalNodeFieldGraphGenerator(object):
         """
         self.graph_vectorizer = graph_vectorizer
         self.node_graph_vectorizer = node_graph_vectorizer
+        self.use_embedding_svd = bool(use_embedding_svd)
+        self.node_embedding_svd_dimension = int(node_embedding_svd_dimension)
+        self.graph_embedding_svd_dimension = (
+            None
+            if graph_embedding_svd_dimension is None
+            else int(graph_embedding_svd_dimension)
+        )
+        self.node_embedding_svd_ = None
+        self.graph_embedding_svd_ = None
+        self.node_embedding_svd_fitted_ = False
+        self.graph_embedding_svd_fitted_ = False
+        self.node_embedding_raw_dimension_ = None
+        self.graph_embedding_raw_dimension_ = None
+        self.node_embedding_effective_dimension_ = None
+        self.graph_embedding_effective_dimension_ = None
         self.conditional_node_generator_model = conditional_node_generator_model
         self.graph_decoder = graph_decoder
         self.verbose = verbose
@@ -1514,6 +1534,9 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> Dict[str, Any]:
         self.graph_vectorizer.fit(graphs)
         self.node_graph_vectorizer.fit(graphs)
+        raw_node_embeddings_list = self._raw_node_encode(graphs)
+        raw_graph_embeddings = self._raw_graph_encode(graphs)
+        self._fit_embedding_svds(raw_node_embeddings_list, raw_graph_embeddings)
         if self.feasibility_estimator is not None:
             verbose_log(self, f"Fitting feasibility estimator on {len(graphs)} graphs")
             feasibility_started_at = time.time()
@@ -1534,7 +1557,11 @@ class ConditionalNodeFieldGraphGenerator(object):
         if self.conditional_node_generator_model is not None:
             setattr(self.conditional_node_generator_model, "supervision_plan_", supervision_plan)
 
-        node_embeddings_list, graph_conditioning = self.encode(graphs)
+        node_embeddings_list = self._compress_node_embeddings(raw_node_embeddings_list)
+        graph_conditioning = self._build_graph_conditioning_from_raw(
+            graphs,
+            raw_graph_embeddings,
+        )
         self.training_graph_conditioning_ = GraphConditioningBatch(
             graph_embeddings=np.asarray(graph_conditioning.graph_embeddings),
             node_counts=np.asarray(graph_conditioning.node_counts, dtype=np.int64),
@@ -2046,35 +2073,13 @@ class ConditionalNodeFieldGraphGenerator(object):
                 f"(got {len(targets)} targets for {len(graphs)} graphs)."
             )
 
-        # Fit vectorizers
-        self.graph_vectorizer.fit(graphs)
-        self.node_graph_vectorizer.fit(graphs)
-        if self.feasibility_estimator is not None:
-            verbose_log(self, f"Fitting feasibility estimator on {len(graphs)} graphs")
-            feasibility_started_at = time.time()
-            self.feasibility_estimator.fit(graphs)
-            verbose_log(
-                self,
-                "Finished fitting feasibility estimator in "
-                f"{_format_minutes_seconds(time.time() - feasibility_started_at)}",
-            )
-        node_label_targets = self.graphs_to_node_label_targets(graphs)
-        edge_label_targets, edge_label_pairs = self.graphs_to_edge_label_targets(graphs)
-        supervision_plan = self._build_supervision_plan(
-            graphs,
-            node_label_targets=node_label_targets,
-            edge_label_targets=edge_label_targets,
-        )
-        self.supervision_plan_ = supervision_plan
-        if self.conditional_node_generator_model is not None:
-            setattr(self.conditional_node_generator_model, "supervision_plan_", supervision_plan)
-
-        node_embeddings_list, graph_conditioning = self.encode(graphs)
-        self.training_graph_conditioning_ = GraphConditioningBatch(
-            graph_embeddings=np.asarray(graph_conditioning.graph_embeddings),
-            node_counts=np.asarray(graph_conditioning.node_counts, dtype=np.int64),
-            edge_counts=np.asarray(graph_conditioning.edge_counts, dtype=np.int64),
-        )
+        artifacts = self._prepare_fit_artifacts(graphs, targets=targets)
+        node_label_targets = artifacts["node_label_targets"]
+        edge_label_targets = artifacts["edge_label_targets"]
+        edge_label_pairs = artifacts["edge_label_pairs"]
+        supervision_plan = artifacts["supervision_plan"]
+        node_embeddings_list = artifacts["node_embeddings_list"]
+        graph_conditioning = artifacts["graph_conditioning"]
 
         if train_node_generator:
             edge_pairs_for_cond_gen = None
@@ -2316,19 +2321,125 @@ class ConditionalNodeFieldGraphGenerator(object):
             noise_scale=noise_scale,
         )
 
-    @timeit
-    def node_encode(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
-        """Encode each input graph into a per-node embedding matrix."""
+    @staticmethod
+    def _to_numpy_2d(matrix) -> np.ndarray:
+        if sparse.issparse(matrix):
+            return np.asarray(matrix.toarray(), dtype=float)
+        array = np.asarray(matrix, dtype=float)
+        if array.ndim == 1:
+            array = array.reshape(1, -1)
+        return array
+
+    @staticmethod
+    def _stack_embedding_rows(embeddings: Sequence[Any]):
+        if not embeddings:
+            return np.zeros((0, 0), dtype=float)
+        if any(sparse.issparse(embedding) for embedding in embeddings):
+            return sparse.vstack(
+                [
+                    embedding if sparse.issparse(embedding) else sparse.csr_matrix(embedding)
+                    for embedding in embeddings
+                ],
+                format="csr",
+            )
+        return np.vstack([np.asarray(embedding, dtype=float) for embedding in embeddings])
+
+    @staticmethod
+    def _feature_dimension(matrix) -> int:
+        if matrix is None:
+            return 0
+        if len(matrix.shape) != 2:
+            matrix = np.asarray(matrix)
+            if matrix.ndim == 1:
+                return 1
+        return int(matrix.shape[1])
+
+    def _resolved_graph_embedding_svd_dimension(self) -> int:
+        if self.graph_embedding_svd_dimension is None:
+            return int(self.node_embedding_svd_dimension)
+        return int(self.graph_embedding_svd_dimension)
+
+    def _raw_node_encode(self, graphs: List[nx.Graph]) -> List[Any]:
         if int(self.verbose) >= 3:
             verbose_log(self, f"Node encoding {len(graphs)} graphs", level=3)
         return self.node_graph_vectorizer.transform(graphs)
 
-    @timeit
-    def graph_encode(self, graphs: List[nx.Graph]) -> GraphConditioningBatch:
-        """Encode graphs into graph-level conditioning vectors plus node and edge counts."""
+    def _raw_graph_encode(self, graphs: List[nx.Graph]):
         if int(self.verbose) >= 3:
             verbose_log(self, f"Encoding {len(graphs)} graphs", level=3)
-        graph_embeddings = np.asarray(self.graph_vectorizer.transform(graphs))
+        return self.graph_vectorizer.transform(graphs)
+
+    def _fit_single_embedding_svd(self, matrix, requested_dimension: int, label: str):
+        raw_dimension = self._feature_dimension(matrix)
+        requested_dimension = int(requested_dimension)
+        if not self.use_embedding_svd:
+            return None, raw_dimension, raw_dimension, False
+        if requested_dimension < 1:
+            raise ValueError(f"{label}_embedding_svd_dimension must be >= 1.")
+        if raw_dimension <= 0:
+            return None, raw_dimension, raw_dimension, False
+        if requested_dimension >= raw_dimension:
+            verbose_log(
+                self,
+                f"Skipping {label} embedding SVD: requested dimension "
+                f"{requested_dimension} >= raw dimension {raw_dimension}.",
+                level=1,
+            )
+            return None, raw_dimension, raw_dimension, False
+        svd = TruncatedSVD(n_components=requested_dimension, random_state=0)
+        svd.fit(matrix)
+        verbose_log(
+            self,
+            f"Fitted {label} embedding SVD: {raw_dimension} -> {requested_dimension}.",
+            level=1,
+        )
+        return svd, raw_dimension, requested_dimension, True
+
+    def _fit_embedding_svds(self, raw_node_embeddings_list: List[Any], raw_graph_embeddings) -> None:
+        node_matrix = self._stack_embedding_rows(raw_node_embeddings_list)
+        graph_matrix = raw_graph_embeddings
+        if sparse.issparse(graph_matrix):
+            graph_matrix = graph_matrix.tocsr()
+        else:
+            graph_matrix = np.asarray(graph_matrix, dtype=float)
+            if graph_matrix.ndim == 1:
+                graph_matrix = graph_matrix.reshape(1, -1)
+        (
+            self.node_embedding_svd_,
+            self.node_embedding_raw_dimension_,
+            self.node_embedding_effective_dimension_,
+            self.node_embedding_svd_fitted_,
+        ) = self._fit_single_embedding_svd(
+            node_matrix,
+            int(self.node_embedding_svd_dimension),
+            "node",
+        )
+        (
+            self.graph_embedding_svd_,
+            self.graph_embedding_raw_dimension_,
+            self.graph_embedding_effective_dimension_,
+            self.graph_embedding_svd_fitted_,
+        ) = self._fit_single_embedding_svd(
+            graph_matrix,
+            self._resolved_graph_embedding_svd_dimension(),
+            "graph",
+        )
+
+    def _compress_node_embeddings(self, raw_node_embeddings_list: List[Any]) -> List[np.ndarray]:
+        if not bool(getattr(self, "node_embedding_svd_fitted_", False)):
+            return [self._to_numpy_2d(embedding) for embedding in raw_node_embeddings_list]
+        return [
+            np.asarray(self.node_embedding_svd_.transform(embedding), dtype=float)
+            for embedding in raw_node_embeddings_list
+        ]
+
+    def _compress_graph_embeddings(self, raw_graph_embeddings) -> np.ndarray:
+        if not bool(getattr(self, "graph_embedding_svd_fitted_", False)):
+            return self._to_numpy_2d(raw_graph_embeddings)
+        return np.asarray(self.graph_embedding_svd_.transform(raw_graph_embeddings), dtype=float)
+
+    def _build_graph_conditioning_from_raw(self, graphs: List[nx.Graph], raw_graph_embeddings) -> GraphConditioningBatch:
+        graph_embeddings = self._compress_graph_embeddings(raw_graph_embeddings)
         node_counts = np.asarray([graph.number_of_nodes() for graph in graphs], dtype=np.int64)
         edge_counts = np.asarray([graph.number_of_edges() for graph in graphs], dtype=np.int64)
         return GraphConditioningBatch(
@@ -2337,9 +2448,27 @@ class ConditionalNodeFieldGraphGenerator(object):
             edge_counts=edge_counts,
         )
 
+    @timeit
+    def node_encode(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
+        """Encode each input graph into a per-node embedding matrix."""
+        return self._compress_node_embeddings(self._raw_node_encode(graphs))
+
+    @timeit
+    def graph_encode(self, graphs: List[nx.Graph]) -> GraphConditioningBatch:
+        """Encode graphs into graph-level conditioning vectors plus node and edge counts."""
+        return self._build_graph_conditioning_from_raw(
+            graphs,
+            self._raw_graph_encode(graphs),
+        )
+
     def encode(self, graphs: List[nx.Graph]) -> Tuple[List[np.ndarray], GraphConditioningBatch]:
         """Return both node embeddings and graph-level conditioning for the same graph batch."""
-        return self.node_encode(graphs), self.graph_encode(graphs)
+        raw_node_embeddings_list = self._raw_node_encode(graphs)
+        raw_graph_embeddings = self._raw_graph_encode(graphs)
+        return (
+            self._compress_node_embeddings(raw_node_embeddings_list),
+            self._build_graph_conditioning_from_raw(graphs, raw_graph_embeddings),
+        )
 
     def graphs_to_node_label_targets(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
         """Extract node labels in graph iteration order, or emit a shared dummy label when unlabeled."""

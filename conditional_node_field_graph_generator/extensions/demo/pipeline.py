@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import inspect
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 import warnings
@@ -950,6 +951,9 @@ def build_graph_generator(
     model_name=None,
     model_dir=None,
     stream_snapshot_every_n_batches=10,
+    use_embedding_svd=True,
+    node_embedding_svd_dimension=256,
+    graph_embedding_svd_dimension=None,
 ):
     if nbits is not None:
         if node_vectorizer_nbits is None:
@@ -1130,6 +1134,9 @@ def build_graph_generator(
         model_name=model_name,
         model_dir=str(model_dir) if model_dir is not None else None,
         stream_snapshot_every_n_batches=stream_snapshot_every_n_batches,
+        use_embedding_svd=use_embedding_svd,
+        node_embedding_svd_dimension=node_embedding_svd_dimension,
+        graph_embedding_svd_dimension=graph_embedding_svd_dimension,
         verbose=verbose,
     )
 
@@ -1154,16 +1161,27 @@ def fit_graph_generator(
         resolved_ckpt_path = find_latest_checkpoint(checkpoint_root=checkpoint_root)
     describe_resume_checkpoint(resolved_ckpt_path)
     try:
-        graph_generator.fit(
-            train_graphs,
-            targets=targets,
-            ckpt_path=resolved_ckpt_path,
-            sample_training_progress=sample_training_progress,
-            sample_training_progress_n_samples=sample_training_progress_n_samples,
-            sample_training_progress_every_n_epochs=sample_training_progress_every_n_epochs,
-            sample_training_progress_pdf_path=sample_training_progress_pdf_path,
-            sample_training_progress_plot_kwargs=sample_training_progress_plot_kwargs,
+        fit_kwargs = {
+            "targets": targets,
+            "ckpt_path": resolved_ckpt_path,
+            "sample_training_progress": sample_training_progress,
+            "sample_training_progress_n_samples": sample_training_progress_n_samples,
+            "sample_training_progress_every_n_epochs": sample_training_progress_every_n_epochs,
+            "sample_training_progress_pdf_path": sample_training_progress_pdf_path,
+            "sample_training_progress_plot_kwargs": sample_training_progress_plot_kwargs,
+        }
+        fit_signature = inspect.signature(graph_generator.fit)
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in fit_signature.parameters.values()
         )
+        if not accepts_kwargs:
+            fit_kwargs = {
+                name: value
+                for name, value in fit_kwargs.items()
+                if name in fit_signature.parameters
+            }
+        graph_generator.fit(train_graphs, **fit_kwargs)
     except RuntimeError as exc:
         if resolved_ckpt_path is None or not _is_incompatible_resume_error(exc):
             raise

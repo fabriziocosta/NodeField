@@ -2,13 +2,13 @@
 
 import json
 import random
-from datetime import datetime
 from pathlib import Path
 
 import networkx as nx
 import numpy as np
 from toolz import curry
 
+from ...naming_utils import sanitize_model_token
 from .primitives import make_graph_generator
 
 
@@ -362,9 +362,43 @@ def _read_artificial_dataset_config(path):
     return config
 
 
+def _format_config_crumb(value):
+    value = _normalize_config_value(value)
+    if isinstance(value, list):
+        return "-".join(_format_config_crumb(item) for item in value)
+    if isinstance(value, tuple):
+        return "-".join(_format_config_crumb(item) for item in value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _artificial_dataset_config_stem(config):
+    crumbs = [
+        "artificial-cycle-path-star",
+        f"n{_format_config_crumb(config['num_graphs'])}",
+        f"c{_format_config_crumb(config['cycle_length'])}",
+        f"p{_format_config_crumb(config['path_length'])}",
+        (
+            f"r{_format_config_crumb(config['num_rays'])}"
+            f"x{_format_config_crumb(config['ray_length'])}"
+        ),
+    ]
+    if config.get("node_alphabet_size", 1) != 1:
+        crumbs.append(f"na{_format_config_crumb(config['node_alphabet_size'])}")
+    if config.get("edge_alphabet_size", 1) != 1:
+        crumbs.append(f"ea{_format_config_crumb(config['edge_alphabet_size'])}")
+    if config.get("node_alphabet_kind", "int") != "int":
+        crumbs.append(f"nl{_format_config_crumb(config['node_alphabet_kind'])}")
+    if config.get("edge_alphabet_kind", "int") != "int":
+        crumbs.append(f"el{_format_config_crumb(config['edge_alphabet_kind'])}")
+    if not bool(config.get("component_specific_alphabets", True)):
+        crumbs.append("shared-alphabet")
+    return sanitize_model_token("-".join(crumbs))
+
+
 def _write_artificial_dataset_config(config):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = Path(f"artificial_dataset_config_{timestamp}.yaml")
+    path = Path(f"{_artificial_dataset_config_stem(config)}.yaml")
     path.write_text(_dump_simple_yaml(config), encoding="utf-8")
     print(f"Saved artificial dataset config: {path}")
     return path

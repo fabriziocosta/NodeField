@@ -227,12 +227,14 @@ flowchart TD
     A[Training Graphs] --> B[Fit Vectorizers]
     A --> C[Inspect Labels]
     C --> D[Build Supervision Plan]
-    B --> E[Encode Graph Context]
-    B --> F[Encode Node Embeddings]
+    B --> E[Raw Graph Context]
+    B --> F[Raw Node Embeddings]
+    E --> S[Optional TruncatedSVD Compression]
+    F --> S
+    S --> H[GraphConditioningBatch]
+    S --> I[NodeGenerationBatch]
     A --> G[Build Structural Targets]
     D --> G
-    E --> H[GraphConditioningBatch]
-    F --> I[NodeGenerationBatch]
     G --> I
     H --> J[Conditional Node Field Setup]
     I --> J
@@ -244,7 +246,7 @@ flowchart TD
     classDef model fill:#e7f0ea,stroke:#2e6a4f,stroke-width:1.2px,color:#173728;
 
     class A,H,I,L data;
-    class B,C,D,E,F,G process;
+    class B,C,D,E,F,G,S process;
     class J,K model;
 ```
 
@@ -337,6 +339,20 @@ This creates:
 
 - node embedding targets for training,
 - graph conditioning vectors for the conditional model.
+
+When `use_embedding_svd=True`, this encoding stage includes orchestrator-level
+`TruncatedSVD` compression before tensors reach the neural model. The generator
+fits one SVD on stacked raw node histogram rows and a separate SVD on raw graph
+embeddings. `node_encode()`, `graph_encode()`, and `encode()` then return the
+compressed arrays for fitted generators. The model trains, samples, and decodes
+entirely in this compressed space; there is no inverse transform or attempt to
+reconstruct the original sparse histograms.
+
+The graph and node projections are intentionally independent. Graph conditioning
+still comes from `graph_vectorizer.transform(graphs)` followed by its own SVD,
+not from summing compressed node vectors. If the requested compressed dimension
+is greater than or equal to the raw feature width, that side skips SVD and keeps
+the raw embeddings.
 
 ### Step 5. Build Structural Supervision
 
@@ -706,6 +722,10 @@ You can replace `graph_vectorizer` as long as it exposes a compatible `fit()` / 
 ### Swap The Node-Level Vectorizer
 
 You can replace `node_graph_vectorizer` as long as it produces per-graph node embedding matrices in a stable node order.
+
+Both vectorizers may return sparse matrices. If orchestrator SVD compression is
+enabled, sparse node rows are stacked with `scipy.sparse.vstack` and compressed
+with `sklearn.decomposition.TruncatedSVD` before neural training.
 
 ### Swap The Conditional Node Generator
 

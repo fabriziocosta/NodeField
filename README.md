@@ -205,6 +205,17 @@ If training is interrupted, you can resume the training state by passing `ckpt_p
 
 By default, `.sample(...)` reuses cached graph-level conditioning rows from the training set. It can also be configured to stochastically interpolate between pairs of cached training embeddings in graph-conditioning space, with the same interpolation coefficient applied to graph embeddings, node counts, and edge counts.
 
+New `ConditionalNodeFieldGraphGenerator` instances compress raw node and graph
+vectorizer outputs with orchestrator-level `TruncatedSVD` by default before the
+neural node-field model sees them. This keeps sparse histogram features compact
+without adding an inverse reconstruction path; set `use_embedding_svd=False` to
+preserve raw vectorizer dimensions.
+
+For faster diagnostic generation, `.sample(...)` and `.decode(...)` accept
+`use_ilp_decoder=False`, which bypasses the ILP adjacency optimizer and selects
+edges directly from neural edge probabilities before applying the usual edge
+label decode. This is faster but can return infeasible structures.
+
 When feasibility filtering is enabled, generation now emits a final aggregate
 summary covering how many requested outputs were returned as feasible graphs,
 how many fell back to unfiltered decode, and how many were ultimately

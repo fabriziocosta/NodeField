@@ -858,6 +858,9 @@ ConditionalNodeFieldGraphGenerator(
     feasibility_failure_mode: str = "return_partial",
     feasibility_rejection_mode: str = "fallback_unfiltered",
     max_feasibility_seconds_per_sample: Optional[float] = 10.0,
+    use_embedding_svd: bool = True,
+    node_embedding_svd_dimension: int = 256,
+    graph_embedding_svd_dimension: Optional[int] = None,
 )
 ```
 
@@ -879,6 +882,26 @@ ConditionalNodeFieldGraphGenerator(
 
 - `verbose`
   Global verbosity for the orchestration layer.
+
+#### Embedding Compression Parameters
+
+- `use_embedding_svd`
+  Whether the orchestrator compresses raw node and graph vectorizer outputs
+  with `sklearn.decomposition.TruncatedSVD` before passing them to the neural
+  node-field model. Enable: lower-dimensional node and graph embeddings,
+  smaller neural layers, and no inverse reconstruction path. Disable: preserve
+  the raw vectorizer outputs exactly.
+
+- `node_embedding_svd_dimension`
+  Requested compressed dimension for per-node embeddings.
+  If the requested dimension is greater than or equal to the raw node feature
+  dimension, node SVD is skipped and raw node embeddings are used.
+
+- `graph_embedding_svd_dimension`
+  Requested compressed dimension for graph-level conditioning embeddings.
+  If omitted, the graph side uses `node_embedding_svd_dimension`. Graph and node
+  compression are fitted independently; graph conditioning is not derived by
+  summing compressed node embeddings.
 
 #### Structural Supervision Parameters
 
@@ -1027,6 +1050,11 @@ fit(
     train_node_generator: bool = True,
     targets: Optional[Sequence[Any]] = None,
     ckpt_path: Optional[str] = None,
+    sample_training_progress: bool = False,
+    sample_training_progress_n_samples: int = 7,
+    sample_training_progress_every_n_epochs: int = 1,
+    sample_training_progress_pdf_path: Optional[str] = None,
+    sample_training_progress_plot_kwargs: Optional[Dict[str, Any]] = None,
 ) -> ConditionalNodeFieldGraphGenerator
 ```
 
@@ -1050,6 +1078,28 @@ Parameters:
   Optional checkpoint path forwarded to the underlying node generator fit call.
   Provide a checkpoint path: resumes node-generator training from that checkpoint.
   Omit it: trains from scratch.
+
+- `sample_training_progress`
+  When enabled, regular `fit(...)` samples graphs after validation epochs and
+  overwrites one diagnostic PDF each time. Each sampled epoch contributes two
+  rows: direct edge decoding with `use_ilp_decoder=False`, then ILP-backed
+  decoding with `use_ilp_decoder=True`. Feasibility filtering is disabled for
+  these diagnostic samples.
+
+- `sample_training_progress_n_samples`
+  Number of graphs drawn for each decoder row in the progress PDF. Must be at
+  least `1`.
+
+- `sample_training_progress_every_n_epochs`
+  Epoch interval for progress sampling. Must be at least `1`.
+
+- `sample_training_progress_pdf_path`
+  Optional output path for the overwritten PDF. If omitted, the generator writes
+  under `.artifacts/samples/<model-name-or-graph-generator>/training_samples.pdf`.
+
+- `sample_training_progress_plot_kwargs`
+  Optional keyword arguments forwarded to the NetworkX/matplotlib graph drawing
+  helper used by the progress PDF.
 
 #### `fit_from_stream(...)`
 
@@ -1208,6 +1258,8 @@ decode(
     guidance_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
     use_feasibility_oracle: Optional[bool] = None,
+    use_ilp_decoder: bool = True,
+    edge_probability_threshold: Optional[float] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -1234,6 +1286,19 @@ Parameters:
   Enable: use `violating_edge_sets(...)` when available.
   Disable: skip oracle-guided cuts even if the estimator supports them.
 
+- `use_ilp_decoder`
+  Controls adjacency decoding. Enable: use the ILP-backed decoder with edge
+  budgets, degree targets, connectivity constraints, and oracle cuts when
+  configured. Disable: instantiate active-node edges directly from neural edge
+  probabilities, then run the usual edge-label decode on that selected edge set.
+  Direct mode is faster and may return structurally infeasible graphs.
+
+- `edge_probability_threshold`
+  Threshold used by direct edge decoding when no desired edge count is available.
+  If omitted, the decoder's existence threshold is used. When desired edge counts
+  are available, direct mode selects the top-k active-node undirected edges
+  instead of thresholding.
+
 #### `decode_classifier_guided(...)`
 
 ```python
@@ -1243,6 +1308,8 @@ decode_classifier_guided(
     classifier_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
     use_feasibility_oracle: Optional[bool] = None,
+    use_ilp_decoder: bool = True,
+    edge_probability_threshold: Optional[float] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -1261,6 +1328,12 @@ Parameters:
 - `use_feasibility_oracle`
   Same effect as in `decode(...)`.
 
+- `use_ilp_decoder`
+  Same effect as in `decode(...)`.
+
+- `edge_probability_threshold`
+  Same effect as in `decode(...)`.
+
 #### `decode_regression_guided(...)`
 
 ```python
@@ -1270,6 +1343,8 @@ decode_regression_guided(
     predictor_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
     use_feasibility_oracle: Optional[bool] = None,
+    use_ilp_decoder: bool = True,
+    edge_probability_threshold: Optional[float] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -1288,6 +1363,12 @@ Parameters:
 - `use_feasibility_oracle`
   Same effect as in `decode(...)`.
 
+- `use_ilp_decoder`
+  Same effect as in `decode(...)`.
+
+- `edge_probability_threshold`
+  Same effect as in `decode(...)`.
+
 #### `sample(...)`
 
 ```python
@@ -1297,6 +1378,8 @@ sample(
     desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
     guidance_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
+    use_ilp_decoder: bool = True,
+    edge_probability_threshold: Optional[float] = None,
 ) -> List[nx.Graph]
 ```
 
@@ -1320,6 +1403,12 @@ Parameters:
 - `apply_feasibility_filtering`
   Same filtering tradeoff as above.
 
+- `use_ilp_decoder`
+  Same adjacency decoding tradeoff as in `decode(...)`.
+
+- `edge_probability_threshold`
+  Same direct-decoding threshold as in `decode(...)`.
+
 Runtime summary:
 - when feasibility filtering is active, the generator stores the last aggregate
   outcome in `last_decode_summary_`
@@ -1336,6 +1425,8 @@ conditional_sample(
     desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
     guidance_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
+    use_ilp_decoder: bool = True,
+    edge_probability_threshold: Optional[float] = None,
 ) -> List[List[nx.Graph]]
 ```
 
@@ -1356,6 +1447,12 @@ Parameters:
 
 - `apply_feasibility_filtering`
   Same filtering tradeoff as above.
+
+- `use_ilp_decoder`
+  Same adjacency decoding tradeoff as in `decode(...)`.
+
+- `edge_probability_threshold`
+  Same direct-decoding threshold as in `decode(...)`.
 
 #### `score_feasible_rate(...)`
 

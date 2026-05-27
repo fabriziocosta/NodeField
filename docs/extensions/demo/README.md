@@ -41,3 +41,16 @@ Demo feasibility estimator notes:
 - oracle-guided decode keeps structural edge-set cuts as the hard refinement mechanism
 - optional node-label and edge-label repairs are soft follow-up proposals evaluated against the full oracle state after each structural candidate, rather than isolated decode stages
 - the default budget policy is adaptive: it starts from a decreasing prior and redistributes unused budget toward estimator levels that still expose violations on the current graph
+
+Demo training notes:
+- `build_graph_generator(...)` forwards orchestrator SVD options:
+  `use_embedding_svd`, `node_embedding_svd_dimension`, and
+  `graph_embedding_svd_dimension`
+- SVD compression is enabled by default in new demo generators, with a default
+  requested dimension of `256` for both node and graph embeddings
+- `fit_graph_generator(...)` forwards the training-progress PDF options accepted
+  by the core generator, including `sample_training_progress`,
+  `sample_training_progress_n_samples`,
+  `sample_training_progress_every_n_epochs`,
+  `sample_training_progress_pdf_path`, and
+  `sample_training_progress_plot_kwargs`

@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 import pulp
 import torch
+from scipy import sparse
 from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
@@ -62,6 +63,66 @@ class _NodeVectorizer:
             )
             output.append(emb)
         return output
+
+
+class _SparseGraphVectorizer:
+    def __init__(self, dimension=10):
+        self.dimension = int(dimension)
+        self.fitted_graph_count = None
+
+    def fit(self, graphs):
+        self.fitted_graph_count = len(graphs)
+        return self
+
+    def transform(self, graphs):
+        rows = []
+        cols = []
+        data = []
+        for graph_idx, graph in enumerate(graphs):
+            for col_idx, value in (
+                (0, graph.number_of_nodes()),
+                (1, graph.number_of_edges()),
+                (2 + graph.number_of_nodes() % max(1, self.dimension - 2), 1.0),
+                (2 + graph.number_of_edges() % max(1, self.dimension - 2), 0.5),
+            ):
+                rows.append(graph_idx)
+                cols.append(int(col_idx % self.dimension))
+                data.append(float(value))
+        return sparse.csr_matrix((data, (rows, cols)), shape=(len(graphs), self.dimension))
+
+
+class _SparseNodeVectorizer:
+    def __init__(self, dimension=12):
+        self.dimension = int(dimension)
+        self.fitted_graph_count = None
+
+    def fit(self, graphs):
+        self.fitted_graph_count = len(graphs)
+        return self
+
+    def transform(self, graphs):
+        matrices = []
+        for graph in graphs:
+            rows = []
+            cols = []
+            data = []
+            for row_idx, node in enumerate(graph.nodes()):
+                degree = graph.degree(node)
+                for col_idx, value in (
+                    (0, degree + 1.0),
+                    (1 + int(node) % max(1, self.dimension - 1), 1.0),
+                    (1 + degree % max(1, self.dimension - 1), 0.5),
+                ):
+                    rows.append(row_idx)
+                    cols.append(int(col_idx % self.dimension))
+                    data.append(float(value))
+            matrices.append(
+                sparse.csr_matrix(
+                    (data, (rows, cols)),
+                    shape=(graph.number_of_nodes(), self.dimension),
+                )
+            )
+        return matrices
 
 
 class _Component:
@@ -2820,6 +2881,89 @@ def test_encode_paths_return_expected_shapes_and_counts():
     assert conditioning.graph_embeddings.shape == (2, 2)
     assert len(node_embeddings_2) == 2
     np.testing.assert_array_equal(conditioning_2.graph_embeddings, conditioning.graph_embeddings)
+
+
+def test_fit_compresses_sparse_node_and_graph_embeddings_with_svd():
+    node_model = _TrainableNodeModel(verbose=False)
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_SparseGraphVectorizer(dimension=9),
+        node_graph_vectorizer=_SparseNodeVectorizer(dimension=11),
+        conditional_node_generator_model=node_model,
+        graph_decoder=ConditionalNodeFieldGraphDecoder(verbose=False),
+        use_embedding_svd=True,
+        node_embedding_svd_dimension=3,
+        graph_embedding_svd_dimension=2,
+        verbose=False,
+    )
+
+    graphs = _sampling_graphs()
+    generator.fit(graphs, train_node_generator=True)
+
+    assert generator.node_embedding_svd_fitted_ is True
+    assert generator.graph_embedding_svd_fitted_ is True
+    assert generator.node_embedding_raw_dimension_ == 11
+    assert generator.graph_embedding_raw_dimension_ == 9
+    setup_call = node_model.setup_calls[0]
+    assert setup_call["node_batch"].node_embeddings_list[0].shape[1] == 3
+    assert setup_call["graph_conditioning"].graph_embeddings.shape[1] == 2
+    assert generator.training_graph_conditioning_.graph_embeddings.shape[1] == 2
+
+    encoded_nodes, encoded_conditioning = generator.encode(graphs[:2])
+    assert encoded_nodes[0].shape[1] == 3
+    assert encoded_conditioning.graph_embeddings.shape == (2, 2)
+
+
+def test_embedding_svd_graph_dimension_defaults_to_node_dimension():
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_SparseGraphVectorizer(dimension=8),
+        node_graph_vectorizer=_SparseNodeVectorizer(dimension=10),
+        use_embedding_svd=True,
+        node_embedding_svd_dimension=4,
+        graph_embedding_svd_dimension=None,
+        verbose=False,
+    )
+
+    generator.fit(_sampling_graphs(), train_node_generator=False)
+
+    assert generator.node_embedding_effective_dimension_ == 4
+    assert generator.graph_embedding_effective_dimension_ == 4
+    assert generator.graph_encode(_sampling_graphs()[:1]).graph_embeddings.shape == (1, 4)
+
+
+def test_embedding_svd_skips_when_requested_dimension_exceeds_raw_dimension():
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_SparseGraphVectorizer(dimension=3),
+        node_graph_vectorizer=_SparseNodeVectorizer(dimension=4),
+        use_embedding_svd=True,
+        node_embedding_svd_dimension=99,
+        graph_embedding_svd_dimension=99,
+        verbose=False,
+    )
+
+    generator.fit(_sampling_graphs(), train_node_generator=False)
+
+    assert generator.node_embedding_svd_fitted_ is False
+    assert generator.graph_embedding_svd_fitted_ is False
+    assert generator.node_encode(_sampling_graphs()[:1])[0].shape[1] == 4
+    assert generator.graph_encode(_sampling_graphs()[:1]).graph_embeddings.shape == (1, 3)
+
+
+def test_embedding_svd_disabled_preserves_raw_embedding_dimensions():
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_SparseGraphVectorizer(dimension=5),
+        node_graph_vectorizer=_SparseNodeVectorizer(dimension=6),
+        use_embedding_svd=False,
+        node_embedding_svd_dimension=2,
+        graph_embedding_svd_dimension=2,
+        verbose=False,
+    )
+
+    generator.fit(_sampling_graphs(), train_node_generator=False)
+
+    assert generator.node_embedding_svd_fitted_ is False
+    assert generator.graph_embedding_svd_fitted_ is False
+    assert generator.node_encode(_sampling_graphs()[:1])[0].shape[1] == 6
+    assert generator.graph_encode(_sampling_graphs()[:1]).graph_embeddings.shape == (1, 5)
 
 
 def test_build_node_batch_masks_presence_and_degrees():

@@ -113,19 +113,22 @@ graphs = generate_artificial_dataset(
 The function prints the generated YAML file name, for example:
 
 ```text
-Saved artificial dataset config: artificial_dataset_config_20260526_120000_000000.yaml
+Saved artificial dataset config: artificial-cycle-path-star-n100-c3-6-p1-4-r3x1-3.yaml
 ```
 
 The same configuration can be loaded later:
 
 ```python
 graphs = generate_artificial_dataset(
-    load_from_file="artificial_dataset_config_20260526_120000_000000.yaml",
+    load_from_file="artificial-cycle-path-star-n100-c3-6-p1-4-r3x1-3.yaml",
     save_config=False,
 )
 ```
 
-Pass `save_config=False` when no config file should be written.
+Config filenames use the same sanitized crumb style as model names and include
+only the dataset-defining values, such as graph count, cycle length, path length,
+ray count, ray length, and non-default label alphabets. Pass `save_config=False`
+when no config file should be written.
 
 ## 4. Synthetic classification datasets
 
