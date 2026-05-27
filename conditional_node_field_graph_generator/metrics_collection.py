@@ -1,8 +1,9 @@
 """Metric collection callbacks for Conditional Node Field training."""
 
 import hashlib
+import inspect
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Callable, Dict, Mapping
 import time
 
 import matplotlib.pyplot as plt
@@ -323,6 +324,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         every_n_epochs: int,
         output_path,
         plot_kwargs: Mapping | None = None,
+        plot_fn: Callable | None = None,
     ):
         if int(n_samples) < 1:
             raise ValueError("sample_training_progress_n_samples must be >= 1.")
@@ -333,6 +335,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         self.every_n_epochs = int(every_n_epochs)
         self.output_path = Path(output_path)
         self.plot_kwargs = dict(plot_kwargs or {})
+        self.plot_fn = plot_fn
         self.epoch_samples = []
 
     def _node_color(self, label):
@@ -377,6 +380,9 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         if graph.number_of_nodes() == 0:
             ax.text(0.5, 0.5, "empty", ha="center", va="center")
             return
+        if self.plot_fn is not None:
+            self._draw_graph_with_plot_fn(ax, graph, title)
+            return
         pos = self._graph_layout(graph)
         labels = {
             node: str(attrs.get("label", ""))
@@ -410,11 +416,65 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                 ax=ax,
             )
 
+    def _draw_graph_with_plot_fn(self, ax, graph, title):
+        result = self._call_plot_fn(ax=ax, graph=graph, title=title)
+        if result is None:
+            return
+        if hasattr(result, "__array__"):
+            ax.imshow(result)
+            ax.axis("off")
+            return
+        if hasattr(result, "savefig"):
+            logger.warning(
+                "Training sample plot function returned a matplotlib Figure; "
+                "draw on the provided axis or return an image array instead."
+            )
+
+    def _call_plot_fn(self, *, ax, graph, title):
+        signature = inspect.signature(self.plot_fn)
+        parameters = signature.parameters
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        extra_kwargs = {
+            key: value
+            for key, value in self.plot_kwargs.items()
+            if accepts_kwargs or key in parameters
+        }
+        call_kwargs = dict(extra_kwargs)
+        if accepts_kwargs or "ax" in parameters:
+            call_kwargs["ax"] = ax
+        if accepts_kwargs or "graph" in parameters:
+            call_kwargs["graph"] = graph
+        if accepts_kwargs or "title" in parameters:
+            call_kwargs["title"] = title
+        positional_parameters = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind
+            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if positional_parameters and positional_parameters[0].name == "ax":
+            return self.plot_fn(ax, graph, title=title, **extra_kwargs)
+        if "graph" in parameters or accepts_kwargs:
+            return self.plot_fn(**call_kwargs)
+        positional_kwargs = dict(extra_kwargs)
+        if accepts_kwargs or "ax" in parameters:
+            positional_kwargs["ax"] = ax
+        if accepts_kwargs or "title" in parameters:
+            positional_kwargs["title"] = title
+        return self.plot_fn(graph, **positional_kwargs)
+
     def _write_pdf(self):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         n_rows = max(1, 2 * len(self.epoch_samples))
         n_cols = max(1, self.n_samples)
-        size = float(self.plot_kwargs.get("size", 3.0))
+        cell_size = self.plot_kwargs.get("cell_size", self.plot_kwargs.get("size", 3.0))
+        try:
+            size = float(cell_size)
+        except (TypeError, ValueError):
+            size = 3.0
         fig, axes = plt.subplots(
             n_rows,
             n_cols,

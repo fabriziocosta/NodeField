@@ -1055,6 +1055,7 @@ fit(
     sample_training_progress_every_n_epochs: int = 1,
     sample_training_progress_pdf_path: Optional[str] = None,
     sample_training_progress_plot_kwargs: Optional[Dict[str, Any]] = None,
+    sample_training_progress_plot_fn: Optional[Callable] = None,
 ) -> ConditionalNodeFieldGraphGenerator
 ```
 
@@ -1098,8 +1099,13 @@ Parameters:
   under `.artifacts/samples/<model-name-or-graph-generator>/training_samples.pdf`.
 
 - `sample_training_progress_plot_kwargs`
-  Optional keyword arguments forwarded to the NetworkX/matplotlib graph drawing
-  helper used by the progress PDF.
+  Optional keyword arguments forwarded to the graph drawing helper used by the
+  progress PDF.
+
+- `sample_training_progress_plot_fn`
+  Optional per-graph drawing function for the progress PDF. The callback
+  provides a matplotlib axis, graph, and title, so molecule workflows can draw
+  each cell with RDKit-backed renderers instead of the default NetworkX layout.
 
 #### `fit_from_stream(...)`
 

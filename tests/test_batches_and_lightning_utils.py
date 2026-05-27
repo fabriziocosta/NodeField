@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import networkx as nx
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import torch
@@ -604,6 +605,34 @@ def test_training_sample_callback_writes_incremental_pdf(tmp_path):
     ]
     assert output_path.stat().st_size >= first_size
     assert callback.plot_kwargs["node_label_colors"]["C"] == "#ffaaaa"
+
+
+def test_training_sample_callback_uses_custom_plot_function(tmp_path):
+    calls = []
+
+    def _plot_fn(graph, size=None):
+        calls.append((graph, size))
+        return np.ones((4, 4, 3), dtype=np.uint8) * 255
+
+    graph = nx.Graph()
+    graph.add_node(0, label="C")
+
+    callback = GraphGeneratorTrainingSampleCallback(
+        object(),
+        n_samples=1,
+        every_n_epochs=1,
+        output_path=tmp_path / "samples.pdf",
+        plot_kwargs={"size": (500, 350), "cell_size": 2.0},
+        plot_fn=_plot_fn,
+    )
+
+    callback.epoch_samples.append({"epoch": 1, "direct": [graph], "ilp": [graph]})
+    callback._write_pdf()
+
+    assert calls
+    assert calls[0][0] is graph
+    assert calls[0][1] == (500, 350)
+    assert (tmp_path / "samples.pdf").exists()
 
 
 def test_training_sample_callback_validates_configuration(tmp_path):

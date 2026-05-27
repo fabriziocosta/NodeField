@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 @dataclass(frozen=True)
@@ -77,6 +77,7 @@ class TrainingProgressSamplingConfig:
     every_n_epochs: int = 1
     output_path: Optional[str] = None
     plot_kwargs: Optional[dict] = None
+    plot_fn: Optional[Callable] = None
 
     def __post_init__(self):
         if int(self.n_samples) < 1:

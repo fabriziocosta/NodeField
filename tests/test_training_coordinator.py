@@ -81,12 +81,16 @@ def test_training_coordinator_builds_sample_progress_callback(monkeypatch, tmp_p
     owner = _Owner()
     sample_owner = types.SimpleNamespace(model_name=None)
     owner._graph_generator_snapshot_owner = sample_owner
+    def _plot_fn(ax, graph, title=None):
+        del ax, graph, title
+
     owner._graph_generator_sample_progress_config = TrainingProgressSamplingConfig(
         enabled=True,
         n_samples=4,
         every_n_epochs=2,
         output_path=tmp_path / "samples.pdf",
         plot_kwargs={"size": 2.0},
+        plot_fn=_plot_fn,
     )
     coordinator = TrainingCoordinator(owner)
 
@@ -98,6 +102,7 @@ def test_training_coordinator_builds_sample_progress_callback(monkeypatch, tmp_p
     assert callback.every_n_epochs == 2
     assert callback.output_path == tmp_path / "samples.pdf"
     assert callback.plot_kwargs == {"size": 2.0}
+    assert callback.plot_fn is _plot_fn
     assert coordinator._build_sample_progress_callback("batch") is None
 
 

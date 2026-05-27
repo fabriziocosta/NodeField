@@ -872,6 +872,7 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
                 "every": config.every_n_epochs,
                 "pdf_path": config.output_path,
                 "plot_kwargs": config.plot_kwargs,
+                "plot_fn": config.plot_fn,
             }
             super().fit(**kwargs)
 
@@ -884,6 +885,9 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
         verbose=False,
     )
 
+    def _plot_fn(ax, graph, title=None):
+        del ax, graph, title
+
     generator.fit(
         [_labeled_graph()],
         train_node_generator=True,
@@ -895,6 +899,7 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
             "node_label_colors": {0: "#ffffff"},
             "size": 2.5,
         },
+        sample_training_progress_plot_fn=_plot_fn,
     )
 
     assert node_model.progress_state == {
@@ -906,6 +911,7 @@ def test_fit_configures_training_sample_progress_on_node_generator(tmp_path):
             "node_label_colors": {0: "#ffffff"},
             "size": 2.5,
         },
+        "plot_fn": _plot_fn,
     }
     assert not hasattr(node_model, "_graph_generator_sample_progress_config")
 

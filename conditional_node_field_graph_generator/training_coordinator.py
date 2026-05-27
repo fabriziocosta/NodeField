@@ -60,6 +60,7 @@ class TrainingCoordinator:
                 ),
                 output_path=getattr(self.owner, "_graph_generator_sample_progress_pdf_path", None),
                 plot_kwargs=getattr(self.owner, "_graph_generator_sample_progress_plot_kwargs", None),
+                plot_fn=getattr(self.owner, "_graph_generator_sample_progress_plot_fn", None),
             )
         if not bool(config.enabled):
             return None
@@ -74,6 +75,7 @@ class TrainingCoordinator:
             every_n_epochs=int(config.every_n_epochs),
             output_path=config.output_path,
             plot_kwargs=config.plot_kwargs,
+            plot_fn=config.plot_fn,
         )
 
     def run_training(

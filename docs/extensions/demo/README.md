@@ -54,3 +54,6 @@ Demo training notes:
   `sample_training_progress_every_n_epochs`,
   `sample_training_progress_pdf_path`, and
   `sample_training_progress_plot_kwargs`
+- `fit_graph_generator(...)` also forwards
+  `sample_training_progress_plot_fn`, which can provide a dataset-specific
+  per-graph renderer such as an RDKit molecule drawer for the progress PDF
