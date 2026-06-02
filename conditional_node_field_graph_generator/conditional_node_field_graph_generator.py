@@ -321,6 +321,12 @@ class ConditionalNodeFieldGraphGenerator(object):
     def __setstate__(self, state):
         self.__dict__.update(state)
         self._stream_runtime_lock = threading.RLock()
+        if not hasattr(self, "feasibility_oracle_candidates_per_attempt"):
+            self.feasibility_oracle_candidates_per_attempt = int(
+                self._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
+            )
+        if not hasattr(self, "decode_service_") or getattr(self.decode_service_, "owner", None) is not self:
+            self.decode_service_ = DecodeService(self)
 
     def __init__(
             self,
@@ -678,6 +684,31 @@ class ConditionalNodeFieldGraphGenerator(object):
         if value < 0:
             raise ValueError("feasibility_oracle_candidates_per_attempt must be >= 0")
         return value
+
+    def _resolve_feasibility_oracle_override(
+        self,
+        *,
+        use_feasibility_oracle: Optional[bool],
+        feasibility_oracle_candidates_per_attempt: Optional[int],
+    ) -> Optional[int]:
+        if use_feasibility_oracle is None:
+            return feasibility_oracle_candidates_per_attempt
+        if not bool(use_feasibility_oracle):
+            return 0
+        if feasibility_oracle_candidates_per_attempt is not None:
+            value = self._resolve_feasibility_oracle_candidates_per_attempt(
+                feasibility_oracle_candidates_per_attempt
+            )
+            if value <= 0:
+                raise ValueError(
+                    "use_feasibility_oracle=True requires "
+                    "feasibility_oracle_candidates_per_attempt > 0."
+                )
+            return value
+        configured_budget = self._resolve_feasibility_oracle_candidates_per_attempt(None)
+        if configured_budget > 0:
+            return None
+        return int(self._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT)
 
     def _can_use_feasibility_oracle(
         self,
@@ -2691,6 +2722,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
+        use_feasibility_oracle: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         use_ilp_decoder: bool = True,
         edge_probability_threshold: Optional[float] = None,
@@ -2707,7 +2739,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            feasibility_oracle_candidates_per_attempt=self._resolve_feasibility_oracle_override(
+                use_feasibility_oracle=use_feasibility_oracle,
+                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            ),
             use_ilp_decoder=use_ilp_decoder,
             edge_probability_threshold=edge_probability_threshold,
         )
@@ -2778,6 +2813,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
         apply_feasibility_filtering: Optional[bool] = None,
+        use_feasibility_oracle: Optional[bool] = None,
         feasibility_oracle_candidates_per_attempt: Optional[int] = None,
         use_ilp_decoder: bool = True,
         edge_probability_threshold: Optional[float] = None,
@@ -2804,7 +2840,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             apply_feasibility_filtering=apply_feasibility_filtering,
-            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            feasibility_oracle_candidates_per_attempt=self._resolve_feasibility_oracle_override(
+                use_feasibility_oracle=use_feasibility_oracle,
+                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+            ),
             use_ilp_decoder=use_ilp_decoder,
             edge_probability_threshold=edge_probability_threshold,
         )

@@ -12,6 +12,7 @@ import dill as pickle
 
 from .encoding_pipeline import EncodingPipeline
 from .conditioning_sampler import ConditioningSampler
+from .decode_service import DecodeService
 from .naming_utils import sanitize_model_token
 from .node_batch_builder import NodeBatchBuilder
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
@@ -54,6 +55,11 @@ def _restore_loaded_vectorizer_fit_state(graph_generator) -> None:
 
 def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
     """Backfill runtime attrs added after older persisted generators were saved."""
+    if not hasattr(graph_generator, "feasibility_oracle_candidates_per_attempt"):
+        default_oracle_candidates = int(
+            getattr(graph_generator, "_DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT", 2)
+        )
+        graph_generator.feasibility_oracle_candidates_per_attempt = default_oracle_candidates
     if not hasattr(graph_generator, "oracle_use_node_label_cuts"):
         graph_generator.oracle_use_node_label_cuts = False
     if not hasattr(graph_generator, "oracle_use_edge_label_cuts"):
@@ -98,6 +104,11 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.conditioning_sampler_ = ConditioningSampler(graph_generator)
     if not hasattr(graph_generator, "stream_fit_service_"):
         graph_generator.stream_fit_service_ = StreamFitService(graph_generator)
+    if (
+        not hasattr(graph_generator, "decode_service_")
+        or getattr(graph_generator.decode_service_, "owner", None) is not graph_generator
+    ):
+        graph_generator.decode_service_ = DecodeService(graph_generator)
     graph_decoder = getattr(graph_generator, "graph_decoder", None)
     if graph_decoder is not None:
         if not hasattr(graph_decoder, "parallel_decode_timeout_seconds"):

@@ -2335,6 +2335,35 @@ def test_load_graph_generator_restores_legacy_encoding_pipeline_defaults(tmp_pat
     assert restored.stream_fit_service_.owner is restored
 
 
+def test_load_graph_generator_restores_legacy_sample_oracle_runtime_defaults(tmp_path, monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    generator.model_name = "legacy-sample-oracle"
+    delattr(generator, "feasibility_oracle_candidates_per_attempt")
+    delattr(generator, "decode_service_")
+
+    save_graph_generator(generator, model_dir=tmp_path, log=False)
+
+    restored = load_graph_generator("legacy-sample-oracle", model_dir=tmp_path)
+
+    assert (
+        restored.feasibility_oracle_candidates_per_attempt
+        == ConditionalNodeFieldGraphGenerator._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
+    )
+    assert restored.decode_service_.owner is restored
+
+    captured = {}
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        return ["decoded"]
+
+    monkeypatch.setattr(restored.decode_service_, "decode", _fake_decode)
+
+    assert restored.sample(1, use_feasibility_oracle=False) == ["decoded"]
+    assert captured["feasibility_oracle_candidates_per_attempt"] == 0
+
+
 def test_adj_mtx_to_targets_preserves_expected_locality_pairs():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
     adj = [np.asarray([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=int)]
@@ -3228,6 +3257,64 @@ def test_sample_forwards_direct_decoder_options(monkeypatch):
     assert result == ["decoded"]
     assert captured["use_ilp_decoder"] is False
     assert captured["edge_probability_threshold"] == pytest.approx(0.7)
+
+
+def test_sample_can_disable_feasibility_oracle(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        return ["decoded"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, use_feasibility_oracle=False)
+
+    assert result == ["decoded"]
+    assert captured["feasibility_oracle_candidates_per_attempt"] == 0
+
+
+def test_sample_can_enable_feasibility_oracle_when_configured_budget_is_zero(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    generator.feasibility_oracle_candidates_per_attempt = 0
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        return ["decoded"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, use_feasibility_oracle=True)
+
+    assert result == ["decoded"]
+    assert (
+        captured["feasibility_oracle_candidates_per_attempt"]
+        == ConditionalNodeFieldGraphGenerator._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
+    )
 
 
 def test_graph_generator_rejects_invalid_feasibility_rejection_mode():

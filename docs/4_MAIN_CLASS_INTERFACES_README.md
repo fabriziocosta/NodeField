@@ -1384,6 +1384,7 @@ sample(
     desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
     guidance_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
+    use_feasibility_oracle: Optional[bool] = None,
     use_ilp_decoder: bool = True,
     edge_probability_threshold: Optional[float] = None,
 ) -> List[nx.Graph]
@@ -1408,6 +1409,9 @@ Parameters:
 
 - `apply_feasibility_filtering`
   Same filtering tradeoff as above.
+
+- `use_feasibility_oracle`
+  Same oracle tradeoff as in `decode(...)`.
 
 - `use_ilp_decoder`
   Same adjacency decoding tradeoff as in `decode(...)`.

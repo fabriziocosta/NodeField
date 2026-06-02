@@ -596,6 +596,8 @@ Sample graph-level conditions from cached training conditioning, then decode the
 
 By default, this samples stored graph-conditioning rows directly. When `interpolate_between_n_samples` is provided, each requested output first draws a small subset of cached training conditioning rows, scores candidate pairs by cosine similarity on the cached graph-vectorizer embeddings, samples a pair, and linearly interpolates graph embedding, node count, and edge count to form a new conditioning vector.
 
+Pass `use_feasibility_oracle=False` to `sample(...)` to skip oracle-guided cuts for that call while leaving feasibility filtering and the fitted estimator available.
+
 When feasibility filtering is active, the final log line reports:
 
 - `requested`
