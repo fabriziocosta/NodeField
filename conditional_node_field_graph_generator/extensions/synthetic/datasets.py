@@ -159,6 +159,7 @@ def generate_cycle_path_star_graph(
     path_length,
     num_rays,
     ray_length,
+    num_cycles=1,
     node_alphabet_size=1,
     edge_alphabet_size=1,
     node_alphabet_kind="int",
@@ -170,6 +171,10 @@ def generate_cycle_path_star_graph(
 
     if cycle_length < 0 or path_length < 0 or num_rays < 0 or ray_length < 0:
         raise ValueError("Structural parameters must be non-negative.")
+    if not isinstance(num_cycles, int) or num_cycles < 1:
+        raise ValueError("num_cycles must be an integer >= 1.")
+    if cycle_length == 0 and num_cycles > 1:
+        raise ValueError("num_cycles must be 1 when cycle_length is 0.")
 
     rng = random.Random(seed)
     node_labels_by_component = _make_component_alphabets(
@@ -215,6 +220,16 @@ def generate_cycle_path_star_graph(
         cycle_nodes = [add_node("cycle", "cycle") for _ in range(cycle_length)]
         for i in range(cycle_length):
             add_edge(cycle_nodes[i], cycle_nodes[(i + 1) % cycle_length], "cycle", "cycle")
+        previous_cycle_nodes = cycle_nodes
+        for _ in range(1, num_cycles):
+            shared_edge_idx = rng.randrange(cycle_length)
+            shared_u = previous_cycle_nodes[shared_edge_idx]
+            shared_v = previous_cycle_nodes[(shared_edge_idx + 1) % cycle_length]
+            new_cycle_nodes = [shared_u, shared_v]
+            new_cycle_nodes.extend(add_node("cycle", "cycle") for _ in range(cycle_length - 2))
+            for i in range(1, cycle_length):
+                add_edge(new_cycle_nodes[i], new_cycle_nodes[(i + 1) % cycle_length], "cycle", "cycle")
+            previous_cycle_nodes = new_cycle_nodes
 
     anchor = rng.choice(cycle_nodes)
     graph.nodes[anchor]["role"] = "cycle_anchor"
@@ -246,6 +261,7 @@ def generate_cycle_path_star_graph(
 
     graph.graph["metadata"] = {
         "cycle_length": cycle_length,
+        "num_cycles": num_cycles,
         "path_length": path_length,
         "num_rays": num_rays,
         "ray_length": ray_length,
@@ -294,6 +310,7 @@ def _sample_int_parameter(value, rng, name, *, minimum=None, valid_values=None):
 _ARTIFICIAL_DATASET_CONFIG_KEYS = (
     "num_graphs",
     "cycle_length",
+    "num_cycles",
     "path_length",
     "num_rays",
     "ray_length",
@@ -384,6 +401,8 @@ def _artificial_dataset_config_stem(config):
             f"x{_format_config_crumb(config['ray_length'])}"
         ),
     ]
+    if config.get("num_cycles", 1) != 1:
+        crumbs.insert(3, f"nc{_format_config_crumb(config['num_cycles'])}")
     if config.get("node_alphabet_size", 1) != 1:
         crumbs.append(f"na{_format_config_crumb(config['node_alphabet_size'])}")
     if config.get("edge_alphabet_size", 1) != 1:
@@ -407,6 +426,7 @@ def _write_artificial_dataset_config(config):
 def generate_artificial_dataset(
     num_graphs=None,
     cycle_length=None,
+    num_cycles=1,
     path_length=None,
     num_rays=None,
     ray_length=None,
@@ -424,6 +444,7 @@ def generate_artificial_dataset(
     config = {
         "num_graphs": num_graphs,
         "cycle_length": cycle_length,
+        "num_cycles": num_cycles,
         "path_length": path_length,
         "num_rays": num_rays,
         "ray_length": ray_length,
@@ -454,6 +475,7 @@ def generate_artificial_dataset(
 
     num_graphs = config["num_graphs"]
     cycle_length = config["cycle_length"]
+    num_cycles = config["num_cycles"]
     path_length = config["path_length"]
     num_rays = config["num_rays"]
     ray_length = config["ray_length"]
@@ -481,6 +503,9 @@ def generate_artificial_dataset(
             minimum=0,
             valid_values=lambda candidate: candidate == 0 or candidate >= 3,
         )
+        sampled_num_cycles = _sample_int_parameter(num_cycles, rng, "num_cycles", minimum=1)
+        if sampled_cycle_length == 0 and sampled_num_cycles > 1:
+            raise ValueError("num_cycles must be 1 when cycle_length is 0.")
         sampled_path_length = _sample_int_parameter(path_length, rng, "path_length", minimum=0)
         sampled_num_rays = _sample_int_parameter(num_rays, rng, "num_rays", minimum=0)
         sampled_ray_length = _sample_int_parameter(ray_length, rng, "ray_length", minimum=0)
@@ -500,6 +525,7 @@ def generate_artificial_dataset(
         graphs.append(
             generate_cycle_path_star_graph(
                 cycle_length=sampled_cycle_length,
+                num_cycles=sampled_num_cycles,
                 path_length=sampled_path_length,
                 num_rays=sampled_num_rays,
                 ray_length=sampled_ray_length,

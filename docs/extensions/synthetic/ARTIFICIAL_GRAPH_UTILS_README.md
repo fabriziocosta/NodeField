@@ -103,12 +103,17 @@ By default, `generate_artificial_dataset` also writes a reproducibility config:
 graphs = generate_artificial_dataset(
     num_graphs=100,
     cycle_length=(3, 6),
+    num_cycles=1,
     path_length=(1, 4),
     num_rays=3,
     ray_length=(1, 3),
     seed=13,
 )
 ```
+
+Set `num_cycles > 1` to chain same-length cycles through shared edges. The
+first cycle connects to the path/star structure as before; each additional
+cycle shares one random edge with the previous cycle.
 
 The function prints the generated YAML file name, for example:
 
