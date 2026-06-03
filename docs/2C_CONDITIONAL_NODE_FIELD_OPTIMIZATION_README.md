@@ -142,7 +142,10 @@ Weight on edge-label supervision. With the current normalization, `1.0` is a rea
 
 ### `lambda_auxiliary_edge_importance`
 
-Weight on auxiliary higher-horizon locality supervision. As a regularizer, it often starts well around `0.25` to `0.5`.
+Weight on auxiliary higher-horizon locality supervision. It is still a
+secondary structural term, but its predictions can now guide horizon-aware ILP
+decoding, so tune it high enough to produce calibrated locality scores without
+overpowering direct edge supervision.
 
 ## Training Metrics
 

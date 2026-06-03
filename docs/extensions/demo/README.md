@@ -48,6 +48,14 @@ Demo training notes:
   `graph_embedding_svd_dimension`
 - SVD compression is enabled by default in new demo generators, with a default
   requested dimension of `256` for both node and graph embeddings
+- `build_graph_generator(...)` now uses `locality_horizon=3` by default so new
+  demo models train the auxiliary horizon-locality head used by horizon-aware
+  ILP decoding
+- horizon-aware ILP decoding is enabled by default on the demo decoder and can
+  be tuned with `decoder_horizon_constraint_weight`,
+  `decoder_horizon_positive_threshold`, `decoder_horizon_negative_threshold`,
+  `decoder_horizon_pair_budget`, `decoder_horizon_paths_per_pair`, and
+  `decoder_horizon_max_iterations`
 - `fit_graph_generator(...)` forwards the training-progress PDF options accepted
   by the core generator, including `sample_training_progress`,
   `sample_training_progress_n_samples`,

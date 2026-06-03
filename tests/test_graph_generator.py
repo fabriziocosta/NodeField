@@ -34,6 +34,9 @@ from conditional_node_field_graph_generator.conditional_node_field_generator imp
     GeneratedNodeBatch,
     GraphConditioningBatch,
 )
+from conditional_node_field_graph_generator.conditional_node_field_graph_decoder import (
+    build_single_generated_node_batch,
+)
 
 
 class _GraphVectorizer:
@@ -1619,6 +1622,26 @@ def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
     assert adj_mtx_list[0].shape == (2, 2)
 
 
+def test_build_single_generated_node_batch_preserves_horizon_predictions():
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True], [True, False]], dtype=bool),
+        horizon_probability_matrices=[
+            np.asarray([[0.0, 0.8], [0.8, 0.0]], dtype=float),
+            np.asarray([[0.0, 0.2], [0.2, 0.0]], dtype=float),
+        ],
+        horizon=3,
+    )
+
+    single = build_single_generated_node_batch(generated_nodes, 1)
+
+    assert single.horizon == 3
+    assert len(single.horizon_probability_matrices) == 1
+    np.testing.assert_array_equal(
+        single.horizon_probability_matrices[0],
+        np.asarray([[0.0, 0.2], [0.2, 0.0]], dtype=float),
+    )
+
+
 def test_decoder_resolve_node_presence_mask_uses_top_existence_scores_for_desired_count():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
 
@@ -1754,6 +1777,74 @@ def test_decode_adjacency_matrix_direct_respects_desired_node_count():
     )[0]
 
     assert sorted(nx.from_numpy_array(adj_mtx).edges()) == [(1, 3)]
+
+
+def test_horizon_positive_constraint_can_add_short_path():
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        degree_slack_penalty=0.1,
+        horizon_constraint_weight=100.0,
+        horizon_positive_threshold=0.8,
+        horizon_pair_budget=2,
+        horizon_paths_per_pair=4,
+        horizon_max_iterations=0,
+    )
+    horizon_probs = np.zeros((3, 3), dtype=float)
+    horizon_probs[0, 2] = horizon_probs[2, 0] = 0.99
+
+    adj = decoder.optimize_adjacency_matrix(
+        prob_matrix=np.asarray(
+            [
+                [0.0, 0.95, 0.01],
+                [0.95, 0.0, 0.95],
+                [0.01, 0.95, 0.0],
+            ],
+            dtype=float,
+        ),
+        target_degrees=[1, 1, 0],
+        connectivity=False,
+        horizon_probability_matrix=horizon_probs,
+        horizon=2,
+        horizon_node_mask=np.asarray([True, True, True], dtype=bool),
+    )
+
+    graph = nx.from_numpy_array(adj)
+    assert nx.shortest_path_length(graph, 0, 2) <= 2
+
+
+def test_horizon_negative_constraint_can_break_short_path():
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        degree_slack_penalty=0.1,
+        horizon_constraint_weight=100.0,
+        horizon_negative_threshold=0.2,
+        horizon_pair_budget=2,
+        horizon_paths_per_pair=4,
+        horizon_max_iterations=1,
+    )
+    horizon_probs = np.ones((3, 3), dtype=float)
+    horizon_probs[0, 2] = horizon_probs[2, 0] = 0.01
+
+    adj = decoder.optimize_adjacency_matrix(
+        prob_matrix=np.asarray(
+            [
+                [0.0, 0.99, 0.01],
+                [0.99, 0.0, 0.99],
+                [0.01, 0.99, 0.0],
+            ],
+            dtype=float,
+        ),
+        target_degrees=[1, 2, 1],
+        connectivity=False,
+        horizon_probability_matrix=horizon_probs,
+        horizon=2,
+        horizon_node_mask=np.asarray([True, True, True], dtype=bool),
+    )
+
+    graph = nx.from_numpy_array(adj)
+    assert not nx.has_path(graph, 0, 2) or nx.shortest_path_length(graph, 0, 2) > 2
 
 
 def test_decoder_direct_mode_attaches_labels_and_bypasses_optimizer(monkeypatch):
@@ -2263,6 +2354,13 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
         degree_slack_penalty=123.0,
         warm_start_mst=False,
         n_jobs=3,
+        use_horizon_ilp_constraints=False,
+        horizon_constraint_weight=4.0,
+        horizon_positive_threshold=0.75,
+        horizon_negative_threshold=0.15,
+        horizon_pair_budget=12,
+        horizon_paths_per_pair=5,
+        horizon_max_iterations=2,
     )
     path = tmp_path / "decoder.json"
 
@@ -2276,6 +2374,13 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
     assert restored.degree_slack_penalty == pytest.approx(123.0)
     assert restored.warm_start_mst is False
     assert restored.n_jobs == 3
+    assert restored.use_horizon_ilp_constraints is False
+    assert restored.horizon_constraint_weight == pytest.approx(4.0)
+    assert restored.horizon_positive_threshold == pytest.approx(0.75)
+    assert restored.horizon_negative_threshold == pytest.approx(0.15)
+    assert restored.horizon_pair_budget == 12
+    assert restored.horizon_paths_per_pair == 5
+    assert restored.horizon_max_iterations == 2
 
 
 def test_decoder_load_supports_legacy_dill_artifact(tmp_path):

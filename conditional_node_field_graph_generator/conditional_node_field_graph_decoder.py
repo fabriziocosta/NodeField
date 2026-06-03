@@ -179,6 +179,15 @@ def _decode_single_adjacency_job(
     verbose: int,
     diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
     adjacency_time_limit_seconds: Optional[float] = 60.0,
+    horizon_probability_matrix: Optional[np.ndarray] = None,
+    horizon: Optional[int] = None,
+    use_horizon_ilp_constraints: bool = True,
+    horizon_constraint_weight: float = 2.0,
+    horizon_positive_threshold: float = 0.8,
+    horizon_negative_threshold: float = 0.2,
+    horizon_pair_budget: int = 24,
+    horizon_paths_per_pair: int = 8,
+    horizon_max_iterations: int = 1,
 ) -> np.ndarray:
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
@@ -187,6 +196,13 @@ def _decode_single_adjacency_job(
         warm_start_mst=warm_start_mst,
         diagnostic_graph_renderer=diagnostic_graph_renderer,
         adjacency_time_limit_seconds=adjacency_time_limit_seconds,
+        use_horizon_ilp_constraints=use_horizon_ilp_constraints,
+        horizon_constraint_weight=horizon_constraint_weight,
+        horizon_positive_threshold=horizon_positive_threshold,
+        horizon_negative_threshold=horizon_negative_threshold,
+        horizon_pair_budget=horizon_pair_budget,
+        horizon_paths_per_pair=horizon_paths_per_pair,
+        horizon_max_iterations=horizon_max_iterations,
     )
     n_nodes = min(len(existence_mask), len(degree_prediction))
     prob_matrix = np.zeros((n_nodes, n_nodes))
@@ -216,6 +232,9 @@ def _decode_single_adjacency_job(
         target_degrees,
         target_edge_count=desired_edge_count,
         timeLimit=adjacency_time_limit_seconds,
+        horizon_probability_matrix=horizon_probability_matrix,
+        horizon=horizon,
+        horizon_node_mask=existent,
     )
     if int(verbose) >= 4 and diagnostic_graph_renderer is None:
         _plot_decoder_diagnostics(
@@ -275,6 +294,9 @@ def build_single_generated_node_batch(
     edge_label_probabilities = None if generated_nodes.edge_label_probabilities is None else [
         np.asarray(generated_nodes.edge_label_probabilities[graph_idx], dtype=float)
     ]
+    horizon_probability_matrices = None if generated_nodes.horizon_probability_matrices is None else [
+        np.asarray(generated_nodes.horizon_probability_matrices[graph_idx], dtype=float)
+    ]
     return GeneratedNodeBatch(
         node_embeddings_list=node_embeddings_list,
         node_presence_mask=node_presence_mask,
@@ -288,6 +310,8 @@ def build_single_generated_node_batch(
         edge_existence_probabilities=edge_existence_probabilities,
         edge_label_logits=edge_label_logits,
         edge_label_probabilities=edge_label_probabilities,
+        horizon_probability_matrices=horizon_probability_matrices,
+        horizon=generated_nodes.horizon,
     )
 
 
@@ -436,6 +460,13 @@ class ConditionalNodeFieldGraphDecoder(object):
         diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
         adjacency_time_limit_seconds: Optional[float] = 60.0,
         parallel_decode_timeout_seconds: Optional[float] = 30.0,
+        use_horizon_ilp_constraints: bool = True,
+        horizon_constraint_weight: float = 2.0,
+        horizon_positive_threshold: float = 0.8,
+        horizon_negative_threshold: float = 0.2,
+        horizon_pair_budget: int = 24,
+        horizon_paths_per_pair: int = 8,
+        horizon_max_iterations: int = 1,
     ) -> None:
         self.verbose = verbose
         self.existence_threshold = existence_threshold
@@ -450,7 +481,134 @@ class ConditionalNodeFieldGraphDecoder(object):
         self.parallel_decode_timeout_seconds = (
             None if parallel_decode_timeout_seconds is None else float(parallel_decode_timeout_seconds)
         )
+        self.use_horizon_ilp_constraints = bool(use_horizon_ilp_constraints)
+        self.horizon_constraint_weight = float(horizon_constraint_weight)
+        self.horizon_positive_threshold = float(horizon_positive_threshold)
+        self.horizon_negative_threshold = float(horizon_negative_threshold)
+        self.horizon_pair_budget = int(horizon_pair_budget)
+        self.horizon_paths_per_pair = int(horizon_paths_per_pair)
+        self.horizon_max_iterations = int(horizon_max_iterations)
         self.active_time_limit_seconds: Optional[float] = None
+
+    @staticmethod
+    def _edge_key(i: int, j: int) -> Edge:
+        return (int(i), int(j)) if int(i) < int(j) else (int(j), int(i))
+
+    @classmethod
+    def _path_edges(cls, path: Sequence[int]) -> List[Edge]:
+        return [cls._edge_key(path[idx], path[idx + 1]) for idx in range(len(path) - 1)]
+
+    @staticmethod
+    def _edge_logit(probability: float) -> float:
+        edge_prob = float(np.clip(probability, _DECODER_PROBABILITY_EPS, 1.0 - _DECODER_PROBABILITY_EPS))
+        return float(np.log(edge_prob) - np.log1p(-edge_prob))
+
+    def _select_horizon_pairs(
+        self,
+        horizon_probability_matrix: np.ndarray,
+        *,
+        active_mask: np.ndarray,
+    ) -> Tuple[List[Tuple[int, int, float, float]], List[Tuple[int, int, float, float]]]:
+        horizon_probs = np.asarray(horizon_probability_matrix, dtype=float)
+        active_indices = np.flatnonzero(np.asarray(active_mask, dtype=bool))
+        positive_pairs = []
+        negative_pairs = []
+        for local_i, i in enumerate(active_indices):
+            for j in active_indices[local_i + 1:]:
+                q_ij = float(np.clip((horizon_probs[i, j] + horizon_probs[j, i]) / 2.0, 0.0, 1.0))
+                confidence = abs(q_ij - 0.5) * 2.0
+                if q_ij >= self.horizon_positive_threshold:
+                    positive_pairs.append((int(i), int(j), q_ij, confidence))
+                elif q_ij <= self.horizon_negative_threshold:
+                    negative_pairs.append((int(i), int(j), q_ij, confidence))
+
+        positive_pairs.sort(key=lambda item: (-item[3], item[0], item[1]))
+        negative_pairs.sort(key=lambda item: (-item[3], item[0], item[1]))
+        budget = max(0, int(self.horizon_pair_budget))
+        if budget == 0:
+            return [], []
+        if positive_pairs and negative_pairs:
+            positive_budget = max(1, budget // 2)
+            negative_budget = max(0, budget - positive_budget)
+        elif positive_pairs:
+            positive_budget = budget
+            negative_budget = 0
+        else:
+            positive_budget = 0
+            negative_budget = budget
+        return positive_pairs[:positive_budget], negative_pairs[:negative_budget]
+
+    def _enumerate_horizon_paths(
+        self,
+        source: int,
+        target: int,
+        *,
+        horizon: int,
+        active_mask: np.ndarray,
+        edge_logit_matrix: np.ndarray,
+    ) -> List[Tuple[List[int], float]]:
+        max_paths = max(1, int(self.horizon_paths_per_pair))
+        max_candidates = max(max_paths * 16, max_paths)
+        active_nodes = set(int(idx) for idx in np.flatnonzero(np.asarray(active_mask, dtype=bool)))
+        if source not in active_nodes or target not in active_nodes:
+            return []
+        ordered_neighbors = {
+            node: sorted(
+                (candidate for candidate in active_nodes if candidate != node),
+                key=lambda candidate: (-float(edge_logit_matrix[node, candidate]), candidate),
+            )
+            for node in active_nodes
+        }
+        candidates: List[Tuple[List[int], float]] = []
+
+        def _walk(path: List[int], visited: set[int]) -> None:
+            if len(candidates) >= max_candidates:
+                return
+            current = path[-1]
+            if current == target:
+                score = sum(
+                    float(edge_logit_matrix[path[idx], path[idx + 1]])
+                    for idx in range(len(path) - 1)
+                )
+                candidates.append((list(path), score))
+                return
+            if len(path) - 1 >= int(horizon):
+                return
+            for neighbor in ordered_neighbors[current]:
+                if neighbor in visited:
+                    continue
+                _walk(path + [neighbor], visited | {neighbor})
+                if len(candidates) >= max_candidates:
+                    return
+
+        _walk([int(source)], {int(source)})
+        candidates.sort(key=lambda item: (-item[1], len(item[0]), item[0]))
+        return candidates[:max_paths]
+
+    def _find_negative_horizon_cuts(
+        self,
+        adj: np.ndarray,
+        negative_pairs: Sequence[Tuple[int, int, float, float]],
+        *,
+        horizon: int,
+    ) -> List[Tuple[List[Edge], float]]:
+        graph = nx.from_numpy_array(np.asarray(adj, dtype=int))
+        cuts = []
+        seen = set()
+        for i, j, _probability, confidence in negative_pairs:
+            try:
+                path = nx.shortest_path(graph, int(i), int(j))
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                continue
+            if len(path) - 1 > int(horizon):
+                continue
+            edge_set = self._path_edges(path)
+            frozen = frozenset(edge_set)
+            if not frozen or frozen in seen:
+                continue
+            seen.add(frozen)
+            cuts.append((edge_set, float(confidence)))
+        return cuts
 
     def optimize_adjacency_matrix(
         self,
@@ -462,6 +620,9 @@ class ConditionalNodeFieldGraphDecoder(object):
         alpha: float = 0.7,
         connectivity: Optional[bool] = None,
         forbidden_edge_sets: Optional[Iterable[Iterable[Sequence[Any]]]] = None,
+        horizon_probability_matrix: Optional[np.ndarray] = None,
+        horizon: Optional[int] = None,
+        horizon_node_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         n = prob_matrix.shape[0]
         if alpha != 1.0:
@@ -469,90 +630,188 @@ class ConditionalNodeFieldGraphDecoder(object):
         if connectivity is None:
             connectivity = self.enforce_connectivity
 
-        prob = pulp.LpProblem("AdjacencyMatrixOptimization", pulp.LpMaximize)
-        x = {(i, j): pulp.LpVariable(f"x_{i}_{j}", cat="Binary") for i in range(n) for j in range(i + 1, n)}
-        u = {i: pulp.LpVariable(f"u_{i}", lowBound=0, cat="Integer") for i in range(n)}
-        v = {i: pulp.LpVariable(f"v_{i}", lowBound=0, cat="Integer") for i in range(n)}
-
-        edge_log_likelihood_terms = []
+        edge_logit_matrix = np.zeros((n, n), dtype=float)
         for i in range(n):
             for j in range(i + 1, n):
-                edge_prob = float(np.clip(prob_matrix[i, j], _DECODER_PROBABILITY_EPS, 1.0 - _DECODER_PROBABILITY_EPS))
-                edge_log_likelihood_terms.append((np.log(edge_prob) - np.log(1.0 - edge_prob)) * x[(i, j)])
-        prob += (
-            pulp.lpSum(edge_log_likelihood_terms)
-            - self.degree_slack_penalty * pulp.lpSum(u[i] + v[i] for i in range(n))
-        )
-
-        for i in range(n):
-            incident = [x[(i, j)] for j in range(i + 1, n)] + [x[(j, i)] for j in range(i) if (j, i) in x]
-            prob += (pulp.lpSum(incident) + u[i] - v[i] == target_degrees[i]), f"Degree_{i}"
-        if target_edge_count is not None:
-            resolved_edge_count = self._resolve_target_edge_count(
-                n,
-                target_edge_count,
-                connectivity=connectivity,
-            )
-            prob += (pulp.lpSum(var for var in x.values()) == resolved_edge_count), "EdgeCount"
-
-        if connectivity:
-            directed_edges = [(i, j) for (i, j) in x] + [(j, i) for (i, j) in x]
-            f_vars = {(u_, v_): pulp.LpVariable(f"f_{u_}_{v_}", lowBound=0, cat="Continuous") for u_, v_ in directed_edges}
-            M = n - 1
-            root = 0
-            for v_idx in range(n):
-                inflow = pulp.lpSum(f_vars[(u_, v2)] for (u_, v2) in directed_edges if v2 == v_idx)
-                outflow = pulp.lpSum(f_vars[(v2, w)] for (v2, w) in directed_edges if v2 == v_idx)
-                prob += ((outflow - inflow) == M if v_idx == root else (inflow - outflow) == 1), f"Flow_{v_idx}"
-            for u_, v_ in directed_edges:
-                i, j = min(u_, v_), max(u_, v_)
-                prob += (f_vars[(u_, v_)] <= M * x[(i, j)]), f"FlowCouple_{u_}_{v_}"
+                edge_logit = self._edge_logit(float(prob_matrix[i, j]))
+                edge_logit_matrix[i, j] = edge_logit_matrix[j, i] = edge_logit
 
         normalized_forbidden_edge_sets = _normalize_violating_edge_sets(
             [] if forbidden_edge_sets is None else forbidden_edge_sets,
             n_nodes=n,
         )
-        for cut_idx, edge_set in enumerate(normalized_forbidden_edge_sets):
-            prob += (pulp.lpSum(x[edge] for edge in edge_set) <= len(edge_set) - 1), f"ForbiddenMotif_{cut_idx}"
 
-        if self.warm_start_mst:
-            graph = nx.Graph()
-            graph.add_nodes_from(range(n))
-            for i in range(n):
-                for j in range(i + 1, n):
-                    graph.add_edge(i, j, weight=prob_matrix[i, j])
-            tree = nx.maximum_spanning_tree(graph)
-            for (i, j), var in x.items():
-                var.start = 1 if tree.has_edge(i, j) else 0
+        horizon_enabled = (
+            bool(self.use_horizon_ilp_constraints)
+            and horizon_probability_matrix is not None
+            and horizon is not None
+            and int(horizon) > 1
+            and float(self.horizon_constraint_weight) > 0.0
+        )
+        positive_pairs: List[Tuple[int, int, float, float]] = []
+        negative_pairs: List[Tuple[int, int, float, float]] = []
+        if horizon_enabled:
+            horizon_probs = np.asarray(horizon_probability_matrix, dtype=float)
+            if horizon_probs.shape != (n, n):
+                raise ValueError(
+                    "horizon_probability_matrix must align with prob_matrix; "
+                    f"received {horizon_probs.shape} for n={n}."
+                )
+            active_mask = (
+                np.ones(n, dtype=bool)
+                if horizon_node_mask is None
+                else np.asarray(horizon_node_mask, dtype=bool)[:n]
+            )
+            if active_mask.shape != (n,):
+                raise ValueError("horizon_node_mask must align with prob_matrix.")
+            positive_pairs, negative_pairs = self._select_horizon_pairs(
+                horizon_probs,
+                active_mask=active_mask,
+            )
+        else:
+            horizon_probs = None
+            active_mask = np.ones(n, dtype=bool)
 
         effective_time_limit = timeLimit
         if effective_time_limit is None:
             effective_time_limit = self.active_time_limit_seconds
         if effective_time_limit is None:
             effective_time_limit = self.adjacency_time_limit_seconds
-        solver_kwargs = {"msg": verbose}
-        if effective_time_limit is not None:
-            solver_kwargs["timeLimit"] = max(1.0, float(effective_time_limit))
-        solver = pulp.PULP_CBC_CMD(**solver_kwargs)
-        prob.solve(solver)
-        status_code = int(getattr(prob, "status", 0))
-        status_label = pulp.LpStatus.get(status_code, f"Unknown({status_code})")
-        if status_code != pulp.LpStatusOptimal:
-            raise RuntimeError(
-                "Adjacency ILP did not produce an optimal solution "
-                f"(status={status_label}, code={status_code}, n={n}, "
-                f"target_degree_sum={int(sum(target_degrees))}, connectivity={bool(connectivity)})."
+
+        def _solve(negative_cuts: Sequence[Tuple[List[Edge], float]], *, solve_name: str) -> np.ndarray:
+            prob = pulp.LpProblem(solve_name, pulp.LpMaximize)
+            x = {
+                (i, j): pulp.LpVariable(f"x_{i}_{j}", cat="Binary")
+                for i in range(n)
+                for j in range(i + 1, n)
+            }
+            u = {i: pulp.LpVariable(f"u_{i}", lowBound=0, cat="Integer") for i in range(n)}
+            v = {i: pulp.LpVariable(f"v_{i}", lowBound=0, cat="Integer") for i in range(n)}
+
+            objective_terms = [
+                edge_logit_matrix[i, j] * x[(i, j)]
+                for i in range(n)
+                for j in range(i + 1, n)
+            ]
+            objective_terms.extend(
+                -self.degree_slack_penalty * (u[i] + v[i])
+                for i in range(n)
             )
 
-        adj = np.zeros((n, n), dtype=int)
-        for (i, j), var in x.items():
-            value = pulp.value(var)
-            if value is None:
-                raise RuntimeError(
-                    "Adjacency ILP finished without assigning all decision variables "
-                    f"(status={status_label}, missing_edge=({i}, {j}))."
+            for i in range(n):
+                incident = [x[(i, j)] for j in range(i + 1, n)] + [
+                    x[(j, i)] for j in range(i) if (j, i) in x
+                ]
+                prob += (pulp.lpSum(incident) + u[i] - v[i] == target_degrees[i]), f"Degree_{i}"
+            if target_edge_count is not None:
+                resolved_edge_count = self._resolve_target_edge_count(
+                    n,
+                    target_edge_count,
+                    connectivity=connectivity,
                 )
-            adj[i, j] = adj[j, i] = int(round(float(value)))
+                prob += (pulp.lpSum(var for var in x.values()) == resolved_edge_count), "EdgeCount"
+
+            if connectivity:
+                directed_edges = [(i, j) for (i, j) in x] + [(j, i) for (i, j) in x]
+                f_vars = {
+                    (u_, v_): pulp.LpVariable(f"f_{u_}_{v_}", lowBound=0, cat="Continuous")
+                    for u_, v_ in directed_edges
+                }
+                M = n - 1
+                root = 0
+                for v_idx in range(n):
+                    inflow = pulp.lpSum(f_vars[(u_, v2)] for (u_, v2) in directed_edges if v2 == v_idx)
+                    outflow = pulp.lpSum(f_vars[(v2, w)] for (v2, w) in directed_edges if v2 == v_idx)
+                    prob += ((outflow - inflow) == M if v_idx == root else (inflow - outflow) == 1), f"Flow_{v_idx}"
+                for u_, v_ in directed_edges:
+                    i, j = min(u_, v_), max(u_, v_)
+                    prob += (f_vars[(u_, v_)] <= M * x[(i, j)]), f"FlowCouple_{u_}_{v_}"
+
+            for cut_idx, edge_set in enumerate(normalized_forbidden_edge_sets):
+                prob += (pulp.lpSum(x[edge] for edge in edge_set) <= len(edge_set) - 1), f"ForbiddenMotif_{cut_idx}"
+
+            if positive_pairs:
+                for pair_idx, (i, j, _probability, confidence) in enumerate(positive_pairs):
+                    paths = self._enumerate_horizon_paths(
+                        i,
+                        j,
+                        horizon=int(horizon),
+                        active_mask=active_mask,
+                        edge_logit_matrix=edge_logit_matrix,
+                    )
+                    if not paths:
+                        continue
+                    slack = pulp.LpVariable(f"hpos_slack_{pair_idx}_{i}_{j}", lowBound=0, upBound=1, cat="Continuous")
+                    objective_terms.append(
+                        -float(self.horizon_constraint_weight) * float(confidence) * slack
+                    )
+                    path_vars = []
+                    for path_idx, (path, _path_score) in enumerate(paths):
+                        path_edges = self._path_edges(path)
+                        z_path = pulp.LpVariable(f"hpos_path_{pair_idx}_{path_idx}_{i}_{j}", cat="Binary")
+                        path_vars.append(z_path)
+                        for edge in path_edges:
+                            prob += z_path <= x[edge], f"HPosPathUpper_{pair_idx}_{path_idx}_{edge[0]}_{edge[1]}"
+                        prob += (
+                            z_path >= pulp.lpSum(x[edge] for edge in path_edges) - len(path_edges) + 1
+                        ), f"HPosPathLower_{pair_idx}_{path_idx}"
+                    prob += (pulp.lpSum(path_vars) + slack >= 1), f"HPosPair_{pair_idx}_{i}_{j}"
+
+            for cut_idx, (edge_set, confidence) in enumerate(negative_cuts):
+                slack = pulp.LpVariable(f"hneg_slack_{cut_idx}", lowBound=0, upBound=1, cat="Continuous")
+                objective_terms.append(
+                    -float(self.horizon_constraint_weight) * float(confidence) * slack
+                )
+                prob += (
+                    pulp.lpSum(x[edge] for edge in edge_set) <= len(edge_set) - 1 + slack
+                ), f"HNegPathCut_{cut_idx}"
+
+            prob += pulp.lpSum(objective_terms)
+
+            if self.warm_start_mst:
+                graph = nx.Graph()
+                graph.add_nodes_from(range(n))
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        graph.add_edge(i, j, weight=prob_matrix[i, j])
+                tree = nx.maximum_spanning_tree(graph)
+                for (i, j), var in x.items():
+                    var.start = 1 if tree.has_edge(i, j) else 0
+
+            solver_kwargs = {"msg": verbose}
+            if effective_time_limit is not None:
+                solver_kwargs["timeLimit"] = max(1.0, float(effective_time_limit))
+            solver = pulp.PULP_CBC_CMD(**solver_kwargs)
+            prob.solve(solver)
+            status_code = int(getattr(prob, "status", 0))
+            status_label = pulp.LpStatus.get(status_code, f"Unknown({status_code})")
+            if status_code != pulp.LpStatusOptimal:
+                raise RuntimeError(
+                    "Adjacency ILP did not produce an optimal solution "
+                    f"(status={status_label}, code={status_code}, n={n}, "
+                    f"target_degree_sum={int(sum(target_degrees))}, connectivity={bool(connectivity)})."
+                )
+
+            adj = np.zeros((n, n), dtype=int)
+            for (i, j), var in x.items():
+                value = pulp.value(var)
+                if value is None:
+                    raise RuntimeError(
+                        "Adjacency ILP finished without assigning all decision variables "
+                        f"(status={status_label}, missing_edge=({i}, {j}))."
+                    )
+                adj[i, j] = adj[j, i] = int(round(float(value)))
+            return adj
+
+        adj = _solve([], solve_name="AdjacencyMatrixOptimization")
+        if negative_pairs and int(self.horizon_max_iterations) > 0:
+            negative_cuts = self._find_negative_horizon_cuts(
+                adj,
+                negative_pairs,
+                horizon=int(horizon),
+            )
+            if negative_cuts:
+                adj = _solve(negative_cuts, solve_name="AdjacencyMatrixOptimizationHorizonRepair")
         return adj
 
     def graphs_to_adjacency_matrices(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
@@ -912,6 +1171,8 @@ class ConditionalNodeFieldGraphDecoder(object):
         self,
         generated_nodes: GeneratedNodeBatch,
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
+        horizon_probability_matrices: Optional[List[np.ndarray]] = None,
+        horizon: Optional[int] = None,
         desired_node_counts: Optional[Sequence[int]] = None,
         desired_edge_counts: Optional[Sequence[int]] = None,
     ) -> List[np.ndarray]:
@@ -939,7 +1200,17 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "desired_edge_counts must align with generated_nodes "
                 f"(got {len(desired_edge_counts)} counts for {len(existence_masks)} graphs)."
             )
+        if horizon_probability_matrices is None:
+            horizon_probability_matrices = generated_nodes.horizon_probability_matrices
+        if horizon is None:
+            horizon = generated_nodes.horizon
+        if horizon_probability_matrices is not None and len(horizon_probability_matrices) != len(existence_masks):
+            raise ValueError(
+                "horizon_probability_matrices must align with generated_nodes "
+                f"(got {len(horizon_probability_matrices)} matrices for {len(existence_masks)} graphs)."
+            )
         predicted_probs_list = []
+        horizon_probs_list = []
         for existence_mask, degree_prediction, prob_matrix in zip(
             existence_masks,
             degree_predictions,
@@ -957,6 +1228,20 @@ class ConditionalNodeFieldGraphDecoder(object):
                 predicted_probs_list.append(prob_matrix[mask])
             else:
                 predicted_probs_list.append(prob_matrix)
+        if horizon_probability_matrices is None:
+            horizon_probs_list = [None for _ in predicted_probs_list]
+        else:
+            for graph_idx, (existence_mask, degree_prediction, horizon_matrix) in enumerate(
+                zip(existence_masks, degree_predictions, horizon_probability_matrices)
+            ):
+                n_nodes = min(len(existence_mask), len(degree_prediction))
+                horizon_matrix = np.asarray(horizon_matrix, dtype=float)
+                if horizon_matrix.shape != (n_nodes, n_nodes):
+                    raise ValueError(
+                        "Horizon-probability matrices must align with node predictions; "
+                        f"graph {graph_idx} received {horizon_matrix.shape} for n_nodes={n_nodes}."
+                    )
+                horizon_probs_list.append(horizon_matrix)
 
         jobs = [
             (
@@ -980,6 +1265,15 @@ class ConditionalNodeFieldGraphDecoder(object):
                         else float(self.adjacency_time_limit_seconds)
                     )
                 ),
+                None if horizon_probs_list[graph_idx] is None else np.asarray(horizon_probs_list[graph_idx], dtype=float),
+                None if horizon is None else int(horizon),
+                bool(self.use_horizon_ilp_constraints),
+                float(self.horizon_constraint_weight),
+                float(self.horizon_positive_threshold),
+                float(self.horizon_negative_threshold),
+                int(self.horizon_pair_budget),
+                int(self.horizon_paths_per_pair),
+                int(self.horizon_max_iterations),
             )
             for graph_idx in range(len(predicted_probs_list))
         ]
@@ -1193,6 +1487,8 @@ class ConditionalNodeFieldGraphDecoder(object):
         predicted_edge_probability_matrices: Optional[List[np.ndarray]] = None,
         predicted_edge_labels_list: Optional[List[np.ndarray]] = None,
         predicted_edge_label_matrices: Optional[List[np.ndarray]] = None,
+        horizon_probability_matrices: Optional[List[np.ndarray]] = None,
+        horizon: Optional[int] = None,
         desired_node_counts: Optional[Sequence[int]] = None,
         desired_edge_counts: Optional[Sequence[int]] = None,
         use_ilp_decoder: bool = True,
@@ -1202,6 +1498,8 @@ class ConditionalNodeFieldGraphDecoder(object):
             adj_mtx_list = self.decode_adjacency_matrix(
                 generated_nodes,
                 predicted_edge_probability_matrices=predicted_edge_probability_matrices,
+                horizon_probability_matrices=horizon_probability_matrices,
+                horizon=horizon,
                 desired_node_counts=desired_node_counts,
                 desired_edge_counts=desired_edge_counts,
             )
@@ -1347,6 +1645,13 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "n_jobs": self.n_jobs,
                 "adjacency_time_limit_seconds": self.adjacency_time_limit_seconds,
                 "parallel_decode_timeout_seconds": self.parallel_decode_timeout_seconds,
+                "use_horizon_ilp_constraints": self.use_horizon_ilp_constraints,
+                "horizon_constraint_weight": self.horizon_constraint_weight,
+                "horizon_positive_threshold": self.horizon_positive_threshold,
+                "horizon_negative_threshold": self.horizon_negative_threshold,
+                "horizon_pair_budget": self.horizon_pair_budget,
+                "horizon_paths_per_pair": self.horizon_paths_per_pair,
+                "horizon_max_iterations": self.horizon_max_iterations,
             },
         }
         with open(path, "w", encoding="utf-8") as handle:
@@ -1380,6 +1685,13 @@ class ConditionalNodeFieldGraphDecoder(object):
             n_jobs=config.get("n_jobs", 1),
             adjacency_time_limit_seconds=config.get("adjacency_time_limit_seconds", 60.0),
             parallel_decode_timeout_seconds=config.get("parallel_decode_timeout_seconds", 30.0),
+            use_horizon_ilp_constraints=config.get("use_horizon_ilp_constraints", True),
+            horizon_constraint_weight=config.get("horizon_constraint_weight", 2.0),
+            horizon_positive_threshold=config.get("horizon_positive_threshold", 0.8),
+            horizon_negative_threshold=config.get("horizon_negative_threshold", 0.2),
+            horizon_pair_budget=config.get("horizon_pair_budget", 24),
+            horizon_paths_per_pair=config.get("horizon_paths_per_pair", 8),
+            horizon_max_iterations=config.get("horizon_max_iterations", 1),
         )
 
 

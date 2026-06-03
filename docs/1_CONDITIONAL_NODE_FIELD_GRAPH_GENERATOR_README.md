@@ -235,13 +235,14 @@ This is the output of the conditional node generator during inference:
 - optional edge label matrices,
 - optional node-label logits and probabilities,
 - optional edge-existence probabilities,
+- optional higher-horizon locality probabilities,
 - optional edge-label logits and probabilities.
 
 The decoder consumes this object and reconstructs `networkx` graphs.
 The richer probability tensors keep full decoder shapes and are intended for
-inspection, analysis, and future oracle logic. The current decoder still relies
-on the hard channels (`node_labels`, `edge_probability_matrices`,
-`edge_label_matrices`) for reconstruction.
+inspection, analysis, oracle logic, and horizon-aware ILP decoding. Direct
+edge probabilities remain the main structural score, while higher-horizon
+locality probabilities can add soft path constraints when `locality_horizon > 1`.
 
 Conceptually:
 
@@ -488,6 +489,7 @@ This stage:
 
 - decides which nodes exist,
 - solves for graph structure,
+- optionally uses higher-horizon locality predictions as soft ILP path constraints,
 - assigns labels according to learned/constant/disabled channel modes.
 
 The graph generator itself does not build edges directly. It delegates that responsibility to the decoder.

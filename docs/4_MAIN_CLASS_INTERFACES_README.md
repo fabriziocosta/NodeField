@@ -160,6 +160,8 @@ GeneratedNodeBatch(
     edge_existence_probabilities: Optional[List[np.ndarray]] = None,
     edge_label_logits: Optional[List[np.ndarray]] = None,
     edge_label_probabilities: Optional[List[np.ndarray]] = None,
+    horizon_probability_matrices: Optional[List[np.ndarray]] = None,
+    horizon: Optional[int] = None,
 )
 ```
 
@@ -212,6 +214,16 @@ Fields:
 - `edge_label_probabilities`
   Optional dense per-graph edge-label probabilities with shape `[N, N, C_edge]`.
   These are `softmax(edge_label_logits, axis=-1)`.
+
+- `horizon_probability_matrices`
+  Optional dense per-graph higher-horizon locality probabilities with shape
+  `[N, N]`. These estimate whether two node slots should be within
+  `horizon` graph hops and are used by horizon-aware ILP decoding when present.
+
+- `horizon`
+  Optional shortest-path horizon associated with `horizon_probability_matrices`.
+  Values greater than `1` activate soft horizon constraints in the ILP decoder
+  when the decoder setting is enabled.
 
 Masking convention:
 
@@ -744,6 +756,13 @@ ConditionalNodeFieldGraphDecoder(
     warm_start_mst: bool = True,
     n_jobs: int = 1,
     diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
+    use_horizon_ilp_constraints: bool = True,
+    horizon_constraint_weight: float = 2.0,
+    horizon_positive_threshold: float = 0.8,
+    horizon_negative_threshold: float = 0.2,
+    horizon_pair_budget: int = 24,
+    horizon_paths_per_pair: int = 8,
+    horizon_max_iterations: int = 1,
 )
 ```
 
@@ -780,6 +799,32 @@ Parameters:
 - `diagnostic_graph_renderer`
   Optional callable used by high-verbosity notebook workflows to render decoded
   graphs alongside decoder diagnostics.
+
+- `use_horizon_ilp_constraints`
+  Whether the ILP may use auxiliary higher-horizon locality predictions as soft
+  path constraints. This only activates when horizon probability matrices are
+  present and the horizon is greater than `1`.
+
+- `horizon_constraint_weight`
+  Slack penalty weight for violated horizon-locality constraints.
+  Increase: stronger pressure to realize or avoid short paths predicted by the
+  horizon head. Decrease: direct edge and degree terms dominate more strongly.
+
+- `horizon_positive_threshold`
+  Minimum locality probability for adding positive short-path constraints.
+
+- `horizon_negative_threshold`
+  Maximum locality probability for adding negative short-path cuts.
+
+- `horizon_pair_budget`
+  Maximum number of high-confidence horizon pairs considered per graph.
+
+- `horizon_paths_per_pair`
+  Maximum number of candidate short paths enumerated for each positive pair.
+
+- `horizon_max_iterations`
+  Maximum number of negative horizon-cut repair re-solves after the first ILP
+  solution.
 
 ### Main Public Method
 
@@ -913,7 +958,9 @@ ConditionalNodeFieldGraphGenerator(
 - `locality_horizon`
   Shortest-path horizon used for locality supervision.
   Increase: supervision reaches farther graph neighborhoods, making structure learning more global.
-  Decrease toward `1`: supervision is more local and direct.
+  Decrease toward `1`: supervision is more local and direct. Values greater
+  than `1` train the auxiliary horizon head whose predictions can guide the
+  ILP decoder through soft path constraints.
 
 - `negative_sample_factor`
   Number of negative locality samples relative to positives.

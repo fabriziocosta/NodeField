@@ -96,6 +96,8 @@ class GeneratedNodeBatch:
     edge_existence_probabilities: Optional[List[np.ndarray]] = None
     edge_label_logits: Optional[List[np.ndarray]] = None
     edge_label_probabilities: Optional[List[np.ndarray]] = None
+    horizon_probability_matrices: Optional[List[np.ndarray]] = None
+    horizon: Optional[int] = None
 
     def __len__(self) -> int:
         if self.node_embeddings_list is not None:
@@ -122,6 +124,8 @@ class GeneratedNodeBatch:
             return int(len(self.edge_label_logits))
         if self.edge_label_probabilities is not None:
             return int(len(self.edge_label_probabilities))
+        if self.horizon_probability_matrices is not None:
+            return int(len(self.horizon_probability_matrices))
         return 0
 
 
@@ -794,11 +798,16 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                 dropout=transformer_dropout,
             )
 
-    def _compute_edge_probability_matrices(self, latent_tokens: torch.Tensor) -> torch.Tensor:
-        """Evaluate the edge head on every ordered node pair.
+    def _compute_pair_probability_matrices(
+        self,
+        latent_tokens: torch.Tensor,
+        edge_head: nn.Module,
+    ) -> torch.Tensor:
+        """Evaluate a pairwise edge/locality head on every ordered node pair.
 
         Args:
             latent_tokens (torch.Tensor): Input value.
+            edge_head (nn.Module): Pairwise MLP to evaluate.
 
         Returns:
             torch.Tensor: Computed result.
@@ -806,7 +815,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         batch_size, node_count, latent_dim = latent_tokens.shape
         src = latent_tokens.unsqueeze(2).expand(batch_size, node_count, node_count, latent_dim)
         dst = latent_tokens.unsqueeze(1).expand(batch_size, node_count, node_count, latent_dim)
-        edge_logits = self.edge_head(
+        edge_logits = edge_head(
             src.reshape(-1, latent_dim),
             dst.reshape(-1, latent_dim),
         ).reshape(batch_size, node_count, node_count)
@@ -814,6 +823,14 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         diagonal_mask = torch.eye(node_count, dtype=torch.bool, device=latent_tokens.device).unsqueeze(0)
         edge_probs = edge_probs.masked_fill(diagonal_mask, 0.0)
         return edge_probs
+
+    def _compute_edge_probability_matrices(self, latent_tokens: torch.Tensor) -> torch.Tensor:
+        """Evaluate the direct edge head on every ordered node pair."""
+        return self._compute_pair_probability_matrices(latent_tokens, self.edge_head)
+
+    def _compute_horizon_probability_matrices(self, latent_tokens: torch.Tensor) -> torch.Tensor:
+        """Evaluate the auxiliary locality head on every ordered node pair."""
+        return self._compute_pair_probability_matrices(latent_tokens, self.auxiliary_edge_head)
 
     @staticmethod
     def _scale_normalized_huber_loss(
@@ -1560,6 +1577,7 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         self._last_edge_label_matrices = None
         self._last_edge_label_logits = None
         self._last_edge_label_probabilities = None
+        self._last_horizon_probability_matrices = None
         self._last_node_presence_mask = None
         self._last_node_existence_probabilities = None
         self._last_deg_classes = None
@@ -1640,6 +1658,9 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                 edge_probs = self._compute_edge_probability_matrices(latent_tokens)
                 self._last_edge_existence_probabilities = edge_probs.detach().cpu()
                 self._last_edge_probability_matrices = edge_probs.detach().cpu()
+            if self.use_auxiliary_locality_supervision:
+                horizon_probs = self._compute_horizon_probability_matrices(latent_tokens)
+                self._last_horizon_probability_matrices = horizon_probs.detach().cpu()
             if self.use_edge_label_head:
                 edge_label_logits = self._compute_edge_label_logits(latent_tokens)
                 self._last_edge_label_logits = edge_label_logits.detach().cpu()
@@ -1826,6 +1847,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.last_predicted_node_existence_probabilities_ = None
         self.last_predicted_edge_probability_matrices_ = None
         self.last_predicted_edge_existence_probabilities_ = None
+        self.last_predicted_horizon_probability_matrices_ = None
         self.last_predicted_edge_label_matrices_ = None
         self.last_predicted_edge_label_logits_ = None
         self.last_predicted_edge_label_probabilities_ = None
@@ -3015,6 +3037,10 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         )
         self.last_predicted_edge_probability_matrices_ = edge_probability_matrices
         self.last_predicted_edge_existence_probabilities_ = edge_existence_probabilities
+        horizon_probability_matrices = self._tensor_batch_to_numpy_list(
+            getattr(self.model, "_last_horizon_probability_matrices", None)
+        )
+        self.last_predicted_horizon_probability_matrices_ = horizon_probability_matrices
 
         edge_label_class_indices = getattr(self.model, "_last_edge_label_matrices", None)
         edge_label_logits = self._tensor_batch_to_numpy_list(
@@ -3053,6 +3079,8 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             edge_existence_probabilities=edge_existence_probabilities,
             edge_label_logits=edge_label_logits,
             edge_label_probabilities=edge_label_probabilities,
+            horizon_probability_matrices=horizon_probability_matrices,
+            horizon=int(self.locality_horizon),
         )
 
     def predict(

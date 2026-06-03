@@ -368,7 +368,9 @@ $$
 \mathrm{BCEWithLogits}(\ell^{\mathrm{aux}}, y^{\mathrm{aux}})
 $$
 
-This term is intended as representation regularization rather than as the primary decoder-facing edge signal.
+Direct edge prediction remains the primary decoder-facing structural signal.
+When these auxiliary predictions are available at sampling time, the ILP decoder
+can also use them as soft higher-horizon path constraints.
 
 This term is logged as:
 

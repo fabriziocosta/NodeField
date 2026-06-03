@@ -30,16 +30,7 @@ except ModuleNotFoundError:  # pragma: no cover - depends on optional chemistry 
     draw_molecules = None
 from sklearn.model_selection import train_test_split
 
-try:
-    from abstractgraph.operators import compose, cycle, neighborhood, unlabel, combination, edge, path
-except ModuleNotFoundError:
-    compose = None
-    cycle = None
-    neighborhood = None
-    unlabel = None
-    combination = None
-    edge = None
-    path = None
+from abstractgraph.operators import *
 
 try:
     from abstractgraph_ml.feasibility import (
@@ -423,7 +414,7 @@ def ensure_demo_feasibility_estimator(feasibility_estimator):
     if child_estimators is None:
         return feasibility_estimator
     child_estimators = list(child_estimators)
-    default_names = ["edge", "path", "valence", "cycle"]
+    default_names = ["edge", "path", "valence", "cycle", "aromatic"]
     estimator_names = (
         default_names[: len(child_estimators)]
         if len(child_estimators) <= len(default_names)
@@ -928,7 +919,7 @@ def build_graph_generator(
     langevin_noise_scale=0.0,
     cfg_condition_dropout_prob=0.1,
     cfg_null_target_strategy="zero",
-    locality_horizon=1,
+    locality_horizon=3,
     locality_sample_fraction=0.5,
     negative_sample_factor=1,
     locality_sampling_strategy="stratified_preserve",
@@ -946,6 +937,13 @@ def build_graph_generator(
     decoder_degree_slack_penalty=1e6,
     decoder_warm_start_mst=True,
     decoder_n_jobs=1,
+    decoder_use_horizon_ilp_constraints=True,
+    decoder_horizon_constraint_weight=2.0,
+    decoder_horizon_positive_threshold=0.8,
+    decoder_horizon_negative_threshold=0.2,
+    decoder_horizon_pair_budget=24,
+    decoder_horizon_paths_per_pair=8,
+    decoder_horizon_max_iterations=1,
     artifact_root=None,
     checkpoint_root=None,
     model_name=None,
@@ -1032,6 +1030,13 @@ def build_graph_generator(
             backend=feasibility_backend,
             n_jobs=feasibility_n_jobs,
         )
+        feasibility_aromatic = FeasibilityEstimatorFeatureCannotExist(
+            decomposition_function=compose(connected_component(), unlabel(), merge(use_edges=True), filter_by_edge_label(must_have_one_of=['aromatic']), edge()),
+            nbits=feasibility_cycle_nbits,
+            parallel=feasibility_parallel,
+            backend=feasibility_backend,
+            n_jobs=feasibility_n_jobs,
+        )
         feasibility_estimator = FeasibilityEstimator(
             [
                 # feasibility_size,
@@ -1039,6 +1044,7 @@ def build_graph_generator(
                 feasibility_path,
                 feasibility_valence,
                 feasibility_cycle,
+                feasibility_aromatic,
                 # feasibility_unlabeled_structure,
                 # feasibility_cycle_composition,
             ],
@@ -1047,6 +1053,7 @@ def build_graph_generator(
                 "path",
                 "valence",
                 "cycle",
+                "aromatic",
             ],
         )
         feasibility_estimator = ensure_demo_feasibility_estimator(feasibility_estimator)
@@ -1111,6 +1118,13 @@ def build_graph_generator(
         degree_slack_penalty=decoder_degree_slack_penalty,
         warm_start_mst=decoder_warm_start_mst,
         n_jobs=decoder_n_jobs,
+        use_horizon_ilp_constraints=decoder_use_horizon_ilp_constraints,
+        horizon_constraint_weight=decoder_horizon_constraint_weight,
+        horizon_positive_threshold=decoder_horizon_positive_threshold,
+        horizon_negative_threshold=decoder_horizon_negative_threshold,
+        horizon_pair_budget=decoder_horizon_pair_budget,
+        horizon_paths_per_pair=decoder_horizon_paths_per_pair,
+        horizon_max_iterations=decoder_horizon_max_iterations,
     )
     return ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=graph_vectorizer,

@@ -110,6 +110,8 @@ The decoder operates on these predicted channels:
 - `node_presence_mask`
 - `node_degree_predictions`
 - `edge_probability_matrices`
+- `horizon_probability_matrices` when auxiliary locality was trained with
+  `locality_horizon > 1`
 - `node_labels` or a constant or disabled node-label policy
 - `edge_label_matrices` or a constant or disabled edge-label policy
 
@@ -127,11 +129,13 @@ head.
 
 `GeneratedNodeBatch` may also carry richer full-shape distribution tensors such
 as `node_label_logits`, `node_label_probabilities`,
-`edge_existence_probabilities`, `edge_label_logits`, and
-`edge_label_probabilities`. In the standard non-oracle path, structural decode
-still uses the hard channels listed above. In the oracle-guided path, these
-richer probability tensors are also used to score candidates and repair node or
-edge labels between structural re-solves.
+`edge_existence_probabilities`, `horizon_probability_matrices`,
+`edge_label_logits`, and `edge_label_probabilities`. In the standard ILP path,
+direct edge probabilities remain the primary structural signal. When
+`horizon_probability_matrices` are present and the horizon is greater than one,
+the decoder also uses them as soft path constraints. In the oracle-guided path,
+the richer probability tensors are also used to score candidates and repair node
+or edge labels between structural re-solves.
 
 ## Decoder Responsibilities
 
@@ -144,6 +148,7 @@ The decoder has four main jobs.
 - node existence predictions,
 - node degree predictions,
 - edge probability matrices,
+- optional higher-horizon locality probability matrices,
 
 and turns them into binary adjacency matrices.
 
@@ -274,6 +279,8 @@ The decoder therefore solves a global consistency problem:
 - maximize agreement with predicted edge probabilities,
 - penalize deviation from predicted degrees,
 - optionally force connectivity,
+- optionally satisfy high-confidence higher-horizon locality predictions through
+  soft path constraints,
 - optionally forbid exact violating motifs returned by the feasibility oracle.
 
 ## The Optimization Problem
@@ -308,15 +315,38 @@ The solver maximizes:
 
 - total selected edge probability,
 - minus a large penalty for total degree slack.
+- minus soft slack penalties for violated horizon-locality constraints when
+  horizon-aware ILP decoding is active.
 
 Conceptually:
 
-`maximize edge_score - degree_slack_penalty * degree_violation`
+`maximize edge_score - degree_slack_penalty * degree_violation - horizon_penalty * horizon_slack`
 
 So the solver prefers:
 
 - high-probability edges,
 - while strongly discouraging degree mismatch.
+
+### Horizon-Aware Soft Path Constraints
+
+When auxiliary locality supervision is active, the node generator predicts
+`P(dist(i, j) <= K)` for ordered node pairs. The decoder symmetrizes those
+scores, keeps only high-confidence active-node pairs, and adds soft constraints
+to the adjacency MILP.
+
+For positive horizon pairs, the decoder enumerates a small set of candidate
+paths of length at most `K`, ranked by direct-edge logits. It then adds binary
+path activation variables and a pair slack variable so the ILP is rewarded for
+realizing at least one short path without making the problem infeasible.
+
+For negative horizon pairs, the decoder first solves the ordinary/positive
+augmented MILP, detects realized short paths that contradict low horizon
+probabilities, adds soft path-breaking cuts, and re-solves within the configured
+iteration budget.
+
+This is enabled by default on the decoder, but it only activates when
+`GeneratedNodeBatch.horizon_probability_matrices` is present and
+`GeneratedNodeBatch.horizon > 1`.
 
 ### Degree Constraints
 
@@ -544,6 +574,9 @@ In practice, the decoder is best viewed as:
 - a constrained projection layer for small to medium graphs,
 - not a general-purpose large-graph combinatorial solver.
 
+Horizon-aware ILP adds more variables and may trigger one extra solve for
+negative path cuts. Use smaller pair/path budgets when decode latency matters.
+
 ## Suggested Mental Model
 
 The decoder is easiest to reason about as four layers:
@@ -579,6 +612,12 @@ and achievable degree.
 ### Direct Edges
 
 The horizon-1 edge-presence channel used as the main structural signal.
+
+### Horizon Locality
+
+The auxiliary higher-horizon prediction channel for whether two nodes should be
+within `K` graph hops. The decoder can use this as soft path guidance in the
+adjacency MILP.
 
 ### Feasibility Estimator
 

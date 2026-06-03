@@ -16,6 +16,7 @@ from conditional_node_field_graph_generator.extensions.demo.pipeline import (
     combination,
     compose,
     cycle,
+    ensure_demo_feasibility_estimator,
     fit_graph_generator,
     neighborhood,
     prepare_experiment,
@@ -382,6 +383,19 @@ def test_build_graph_generator_disables_feasibility_when_optional_dependencies_a
     assert generator.feasibility_estimator is None
     assert generator.feasibility_oracle_candidates_per_attempt == 0
     assert generator.use_feasibility_filtering is False
+
+
+def test_ensure_demo_feasibility_estimator_names_aromatic_level(monkeypatch):
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.extensions.demo.pipeline._AbstractGraphFeasibilityEstimator",
+        object,
+    )
+    children = [type("_Leaf", (), {"parallel": True})() for _ in range(5)]
+    source = type("_Composite", (), {"feasibility_estimators": children})()
+
+    wrapped = ensure_demo_feasibility_estimator(source)
+
+    assert wrapped.estimator_names == ["edge", "path", "valence", "cycle", "aromatic"]
 
 
 def test_artificial_graph_dataset_constructor_uses_internal_deduper_when_abstractgraph_is_missing():
