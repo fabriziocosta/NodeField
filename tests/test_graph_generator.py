@@ -942,6 +942,87 @@ def test_fit_rejects_invalid_training_sample_progress_options():
         )
 
 
+def test_sample_training_decode_variants_reuses_single_generated_batch():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.zeros((2, 3), dtype=float),
+        node_counts=np.array([2, 2], dtype=np.int64),
+        edge_counts=np.array([1, 1], dtype=np.int64),
+    )
+    generated = object()
+    prediction_calls = []
+    decode_calls = []
+
+    def _graph(label):
+        graph = nx.Graph()
+        graph.add_node(0, label=label)
+        return graph
+
+    generator.feasibility_estimator = object()
+    generator._sample_conditions = lambda n_samples: conditioning
+
+    def _predict_generated_nodes(graph_conditioning, **kwargs):
+        prediction_calls.append((graph_conditioning, kwargs))
+        return generated
+
+    def _decode_generated_nodes(generated_nodes, **kwargs):
+        decode_calls.append(("decode", generated_nodes, kwargs))
+        label = "raw" if kwargs["use_ilp_decoder"] is False else "ilp"
+        return [_graph(label), _graph(label)]
+
+    def _decode_generated_nodes_with_oracle(generated_nodes, **kwargs):
+        decode_calls.append(("oracle", generated_nodes, kwargs))
+        return [_graph("oracle"), _graph("oracle")]
+
+    generator._predict_generated_nodes = _predict_generated_nodes
+    generator._decode_generated_nodes = _decode_generated_nodes
+    generator._decode_generated_nodes_with_oracle = _decode_generated_nodes_with_oracle
+
+    variants = generator._sample_training_decode_variants(2)
+
+    assert prediction_calls == [
+        (
+            conditioning,
+            {
+                "sampling_mode": "unguided",
+            },
+        )
+    ]
+    assert sorted(variants) == ["ilp", "oracle", "raw"]
+    assert [graph.nodes[0]["label"] for graph in variants["raw"]] == ["raw", "raw"]
+    assert [graph.nodes[0]["label"] for graph in variants["ilp"]] == ["ilp", "ilp"]
+    assert [graph.nodes[0]["label"] for graph in variants["oracle"]] == ["oracle", "oracle"]
+    assert len(decode_calls) == 3
+    assert all(call[1] is generated for call in decode_calls)
+    assert decode_calls[0][2]["graph_conditioning"] is conditioning
+    assert decode_calls[0][2]["use_ilp_decoder"] is False
+    assert decode_calls[1][2]["graph_conditioning"] is conditioning
+    assert decode_calls[1][2]["use_ilp_decoder"] is True
+    assert decode_calls[1][2]["feasibility_oracle_candidates_per_attempt"] == 0
+    assert decode_calls[2][0] == "oracle"
+    assert decode_calls[2][2]["graph_conditioning"] is conditioning
+
+
+def test_sample_training_decode_variants_marks_oracle_missing_without_estimator():
+    generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.zeros((2, 3), dtype=float),
+        node_counts=np.array([2, 2], dtype=np.int64),
+        edge_counts=np.array([1, 1], dtype=np.int64),
+    )
+    generator.feasibility_estimator = None
+    generator._sample_conditions = lambda n_samples: conditioning
+    generator._predict_generated_nodes = lambda graph_conditioning, **kwargs: object()
+    generator._decode_generated_nodes = lambda generated_nodes, **kwargs: [nx.Graph(), nx.Graph()]
+    generator._decode_generated_nodes_with_oracle = lambda *args, **kwargs: pytest.fail(
+        "oracle decode should not be called without a feasibility estimator"
+    )
+
+    variants = generator._sample_training_decode_variants(2)
+
+    assert variants["oracle"] == [None, None]
+
+
 def test_toggle_verbose_updates_nested_components():
     node_model = _Component(verbose=False)
     decoder = _Component(verbose=False)

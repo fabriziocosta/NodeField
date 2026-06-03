@@ -524,7 +524,12 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         return self.plot_fn(graph, **positional_kwargs)
 
     def _render_pdf_page(self, epoch_record, page_path: Path):
-        n_rows = 2
+        variant_rows = (
+            ("raw", epoch_record.get("raw", epoch_record.get("direct", []))),
+            ("ILP", epoch_record.get("ilp", [])),
+            ("oracle", epoch_record.get("oracle", [])),
+        )
+        n_rows = len(variant_rows)
         n_cols = max(1, self.n_samples)
         cell_size = self.plot_kwargs.get("cell_size", self.plot_kwargs.get("size", 3.0))
         try:
@@ -538,12 +543,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
             squeeze=False,
         )
         try:
-            for row_idx, (mode_label, graphs) in enumerate(
-                (
-                    ("raw", epoch_record["direct"]),
-                    ("ILP", epoch_record["ilp"]),
-                )
-            ):
+            for row_idx, (mode_label, graphs) in enumerate(variant_rows):
                 for col_idx in range(n_cols):
                     graph = graphs[col_idx] if col_idx < len(graphs) else None
                     title = f"epoch {epoch_record['epoch']} {mode_label} #{col_idx + 1}"
@@ -622,20 +622,29 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                 f"epoch {epoch_label}: sampling training progress graphs",
                 level=2,
             )
-            direct_graphs = owner.sample(
-                n_samples=self.n_samples,
-                apply_feasibility_filtering=False,
-                use_ilp_decoder=False,
-            )
-            ilp_graphs = owner.sample(
-                n_samples=self.n_samples,
-                apply_feasibility_filtering=False,
-                use_ilp_decoder=True,
-            )
+            variant_sampler = getattr(owner, "_sample_training_decode_variants", None)
+            if callable(variant_sampler):
+                variants = variant_sampler(self.n_samples)
+                raw_graphs = variants.get("raw", [])
+                ilp_graphs = variants.get("ilp", [])
+                oracle_graphs = variants.get("oracle", [None] * self.n_samples)
+            else:
+                raw_graphs = owner.sample(
+                    n_samples=self.n_samples,
+                    apply_feasibility_filtering=False,
+                    use_ilp_decoder=False,
+                )
+                ilp_graphs = owner.sample(
+                    n_samples=self.n_samples,
+                    apply_feasibility_filtering=False,
+                    use_ilp_decoder=True,
+                )
+                oracle_graphs = [None] * self.n_samples
             epoch_record = {
                 "epoch": epoch_label,
-                "direct": list(direct_graphs),
+                "raw": list(raw_graphs),
                 "ilp": list(ilp_graphs),
+                "oracle": list(oracle_graphs),
             }
             self.epoch_samples.append({"epoch": epoch_label})
             try:

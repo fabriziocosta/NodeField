@@ -470,25 +470,28 @@ def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(m
     ]
 
 
-def test_training_sample_callback_samples_direct_and_ilp(monkeypatch, tmp_path):
+def test_training_sample_callback_uses_three_variant_sampler(monkeypatch, tmp_path):
     write_calls = []
 
     monkeypatch.setattr(
         GraphGeneratorTrainingSampleCallback,
-        "_write_pdf",
-        lambda self: write_calls.append(len(self.epoch_samples)),
+        "_write_pdf_page",
+        lambda self, epoch_record: write_calls.append(epoch_record),
     )
 
     class _Owner:
         def __init__(self):
             self.is_fitted_ = False
-            self.calls = []
+            self.calls = 0
 
-        def sample(self, **kwargs):
-            self.calls.append(kwargs)
-            graph = nx.Graph()
-            graph.add_node(0, label="C")
-            return [graph] * int(kwargs["n_samples"])
+        def _sample_training_decode_variants(self, n_samples):
+            self.calls += 1
+            variants = {}
+            for key in ("raw", "ilp", "oracle"):
+                graph = nx.Graph()
+                graph.add_node(0, label=key)
+                variants[key] = [graph] * int(n_samples)
+            return variants
 
     class _Trainer:
         sanity_checking = False
@@ -506,12 +509,13 @@ def test_training_sample_callback_samples_direct_and_ilp(monkeypatch, tmp_path):
     callback.on_validation_epoch_end(_Trainer(), object())
 
     assert owner.is_fitted_ is False
-    assert write_calls == [1]
-    assert len(owner.calls) == 2
-    assert owner.calls[0]["apply_feasibility_filtering"] is False
-    assert owner.calls[0]["use_ilp_decoder"] is False
-    assert owner.calls[1]["apply_feasibility_filtering"] is False
-    assert owner.calls[1]["use_ilp_decoder"] is True
+    assert owner.calls == 1
+    assert len(write_calls) == 1
+    assert write_calls[0]["epoch"] == 1
+    assert len(write_calls[0]["raw"]) == 3
+    assert len(write_calls[0]["ilp"]) == 3
+    assert len(write_calls[0]["oracle"]) == 3
+    assert callback.epoch_samples == [{"epoch": 1}]
 
 
 def test_training_sample_callback_respects_epoch_interval(monkeypatch, tmp_path):
@@ -519,8 +523,8 @@ def test_training_sample_callback_respects_epoch_interval(monkeypatch, tmp_path)
 
     monkeypatch.setattr(
         GraphGeneratorTrainingSampleCallback,
-        "_write_pdf",
-        lambda self: write_calls.append(len(self.epoch_samples)),
+        "_write_pdf_page",
+        lambda self, epoch_record: write_calls.append(epoch_record["epoch"]),
     )
 
     class _Owner:
@@ -552,7 +556,7 @@ def test_training_sample_callback_respects_epoch_interval(monkeypatch, tmp_path)
     callback.on_validation_epoch_end(_Trainer(), object())
 
     assert owner.calls == 2
-    assert write_calls == [1]
+    assert write_calls == [2]
 
 
 def test_training_sample_callback_writes_incremental_pdf(tmp_path):
@@ -627,8 +631,9 @@ def test_training_sample_callback_uses_custom_plot_function(tmp_path):
         plot_fn=_plot_fn,
     )
 
-    callback.epoch_samples.append({"epoch": 1, "direct": [graph], "ilp": [graph]})
-    callback._write_pdf()
+    record = {"epoch": 1, "raw": [graph], "ilp": [graph], "oracle": [graph]}
+    callback.epoch_samples.append(record)
+    callback._write_pdf_page(record)
 
     assert calls
     assert calls[0][0] is graph
@@ -654,8 +659,9 @@ def test_training_sample_callback_displays_pil_image_result(tmp_path):
         plot_fn=_plot_fn,
     )
 
-    callback.epoch_samples.append({"epoch": 1, "direct": [graph], "ilp": [graph]})
-    callback._write_pdf()
+    record = {"epoch": 1, "raw": [graph], "ilp": [graph], "oracle": [graph]}
+    callback.epoch_samples.append(record)
+    callback._write_pdf_page(record)
 
     assert (tmp_path / "samples.pdf").exists()
     assert (tmp_path / "samples.pdf").stat().st_size > 0

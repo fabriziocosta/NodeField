@@ -2319,6 +2319,41 @@ class ConditionalNodeFieldGraphGenerator(object):
         self._log_generated_batch_info(graph_conditioning, generated_nodes)
         return generated_nodes
 
+    def _sample_training_decode_variants(
+        self,
+        n_samples: int,
+    ) -> Dict[str, List[Optional[nx.Graph]]]:
+        """Sample once and decode the same neural preferences with each diagnostic decoder."""
+        sampled_conditioning = self._sample_conditions(int(n_samples))
+        generated_nodes = self._predict_generated_nodes(
+            sampled_conditioning,
+            sampling_mode="unguided",
+        )
+        raw_graphs = self._decode_generated_nodes(
+            generated_nodes,
+            graph_conditioning=sampled_conditioning,
+            feasibility_oracle_candidates_per_attempt=0,
+            use_ilp_decoder=False,
+        )
+        ilp_graphs = self._decode_generated_nodes(
+            generated_nodes,
+            graph_conditioning=sampled_conditioning,
+            feasibility_oracle_candidates_per_attempt=0,
+            use_ilp_decoder=True,
+        )
+        if getattr(self, "feasibility_estimator", None) is None:
+            oracle_graphs = [None] * int(n_samples)
+        else:
+            oracle_graphs = self._decode_generated_nodes_with_oracle(
+                generated_nodes,
+                graph_conditioning=sampled_conditioning,
+            )
+        return {
+            "raw": list(raw_graphs),
+            "ilp": list(ilp_graphs),
+            "oracle": list(oracle_graphs),
+        }
+
     @staticmethod
     def _compute_guidance_targets(violation_counts: Sequence[Any]) -> np.ndarray:
         violations = np.asarray(violation_counts, dtype=float)
