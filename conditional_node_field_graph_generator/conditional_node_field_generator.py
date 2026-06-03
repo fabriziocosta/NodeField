@@ -1804,6 +1804,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.pool_condition_tokens = bool(pool_condition_tokens)
         self.use_guidance = False
         self.use_locality_supervision = False
+        self.locality_horizon_ = 1
         self.node_field_sigma = float(node_field_sigma)
         self.sparse_supervision_mask_ratio = float(sparse_supervision_mask_ratio)
         self.sampling_step_size = float(sampling_step_size)
@@ -2261,6 +2262,13 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             auxiliary_edge_pairs,
             auxiliary_edge_targets,
         )
+        auxiliary_locality_plan = self._plan_channel("auxiliary_locality")
+        planned_horizon = (
+            getattr(auxiliary_locality_plan, "horizon", None)
+            if effective_auxiliary_locality and auxiliary_locality_plan is not None
+            else None
+        )
+        self.locality_horizon_ = int(planned_horizon if planned_horizon is not None else 1)
         if planned_direct_edges and not effective_locality and self.verbose:
             verbose_log(
                 self,
@@ -3080,7 +3088,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             edge_label_logits=edge_label_logits,
             edge_label_probabilities=edge_label_probabilities,
             horizon_probability_matrices=horizon_probability_matrices,
-            horizon=int(self.locality_horizon),
+            horizon=None if horizon_probability_matrices is None else int(self.locality_horizon_),
         )
 
     def predict(

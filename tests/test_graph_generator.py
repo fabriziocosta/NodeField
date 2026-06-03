@@ -1482,6 +1482,39 @@ def test_predict_returns_rich_distribution_tensors_and_legacy_outputs():
     assert generator.last_predicted_edge_existence_probabilities_ is batch.edge_existence_probabilities
     assert generator.last_predicted_edge_label_logits_ is batch.edge_label_logits
     assert generator.last_predicted_edge_label_probabilities_ is batch.edge_label_probabilities
+    assert batch.horizon_probability_matrices is None
+    assert batch.horizon is None
+
+
+def test_predict_returns_horizon_predictions_when_auxiliary_head_outputs_exist():
+    generated = np.asarray([[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]]], dtype=float)
+    horizon_probs = torch.tensor(
+        [[[0.0, 0.9, 0.7], [0.9, 0.0, 0.8], [0.7, 0.8, 0.0]]],
+        dtype=torch.float32,
+    )
+    cached_outputs = {
+        "_last_node_presence_mask": torch.tensor([[True, True, True]], dtype=torch.bool),
+        "_last_node_existence_probabilities": torch.tensor([[0.9, 0.8, 0.7]], dtype=torch.float32),
+        "_last_deg_classes": torch.tensor([[1, 2, 1]], dtype=torch.int64),
+        "_last_node_label_classes": None,
+        "_last_node_label_logits": None,
+        "_last_node_label_probabilities": None,
+        "_last_edge_probability_matrices": None,
+        "_last_edge_existence_probabilities": None,
+        "_last_horizon_probability_matrices": horizon_probs,
+        "_last_edge_label_matrices": None,
+        "_last_edge_label_logits": None,
+        "_last_edge_label_probabilities": None,
+    }
+    model = _PredictiveStubModel(generated=generated, cached_outputs=cached_outputs)
+    generator = _make_stubbed_node_field_generator(model)
+    generator.locality_horizon_ = 3
+
+    batch = generator.predict(_sample_graph_conditioning(batch_size=1))
+
+    assert batch.horizon == 3
+    assert generator.last_predicted_horizon_probability_matrices_ is batch.horizon_probability_matrices
+    np.testing.assert_allclose(batch.horizon_probability_matrices[0], horizon_probs[0].numpy())
 
 
 def test_predict_leaves_rich_distribution_fields_none_when_heads_are_disabled():
@@ -1513,6 +1546,8 @@ def test_predict_leaves_rich_distribution_fields_none_when_heads_are_disabled():
     assert batch.node_labels is None
     assert batch.edge_probability_matrices is None
     assert batch.edge_label_matrices is None
+    assert batch.horizon_probability_matrices is None
+    assert batch.horizon is None
 
 
 def test_predict_classifier_guided_returns_rich_distribution_tensors():
