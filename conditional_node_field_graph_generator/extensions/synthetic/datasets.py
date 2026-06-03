@@ -1,6 +1,7 @@
 """Synthetic dataset builders."""
 
 import json
+import math
 import random
 from pathlib import Path
 
@@ -154,6 +155,195 @@ def _make_component_alphabets(size, kind="int", component_specific_alphabets=Tru
     }
 
 
+_ARTIFICIAL_SECTION_COLOR_RAMPS = {
+    "cycle": ("#fee2e2", "#fca5a5", "#dc2626"),
+    "path": ("#dbeafe", "#93c5fd", "#2563eb"),
+    "star": ("#dcfce7", "#86efac", "#16a34a"),
+}
+
+
+def _hex_to_rgb(color):
+    color = color.lstrip("#")
+    return tuple(int(color[index:index + 2], 16) for index in (0, 2, 4))
+
+
+def _rgb_to_hex(rgb):
+    return "#" + "".join(f"{max(0, min(255, int(round(channel)))):02x}" for channel in rgb)
+
+
+def _interpolate_color(left, right, t):
+    left_rgb = _hex_to_rgb(left)
+    right_rgb = _hex_to_rgb(right)
+    return _rgb_to_hex(
+        tuple((1.0 - t) * left_channel + t * right_channel for left_channel, right_channel in zip(left_rgb, right_rgb))
+    )
+
+
+def _section_palette(section, size):
+    size = int(size)
+    if size < 1:
+        raise ValueError("node_alphabet_size must be >= 1.")
+    ramp = _ARTIFICIAL_SECTION_COLOR_RAMPS[section]
+    if size == 1:
+        return [ramp[-1]]
+    if size == 2:
+        return [ramp[0], ramp[-1]]
+    if size == 3:
+        return list(ramp)
+    colors = []
+    for idx in range(size):
+        t = idx / float(size - 1)
+        if t <= 0.5:
+            colors.append(_interpolate_color(ramp[0], ramp[1], t * 2.0))
+        else:
+            colors.append(_interpolate_color(ramp[1], ramp[2], (t - 0.5) * 2.0))
+    return colors
+
+
+def artificial_node_label_colors(
+    node_alphabet_size,
+    *,
+    node_alphabet_kind="int",
+    component_specific_alphabets=True,
+):
+    """Return fixed red/blue/green label colors for artificial cycle/path/star graphs."""
+    size = int(node_alphabet_size)
+    alphabets = _make_component_alphabets(
+        size,
+        node_alphabet_kind,
+        component_specific_alphabets=component_specific_alphabets,
+    )
+    colors = {}
+    for section in ("cycle", "path", "star"):
+        for label, color in zip(alphabets[section], _section_palette(section, size)):
+            colors[label] = color
+    return colors
+
+
+def make_artificial_graph_plotter(
+    node_alphabet_size,
+    *,
+    node_alphabet_kind="int",
+    component_specific_alphabets=True,
+):
+    """Build a plot function with fixed red/blue/green artificial-section colors."""
+    node_label_colors = artificial_node_label_colors(
+        node_alphabet_size,
+        node_alphabet_kind=node_alphabet_kind,
+        component_specific_alphabets=component_specific_alphabets,
+    )
+
+    def _layout(graph, layout):
+        if callable(layout):
+            return layout(graph)
+        if layout == "spring":
+            return nx.spring_layout(graph)
+        if layout == "circular":
+            return nx.circular_layout(graph)
+        if layout == "shell":
+            return nx.shell_layout(graph)
+        return nx.kamada_kawai_layout(graph)
+
+    def _draw_single_graph(
+        graph,
+        *,
+        ax=None,
+        title=None,
+        layout="kamada_kawai",
+        show_label=True,
+        node_size=300,
+        node_edgecolors="black",
+        node_linewidths=2,
+        edge_width=2,
+        label_font_size=8,
+        title_font_size=9,
+        **kwargs,
+    ):
+        del kwargs
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            _, ax = plt.subplots(1, 1, figsize=(4, 4))
+        ax.axis("off")
+        if title is not None:
+            ax.set_title(str(title), fontsize=title_font_size)
+        if graph is None:
+            ax.text(0.5, 0.5, "None", ha="center", va="center")
+            return None
+        if graph.number_of_nodes() == 0:
+            ax.text(0.5, 0.5, "empty", ha="center", va="center")
+            return None
+        pos = _layout(graph, layout)
+        labels = {}
+        node_colors = []
+        for node, attrs in graph.nodes(data=True):
+            label = attrs.get("label", "")
+            labels[node] = str(label)
+            node_colors.append(node_label_colors.get(label, "#d1d5db"))
+        nx.draw_networkx_edges(graph, pos, width=edge_width, ax=ax)
+        nx.draw_networkx_nodes(
+            graph,
+            pos,
+            ax=ax,
+            node_color=node_colors,
+            edgecolors=node_edgecolors,
+            linewidths=node_linewidths,
+            node_size=node_size,
+        )
+        if show_label:
+            nx.draw_networkx_labels(graph, pos, labels=labels, font_size=label_font_size, ax=ax)
+        return None
+
+    def plot_artificial_graphs(
+        graph_or_graphs,
+        *,
+        n_cols=None,
+        titles=None,
+        size=4,
+        **kwargs,
+    ):
+        """Plot one graph or a graph list with fixed artificial-section colors."""
+        import matplotlib.pyplot as plt
+
+        if isinstance(graph_or_graphs, nx.Graph) or graph_or_graphs is None:
+            return _draw_single_graph(graph_or_graphs, **kwargs)
+
+        graph_list = list(graph_or_graphs)
+        if not graph_list:
+            print("No graphs to display.")
+            return None
+        if titles is not None and len(titles) != len(graph_list):
+            raise ValueError(
+                f"titles must align with graphs (got {len(titles)} titles for {len(graph_list)} graphs)."
+            )
+        if n_cols is None:
+            n_cols = len(graph_list)
+        n_cols = max(1, int(n_cols))
+        n_rows = int(math.ceil(len(graph_list) / float(n_cols)))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(float(size) * n_cols, float(size) * n_rows))
+        if n_rows == 1 and n_cols == 1:
+            axes = [axes]
+        else:
+            axes = list(np.asarray(axes).flatten())
+        for idx, graph in enumerate(graph_list):
+            title = None if titles is None else titles[idx]
+            _draw_single_graph(graph, ax=axes[idx], title=title, **kwargs)
+        for ax in axes[len(graph_list):]:
+            ax.axis("off")
+        fig.tight_layout()
+        return fig
+
+    plot_artificial_graphs.node_label_colors = node_label_colors
+    plot_artificial_graphs.plot_kwargs = {
+        "size": 4,
+        "show_label": True,
+        "node_size": 300,
+        "node_linewidths": 2,
+        "edge_width": 2,
+    }
+    return plot_artificial_graphs
+
+
 def generate_cycle_path_star_graph(
     cycle_length,
     path_length,
@@ -305,6 +495,14 @@ def _sample_int_parameter(value, rng, name, *, minimum=None, valid_values=None):
     if valid_values is not None and not valid_values(value):
         raise ValueError(f"{name} has invalid value {value!r}.")
     return value
+
+
+def _max_int_parameter(value):
+    if isinstance(value, list):
+        value = tuple(value)
+    if isinstance(value, tuple):
+        return int(value[1])
+    return int(value)
 
 
 _ARTIFICIAL_DATASET_CONFIG_KEYS = (
@@ -538,7 +736,12 @@ def generate_artificial_dataset(
             )
         )
 
-    return graphs
+    plot_fn = make_artificial_graph_plotter(
+        node_alphabet_size=_max_int_parameter(node_alphabet_size),
+        node_alphabet_kind=node_alphabet_kind,
+        component_specific_alphabets=component_specific_alphabets,
+    )
+    return graphs, plot_fn
 
 
 def link_graphs(graph_source, graph_target, n_link_edges=0):
@@ -745,6 +948,7 @@ __all__ = [
     "AttributeGenerator",
     "generate_artificial_dataset",
     "generate_cycle_path_star_graph",
+    "make_artificial_graph_plotter",
     "link_graphs",
     "make_graph",
     "make_graphs",

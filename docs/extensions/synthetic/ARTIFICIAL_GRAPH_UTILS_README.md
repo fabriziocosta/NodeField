@@ -100,7 +100,7 @@ This distinction is used to create positive and negative synthetic classes.
 By default, `generate_artificial_dataset` also writes a reproducibility config:
 
 ```python
-graphs = generate_artificial_dataset(
+graphs, plot_artificial_graphs = generate_artificial_dataset(
     num_graphs=100,
     cycle_length=(3, 6),
     num_cycles=1,
@@ -115,6 +115,23 @@ Set `num_cycles > 1` to chain same-length cycles through shared edges. The
 first cycle connects to the path/star structure as before; each additional
 cycle shares one random edge with the previous cycle.
 
+The function returns a plain list of NetworkX graphs plus an artificial-graph
+plot function:
+
+```python
+graphs, plot_artificial_graphs = generate_artificial_dataset(...)
+plot_artificial_graphs(graphs[:20], n_cols=10)
+graph_generator.fit(
+    graphs,
+    sample_training_progress_plot_kwargs=plot_artificial_graphs.plot_kwargs,
+    sample_training_progress_plot_fn=plot_artificial_graphs,
+)
+```
+
+The plotter fixes cycle/path/star node colors to red/blue/green ramps derived
+from `node_alphabet_size`; callers may still override size, labels, node size,
+edge width, layout, and related rendering options.
+
 The function prints the generated YAML file name, for example:
 
 ```text
@@ -124,7 +141,7 @@ Saved artificial dataset config: artificial-cycle-path-star-n100-c3-6-p1-4-r3x1-
 The same configuration can be loaded later:
 
 ```python
-graphs = generate_artificial_dataset(
+graphs, plot_artificial_graphs = generate_artificial_dataset(
     load_from_file="artificial-cycle-path-star-n100-c3-6-p1-4-r3x1-3.yaml",
     save_config=False,
 )
