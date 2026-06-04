@@ -257,7 +257,17 @@ def list_saved_graph_generators(model_dir=None):
         for path in files
     ]
     frame = pd.DataFrame(rows)
-    display(frame)
+    display_frame = frame.style.set_properties(
+        subset=["name"],
+        **{
+            "max-width": "none",
+            "white-space": "nowrap",
+            "overflow": "visible",
+            "text-overflow": "clip",
+        },
+    )
+    with pd.option_context("display.max_colwidth", None):
+        display(display_frame)
     return [path.name for path in files]
 
 

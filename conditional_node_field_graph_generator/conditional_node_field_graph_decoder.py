@@ -1320,6 +1320,11 @@ class ConditionalNodeFieldGraphDecoder(object):
             generated_nodes.node_existence_probabilities,
             dtype=float,
         )
+        degree_predictions = (
+            None
+            if generated_nodes.node_degree_predictions is None
+            else np.asarray(generated_nodes.node_degree_predictions, dtype=float)
+        )
         if desired_node_counts is not None and len(desired_node_counts) != len(existence_masks):
             raise ValueError(
                 "desired_node_counts must align with generated_nodes "
@@ -1329,6 +1334,11 @@ class ConditionalNodeFieldGraphDecoder(object):
             raise ValueError(
                 "desired_edge_counts must align with generated_nodes "
                 f"(got {len(desired_edge_counts)} counts for {len(existence_masks)} graphs)."
+            )
+        if degree_predictions is not None and len(degree_predictions) != len(existence_masks):
+            raise ValueError(
+                "node_degree_predictions must align with generated_nodes "
+                f"(got {len(degree_predictions)} degree rows for {len(existence_masks)} graphs)."
             )
 
         threshold = (
@@ -1341,6 +1351,9 @@ class ConditionalNodeFieldGraphDecoder(object):
                 existence_mask=existence_mask,
                 existence_scores=None if existence_scores is None else existence_scores[graph_idx],
                 prob_matrix=prob_matrix,
+                node_degree_predictions=(
+                    None if degree_predictions is None else degree_predictions[graph_idx]
+                ),
                 desired_node_count=(
                     None if desired_node_counts is None else int(desired_node_counts[graph_idx])
                 ),
@@ -1370,6 +1383,102 @@ class ConditionalNodeFieldGraphDecoder(object):
         return sorted(edge_candidates, key=lambda item: (-item[0], item[1], item[2]))[:target_edge_count]
 
     @staticmethod
+    def _select_direct_edges_degree_aware(
+        edge_candidates,
+        active_indices: np.ndarray,
+        target_degrees: Sequence[int],
+        desired_edge_count: int,
+    ):
+        target_edge_count = max(0, int(desired_edge_count))
+        target_edge_count = min(target_edge_count, len(edge_candidates))
+        if target_edge_count == 0:
+            return []
+
+        target_degrees = np.asarray(target_degrees, dtype=int)
+        edge_by_key = {}
+        candidates_by_node = {int(node): [] for node in active_indices}
+        for probability, i, j in edge_candidates:
+            i = int(i)
+            j = int(j)
+            edge = (float(probability), min(i, j), max(i, j))
+            edge_by_key[(edge[1], edge[2])] = edge
+            if i in candidates_by_node:
+                candidates_by_node[i].append(edge)
+            if j in candidates_by_node:
+                candidates_by_node[j].append(edge)
+
+        selected_by_key = {}
+        positive_target_nodes = {
+            int(node)
+            for node in active_indices
+            if int(node) < target_degrees.shape[0] and int(target_degrees[int(node)]) > 0
+        }
+        for node in active_indices:
+            node = int(node)
+            if node >= target_degrees.shape[0]:
+                continue
+            quota = max(0, int(target_degrees[node]))
+            if quota == 0:
+                continue
+            ranked_edges = sorted(
+                (
+                    edge
+                    for edge in candidates_by_node.get(node, [])
+                    if (edge[1] if edge[2] == node else edge[2]) in positive_target_nodes
+                ),
+                key=lambda item: (-item[0], item[1], item[2]),
+            )
+            for edge in ranked_edges[:quota]:
+                selected_by_key[(edge[1], edge[2])] = edge
+
+        selected_edges = list(selected_by_key.values())
+        selected_degrees = np.zeros(target_degrees.shape[0], dtype=int)
+        for _probability, i, j in selected_edges:
+            if i < selected_degrees.shape[0]:
+                selected_degrees[i] += 1
+            if j < selected_degrees.shape[0]:
+                selected_degrees[j] += 1
+
+        while len(selected_edges) > target_edge_count:
+            removable_idx = None
+            for edge_idx in sorted(
+                range(len(selected_edges)),
+                key=lambda idx: (selected_edges[idx][0], -selected_edges[idx][1], -selected_edges[idx][2]),
+            ):
+                _probability, i, j = selected_edges[edge_idx]
+                if (
+                    i < selected_degrees.shape[0]
+                    and j < selected_degrees.shape[0]
+                    and selected_degrees[i] - 1 >= target_degrees[i]
+                    and selected_degrees[j] - 1 >= target_degrees[j]
+                ):
+                    removable_idx = edge_idx
+                    break
+            if removable_idx is None:
+                break
+            _probability, i, j = selected_edges.pop(removable_idx)
+            selected_degrees[i] -= 1
+            selected_degrees[j] -= 1
+
+        selected_edges = sorted(
+            selected_edges,
+            key=lambda item: (-item[0], item[1], item[2]),
+        )
+        if len(selected_edges) >= target_edge_count:
+            return selected_edges
+
+        selected_keys = {(i, j) for _, i, j in selected_edges}
+        for edge in sorted(edge_by_key.values(), key=lambda item: (-item[0], item[1], item[2])):
+            key = (edge[1], edge[2])
+            if key in selected_keys:
+                continue
+            selected_edges.append(edge)
+            selected_keys.add(key)
+            if len(selected_edges) >= target_edge_count:
+                break
+        return selected_edges
+
+    @staticmethod
     def _select_direct_edges_by_threshold(edge_candidates, threshold: float):
         threshold = float(threshold)
         return [
@@ -1392,6 +1501,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         existence_mask: np.ndarray,
         existence_scores: Optional[np.ndarray],
         prob_matrix: np.ndarray,
+        node_degree_predictions: Optional[np.ndarray],
         desired_node_count: Optional[int],
         desired_edge_count: Optional[int],
         threshold: float,
@@ -1417,7 +1527,27 @@ class ConditionalNodeFieldGraphDecoder(object):
         )
         active_indices = np.flatnonzero(resolved_mask)
         edge_candidates = self._direct_edge_candidates(active_indices, prob_matrix)
-        if desired_edge_count is not None:
+        if desired_edge_count is not None and node_degree_predictions is not None:
+            degree_predictions = np.asarray(node_degree_predictions, dtype=float)
+            if degree_predictions.shape[0] != n_nodes:
+                raise ValueError(
+                    "Direct degree-aware decoding requires node-degree predictions aligned "
+                    f"with node predictions; received {degree_predictions.shape[0]} degree "
+                    f"values for n_nodes={n_nodes}."
+                )
+            target_degrees = self.get_degree_targets(
+                degree_predictions,
+                resolved_mask,
+                desired_edge_count=desired_edge_count,
+                connectivity=False,
+            )
+            selected_edges = self._select_direct_edges_degree_aware(
+                edge_candidates,
+                active_indices,
+                target_degrees,
+                desired_edge_count,
+            )
+        elif desired_edge_count is not None:
             selected_edges = self._select_direct_edges_top_k(edge_candidates, desired_edge_count)
         else:
             selected_edges = self._select_direct_edges_by_threshold(edge_candidates, threshold)

@@ -295,7 +295,7 @@ def make_artificial_graph_plotter(
         return None
 
     def plot_artificial_graphs(
-        graph_or_graphs,
+        graph_or_graphs=None,
         *,
         n_cols=None,
         titles=None,
@@ -305,6 +305,8 @@ def make_artificial_graph_plotter(
         """Plot one graph or a graph list with fixed artificial-section colors."""
         import matplotlib.pyplot as plt
 
+        if graph_or_graphs is None and "graph" in kwargs:
+            graph_or_graphs = kwargs.pop("graph")
         if isinstance(graph_or_graphs, nx.Graph) or graph_or_graphs is None:
             return _draw_single_graph(graph_or_graphs, **kwargs)
 

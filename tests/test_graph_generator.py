@@ -1839,6 +1839,76 @@ def test_decode_adjacency_matrix_direct_selects_top_edges_by_desired_count():
     assert sorted(nx.from_numpy_array(adj_mtx).edges()) == [(0, 2), (1, 3)]
 
 
+def test_decode_adjacency_matrix_direct_uses_degree_predictions_for_raw_edge_budget():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True, True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[1, 1, 1, 1, 0]], dtype=float),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.60, 0.10, 0.10, 0.99],
+                    [0.60, 0.0, 0.10, 0.10, 0.98],
+                    [0.10, 0.10, 0.0, 0.59, 0.97],
+                    [0.10, 0.10, 0.59, 0.0, 0.96],
+                    [0.99, 0.98, 0.97, 0.96, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adj_mtx = decoder.decode_adjacency_matrix_direct(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_edge_counts=[2],
+    )[0]
+
+    assert sorted(nx.from_numpy_array(adj_mtx).edges()) == [(0, 1), (2, 3)]
+
+
+def test_decode_adjacency_matrix_direct_trims_without_violating_degree_targets():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[1, 1, 1, 1]], dtype=float),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.90, 0.80, 0.05],
+                    [0.90, 0.0, 0.10, 0.05],
+                    [0.80, 0.10, 0.0, 0.20],
+                    [0.05, 0.05, 0.20, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adj_mtx = decoder.decode_adjacency_matrix_direct(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_edge_counts=[2],
+    )[0]
+
+    assert sorted(nx.from_numpy_array(adj_mtx).edges()) == [(0, 1), (2, 3)]
+
+
+def test_select_direct_edges_degree_aware_fills_under_budget_from_global_candidates():
+    selected_edges = ConditionalNodeFieldGraphDecoder._select_direct_edges_degree_aware(
+        [
+            (0.90, 0, 1),
+            (0.80, 0, 2),
+            (0.70, 1, 2),
+        ],
+        np.asarray([0, 1, 2], dtype=int),
+        [1, 0, 0],
+        desired_edge_count=2,
+    )
+
+    assert [(i, j) for _, i, j in selected_edges] == [(0, 1), (0, 2)]
+
+
 def test_decode_adjacency_matrix_direct_uses_threshold_without_desired_count():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
     generated_nodes = GeneratedNodeBatch(
