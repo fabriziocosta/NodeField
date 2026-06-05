@@ -594,6 +594,11 @@ class ConditionalNodeFieldGraphGenerator(object):
             return max(1.0, remaining)
         return max(1.0, min(float(default_seconds), remaining))
 
+    def _resolve_solver_threads(self) -> Optional[int]:
+        graph_decoder = getattr(self, "graph_decoder", None)
+        solver_threads = None if graph_decoder is None else getattr(graph_decoder, "solver_threads", None)
+        return None if solver_threads is None else max(1, int(solver_threads))
+
     def _restore_label_vocab_metadata_from_node_model(self) -> None:
         node_model = getattr(self, "conditional_node_generator_model", None)
         if node_model is None:
@@ -919,6 +924,9 @@ class ConditionalNodeFieldGraphGenerator(object):
         solver_time_limit = self._resolve_solver_time_limit_seconds()
         if solver_time_limit is not None:
             solver_kwargs["timeLimit"] = max(1.0, float(solver_time_limit))
+        solver_threads = self._resolve_solver_threads()
+        if solver_threads is not None:
+            solver_kwargs["threads"] = solver_threads
         status = prob.solve(pulp.PULP_CBC_CMD(**solver_kwargs))
         if int(status) != pulp.LpStatusOptimal:
             return np.asarray(current_node_labels, dtype=object)
@@ -996,6 +1004,9 @@ class ConditionalNodeFieldGraphGenerator(object):
         solver_time_limit = self._resolve_solver_time_limit_seconds()
         if solver_time_limit is not None:
             solver_kwargs["timeLimit"] = max(1.0, float(solver_time_limit))
+        solver_threads = self._resolve_solver_threads()
+        if solver_threads is not None:
+            solver_kwargs["threads"] = solver_threads
         status = prob.solve(pulp.PULP_CBC_CMD(**solver_kwargs))
         if int(status) != pulp.LpStatusOptimal:
             return np.asarray(current_edge_label_matrix, dtype=object)
@@ -1141,6 +1152,9 @@ class ConditionalNodeFieldGraphGenerator(object):
         solver_time_limit = self._resolve_solver_time_limit_seconds()
         if solver_time_limit is not None:
             solver_kwargs["timeLimit"] = max(1.0, float(solver_time_limit))
+        solver_threads = self._resolve_solver_threads()
+        if solver_threads is not None:
+            solver_kwargs["threads"] = solver_threads
         status = prob.solve(pulp.PULP_CBC_CMD(**solver_kwargs))
         if int(status) != pulp.LpStatusOptimal:
             return repaired_node_labels, repaired_edge_label_matrix

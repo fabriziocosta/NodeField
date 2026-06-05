@@ -9,6 +9,7 @@ import tempfile
 from contextlib import nullcontext
 
 import dill as pickle
+import torch
 
 from .encoding_pipeline import EncodingPipeline
 from .conditioning_sampler import ConditioningSampler
@@ -115,6 +116,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
             graph_decoder.parallel_decode_timeout_seconds = 30.0
         if not hasattr(graph_decoder, "active_time_limit_seconds"):
             graph_decoder.active_time_limit_seconds = None
+        if not hasattr(graph_decoder, "solver_threads"):
+            graph_decoder.solver_threads = None
     if getattr(graph_generator, "model_name", None) is not None:
         graph_generator.model_name = sanitize_model_token(graph_generator.model_name)
 
@@ -185,6 +188,64 @@ def _atomic_pickle_dump(obj, output_path: Path) -> None:
             temp_path.unlink(missing_ok=True)
 
 
+def _iter_snapshot_modules(graph_generator):
+    """Yield known torch modules whose tensors should be CPU-backed for snapshots."""
+    seen = set()
+
+    def _yield_module(candidate):
+        if isinstance(candidate, torch.nn.Module) and id(candidate) not in seen:
+            seen.add(id(candidate))
+            yield candidate
+
+    yield from _yield_module(getattr(graph_generator, "model", None))
+    yield from _yield_module(getattr(graph_generator, "guidance_predictor_", None))
+
+    node_generator = getattr(graph_generator, "conditional_node_generator_model", None)
+    if node_generator is not None:
+        yield from _yield_module(getattr(node_generator, "model", None))
+        yield from _yield_module(getattr(node_generator, "guidance_predictor_", None))
+
+
+def _module_device(module: torch.nn.Module):
+    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+        return tensor.device
+    return None
+
+
+def _snapshot_to_cpu_and_dump(graph_generator, output_path: Path) -> None:
+    modules = list(_iter_snapshot_modules(graph_generator))
+    original_devices = [(module, _module_device(module)) for module in modules]
+    original_owner_devices = []
+    for owner in (
+        graph_generator,
+        getattr(graph_generator, "conditional_node_generator_model", None),
+    ):
+        if owner is not None and hasattr(owner, "device"):
+            original_owner_devices.append((owner, getattr(owner, "device")))
+    try:
+        for module, device in original_devices:
+            if device is not None and device.type != "cpu":
+                module.to("cpu")
+        for owner, _device in original_owner_devices:
+            owner.device = torch.device("cpu")
+        _atomic_pickle_dump(graph_generator, output_path)
+    finally:
+        for owner, device in original_owner_devices:
+            owner.device = device
+        for module, device in original_devices:
+            if device is not None and device.type != "cpu":
+                module.to(device)
+
+
+def _looks_like_fork_cuda_initialization_error(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        "CUDA error: initialization error" in message
+        or "cudaErrorInitializationError" in message
+        or "Cannot re-initialize CUDA in forked subprocess" in message
+    )
+
+
 def save_graph_generator(
     graph_generator,
     model_name=None,
@@ -219,8 +280,18 @@ def save_graph_generator(
             logger.warning("Timed out while saving graph generator snapshot %s; skipping snapshot.", path)
             return None
         except Exception as exc:
-            logger.warning("Unable to save graph generator snapshot %s: %s", path, exc)
-            return None
+            if not _looks_like_fork_cuda_initialization_error(exc):
+                logger.warning("Unable to save graph generator snapshot %s: %s", path, exc)
+                return None
+            try:
+                _snapshot_to_cpu_and_dump(graph_generator, path)
+            except Exception as fallback_exc:
+                logger.warning("Unable to save graph generator snapshot %s: %s", path, fallback_exc)
+                return None
+            logger.debug(
+                "Saved graph generator snapshot %s with CPU fallback after forked CUDA initialization failed.",
+                path,
+            )
         if save_loss_curves_pdf:
             try:
                 run_with_fork_timeout(

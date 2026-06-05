@@ -278,6 +278,74 @@ def test_save_graph_generator_uses_atomic_replace(monkeypatch, tmp_path):
     assert not src.exists()
 
 
+def test_save_graph_generator_cpu_fallback_handles_forked_cuda_init_error(monkeypatch, tmp_path):
+    class _RecordingModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.to_calls = []
+
+        def to(self, device):
+            self.to_calls.append(device)
+            return self
+
+    import types
+
+    module = _RecordingModule()
+    node_generator = types.SimpleNamespace(model=module, device=torch.device("cuda:0"))
+    generator = _SaveableGenerator(model_name="demo-chem", model_dir=tmp_path)
+    generator.conditional_node_generator_model = node_generator
+    generator.device = torch.device("cuda:0")
+    dump_observations = []
+
+    def fake_run_with_fork_timeout(*args, **kwargs):
+        raise RuntimeError('AcceleratorError("CUDA error: initialization error")')
+
+    def fake_module_device(candidate):
+        assert candidate is module
+        return torch.device("cuda:0")
+
+    def fake_atomic_pickle_dump(obj, output_path):
+        dump_observations.append(
+            {
+                "path": output_path,
+                "generator_device": obj.device,
+                "node_generator_device": obj.conditional_node_generator_model.device,
+                "to_calls": list(module.to_calls),
+            }
+        )
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"snapshot")
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.persistence.run_with_fork_timeout",
+        fake_run_with_fork_timeout,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.persistence._module_device",
+        fake_module_device,
+    )
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.persistence._atomic_pickle_dump",
+        fake_atomic_pickle_dump,
+    )
+
+    filename = save_graph_generator(generator, save_loss_curves_pdf=False)
+
+    assert filename == "demo-chem.pkl"
+    assert (tmp_path / filename).read_bytes() == b"snapshot"
+    assert dump_observations == [
+        {
+            "path": tmp_path / "demo-chem.pkl",
+            "generator_device": torch.device("cpu"),
+            "node_generator_device": torch.device("cpu"),
+            "to_calls": ["cpu"],
+        }
+    ]
+    assert module.to_calls == ["cpu", torch.device("cuda:0")]
+    assert generator.device == torch.device("cuda:0")
+    assert node_generator.device == torch.device("cuda:0")
+
+
 def test_save_graph_generator_also_exports_loss_curves_pdf_when_supported(tmp_path):
     class _GeneratorWithPdf(_SaveableGenerator):
         def __init__(self, model_name=None, model_dir=None):
@@ -297,9 +365,13 @@ def test_save_graph_generator_also_exports_loss_curves_pdf_when_supported(tmp_pa
     assert filename == "demo-chem.pkl"
     assert (tmp_path / filename).exists()
     assert (tmp_path / "demo-chem.loss-curves.pdf").exists()
-    assert generator.exported_paths == [
-        (tmp_path / "demo-chem.loss-curves.pdf", 10, 0.3)
-    ]
+    assert len(generator.exported_paths) == 1
+    exported_path, window, alpha = generator.exported_paths[0]
+    assert exported_path.parent == tmp_path
+    assert exported_path.name.startswith(".demo-chem.loss-curves.")
+    assert exported_path.suffix == ".pdf"
+    assert window == 10
+    assert alpha == 0.3
 
 
 def test_save_graph_generator_skips_when_model_name_is_none(tmp_path):
@@ -363,6 +435,7 @@ def test_load_graph_generator_restores_legacy_oracle_runtime_defaults(tmp_path):
         def __init__(self, model_name=None, model_dir=None):
             super().__init__(model_name=model_name, model_dir=model_dir)
             self.is_fitted_ = True
+            self.graph_decoder = type("_LegacyDecoder", (), {})()
 
     generator = _Generator(model_name="demo-chem", model_dir=tmp_path)
     filename = save_graph_generator(generator)
@@ -371,18 +444,26 @@ def test_load_graph_generator_restores_legacy_oracle_runtime_defaults(tmp_path):
 
     assert restored.oracle_use_node_label_cuts is False
     assert restored.oracle_use_edge_label_cuts is False
+    assert restored.graph_decoder.solver_threads is None
 
 
 def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
     calls = []
 
-    def fake_save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
+    def fake_save_graph_generator(
+        graph_generator,
+        model_name=None,
+        model_dir=None,
+        log=True,
+        save_loss_curves_pdf=True,
+    ):
         calls.append(
             {
                 "graph_generator": graph_generator,
                 "model_name": model_name,
                 "model_dir": model_dir,
                 "log": log,
+                "save_loss_curves_pdf": save_loss_curves_pdf,
                 "is_fitted": graph_generator.is_fitted_,
             }
         )
@@ -416,6 +497,7 @@ def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch
             "model_name": "demo-chem",
             "model_dir": tmp_path,
             "log": False,
+            "save_loss_curves_pdf": False,
             "is_fitted": True,
         }
     ]
@@ -424,13 +506,20 @@ def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch
 def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
     calls = []
 
-    def fake_save_graph_generator(graph_generator, model_name=None, model_dir=None, log=True):
+    def fake_save_graph_generator(
+        graph_generator,
+        model_name=None,
+        model_dir=None,
+        log=True,
+        save_loss_curves_pdf=True,
+    ):
         calls.append(
             {
                 "graph_generator": graph_generator,
                 "model_name": model_name,
                 "model_dir": model_dir,
                 "log": log,
+                "save_loss_curves_pdf": save_loss_curves_pdf,
                 "is_fitted": graph_generator.is_fitted_,
             }
         )
@@ -465,6 +554,7 @@ def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(m
             "model_name": "demo-stream",
             "model_dir": tmp_path,
             "log": False,
+            "save_loss_curves_pdf": False,
             "is_fitted": True,
         }
     ]

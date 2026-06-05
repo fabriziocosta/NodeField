@@ -188,6 +188,7 @@ def _decode_single_adjacency_job(
     horizon_pair_budget: int = 24,
     horizon_paths_per_pair: int = 8,
     horizon_max_iterations: int = 1,
+    solver_threads: Optional[int] = None,
 ) -> np.ndarray:
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
@@ -203,6 +204,7 @@ def _decode_single_adjacency_job(
         horizon_pair_budget=horizon_pair_budget,
         horizon_paths_per_pair=horizon_paths_per_pair,
         horizon_max_iterations=horizon_max_iterations,
+        solver_threads=solver_threads,
     )
     n_nodes = min(len(existence_mask), len(degree_prediction))
     prob_matrix = np.zeros((n_nodes, n_nodes))
@@ -467,6 +469,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         horizon_pair_budget: int = 24,
         horizon_paths_per_pair: int = 8,
         horizon_max_iterations: int = 1,
+        solver_threads: Optional[int] = None,
     ) -> None:
         self.verbose = verbose
         self.existence_threshold = existence_threshold
@@ -488,6 +491,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         self.horizon_pair_budget = int(horizon_pair_budget)
         self.horizon_paths_per_pair = int(horizon_paths_per_pair)
         self.horizon_max_iterations = int(horizon_max_iterations)
+        self.solver_threads = None if solver_threads is None else max(1, int(solver_threads))
         self.active_time_limit_seconds: Optional[float] = None
 
     @staticmethod
@@ -781,6 +785,8 @@ class ConditionalNodeFieldGraphDecoder(object):
             solver_kwargs = {"msg": verbose}
             if effective_time_limit is not None:
                 solver_kwargs["timeLimit"] = max(1.0, float(effective_time_limit))
+            if self.solver_threads is not None:
+                solver_kwargs["threads"] = int(self.solver_threads)
             solver = pulp.PULP_CBC_CMD(**solver_kwargs)
             prob.solve(solver)
             status_code = int(getattr(prob, "status", 0))
@@ -1274,6 +1280,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 int(self.horizon_pair_budget),
                 int(self.horizon_paths_per_pair),
                 int(self.horizon_max_iterations),
+                None if self.solver_threads is None else int(self.solver_threads),
             )
             for graph_idx in range(len(predicted_probs_list))
         ]
@@ -1782,6 +1789,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "horizon_pair_budget": self.horizon_pair_budget,
                 "horizon_paths_per_pair": self.horizon_paths_per_pair,
                 "horizon_max_iterations": self.horizon_max_iterations,
+                "solver_threads": self.solver_threads,
             },
         }
         with open(path, "w", encoding="utf-8") as handle:
@@ -1822,6 +1830,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             horizon_pair_budget=config.get("horizon_pair_budget", 24),
             horizon_paths_per_pair=config.get("horizon_paths_per_pair", 8),
             horizon_max_iterations=config.get("horizon_max_iterations", 1),
+            solver_threads=config.get("solver_threads", None),
         )
 
 
