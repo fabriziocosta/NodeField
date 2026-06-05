@@ -359,12 +359,17 @@ def test_save_graph_generator_also_exports_loss_curves_pdf_when_supported(tmp_pa
             return path
 
     generator = _GeneratorWithPdf(model_name="demo-chem", model_dir=tmp_path)
+    pdf_path = tmp_path / "demo-chem.loss-curves.pdf"
+    pdf_path.write_text("stale pdf")
+    original_inode = pdf_path.stat().st_ino
 
     filename = save_graph_generator(generator)
 
     assert filename == "demo-chem.pkl"
     assert (tmp_path / filename).exists()
-    assert (tmp_path / "demo-chem.loss-curves.pdf").exists()
+    assert pdf_path.exists()
+    assert pdf_path.read_text() == "pdf placeholder"
+    assert pdf_path.stat().st_ino == original_inode
     assert len(generator.exported_paths) == 1
     exported_path, window, alpha = generator.exported_paths[0]
     assert exported_path.parent == tmp_path
@@ -501,6 +506,43 @@ def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch
             "is_fitted": True,
         }
     ]
+
+
+def test_graph_generator_epoch_snapshot_callback_saves_loss_pdf_on_configured_interval(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_save_graph_generator(
+        graph_generator,
+        model_name=None,
+        model_dir=None,
+        log=True,
+        save_loss_curves_pdf=True,
+    ):
+        calls.append(save_loss_curves_pdf)
+        return "saved.pkl"
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.persistence.save_graph_generator",
+        fake_save_graph_generator,
+    )
+
+    class _Owner:
+        def __init__(self):
+            self.model_name = "demo-chem"
+            self.model_dir = tmp_path
+            self.is_fitted_ = False
+            self.loss_curves_pdf_every_n_epochs = 3
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 2
+
+    callback = GraphGeneratorEpochSnapshotCallback(_Owner())
+
+    callback.on_validation_epoch_end(_Trainer(), object())
+
+    assert calls == [True]
 
 
 def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
@@ -700,6 +742,21 @@ def test_training_sample_callback_writes_incremental_pdf(tmp_path):
     ]
     assert output_path.stat().st_size >= first_size
     assert callback.plot_kwargs["node_label_colors"]["C"] == "#ffaaaa"
+    assert not list(tmp_path.glob(".samples.page.*.pdf"))
+
+
+def test_training_sample_callback_starts_fresh_when_output_exists(tmp_path):
+    output_path = tmp_path / "samples.pdf"
+    output_path.write_bytes(b"stale pdf")
+
+    GraphGeneratorTrainingSampleCallback(
+        object(),
+        n_samples=1,
+        every_n_epochs=1,
+        output_path=output_path,
+    )
+
+    assert not output_path.exists()
 
 
 def test_training_sample_callback_uses_custom_plot_function(tmp_path):

@@ -209,7 +209,7 @@ class MetricsLogger(pl.callbacks.Callback):
                     pl_module,
                     f"epoch {int(getattr(trainer, 'current_epoch', -1)) + 1}: finished validation in "
                     f"{max(0.0, time.time() - float(started_at)):.2f}s",
-                    level=2,
+                    level=1,
                 )
         if verbose_level >= 1:
             interval = int(getattr(pl_module, "verbose_epoch_interval", 10))
@@ -338,10 +338,10 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
         from .persistence import save_graph_generator
 
         epoch_label = int(getattr(trainer, "current_epoch", -1)) + 1
-        verbose_epoch_interval = int(getattr(pl_module, "verbose_epoch_interval", 10))
+        loss_curves_pdf_interval = int(getattr(owner, "loss_curves_pdf_every_n_epochs", 10))
         save_loss_curves_pdf = (
-            verbose_epoch_interval > 0
-            and (epoch_label % verbose_epoch_interval) == 0
+            loss_curves_pdf_interval > 0
+            and (epoch_label % loss_curves_pdf_interval) == 0
         )
         previous_fit_state = bool(getattr(owner, "is_fitted_", False))
         owner.is_fitted_ = True
@@ -358,7 +358,7 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
             verbose_log(
                 owner,
                 f"epoch {epoch_label}: finished generator snapshot in {max(0.0, time.time() - snapshot_started_at):.2f}s",
-                level=2,
+                level=1,
             )
         finally:
             owner.is_fitted_ = previous_fit_state
@@ -388,6 +388,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         self.plot_kwargs = dict(plot_kwargs or {})
         self.plot_fn = plot_fn
         self.epoch_samples = []
+        self.output_path.unlink(missing_ok=True)
 
     def _node_color(self, label):
         node_label_colors = self.plot_kwargs.get("node_label_colors")
@@ -600,10 +601,86 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                 page_path = Path(handle.name)
             self._render_pdf_page(epoch_record, page_path)
             self._append_pdf_page(page_path)
-            page_path = None
         finally:
             if page_path is not None:
                 page_path.unlink(missing_ok=True)
+
+    def _sample_and_write_pdf_page(self, epoch_label: int):
+        owner = self.owner_graph_generator
+        previous_fit_state = bool(getattr(owner, "is_fitted_", False))
+        owner.is_fitted_ = True
+        try:
+            verbose_log(
+                owner,
+                f"epoch {epoch_label}: sampling training progress graphs",
+                level=1,
+            )
+            sample_conditions = getattr(owner, "_sample_conditions", None)
+            predict_nodes = getattr(owner, "_predict_generated_nodes", None)
+            decode_nodes = getattr(owner, "_decode_generated_nodes", None)
+            decode_oracle = getattr(owner, "_decode_generated_nodes_with_oracle", None)
+            can_decode_incrementally = all(
+                callable(fn) for fn in (sample_conditions, predict_nodes, decode_nodes)
+            )
+            if can_decode_incrementally:
+                sampled_conditioning = sample_conditions(self.n_samples)
+                generated_nodes = predict_nodes(
+                    sampled_conditioning,
+                    sampling_mode="unguided",
+                )
+                raw_graphs = decode_nodes(
+                    generated_nodes,
+                    graph_conditioning=sampled_conditioning,
+                    feasibility_oracle_candidates_per_attempt=0,
+                    use_ilp_decoder=False,
+                )
+                ilp_graphs = decode_nodes(
+                    generated_nodes,
+                    graph_conditioning=sampled_conditioning,
+                    feasibility_oracle_candidates_per_attempt=0,
+                    use_ilp_decoder=True,
+                )
+                if getattr(owner, "feasibility_estimator", None) is None or not callable(decode_oracle):
+                    oracle_graphs = [None] * self.n_samples
+                else:
+                    oracle_graphs = decode_oracle(
+                        generated_nodes,
+                        graph_conditioning=sampled_conditioning,
+                    )
+            else:
+                variant_sampler = getattr(owner, "_sample_training_decode_variants", None)
+                if callable(variant_sampler):
+                    variants = variant_sampler(self.n_samples)
+                    raw_graphs = variants.get("raw", [])
+                    ilp_graphs = variants.get("ilp", [])
+                    oracle_graphs = variants.get("oracle", [None] * self.n_samples)
+                else:
+                    raw_graphs = owner.sample(
+                        n_samples=self.n_samples,
+                        apply_feasibility_filtering=False,
+                        use_ilp_decoder=False,
+                    )
+                    ilp_graphs = owner.sample(
+                        n_samples=self.n_samples,
+                        apply_feasibility_filtering=False,
+                        use_ilp_decoder=True,
+                    )
+                    oracle_graphs = [None] * self.n_samples
+            epoch_record = {
+                "epoch": epoch_label,
+                "raw": list(raw_graphs),
+                "ilp": list(ilp_graphs),
+                "oracle": list(oracle_graphs),
+            }
+            self.epoch_samples.append({"epoch": epoch_label})
+            self._write_pdf_page(epoch_record)
+            verbose_log(
+                owner,
+                f"epoch {epoch_label}: appended training sample PDF page to {self.output_path}",
+                level=1,
+            )
+        finally:
+            owner.is_fitted_ = previous_fit_state
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if getattr(trainer, "sanity_checking", False):
@@ -613,52 +690,10 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
         epoch_label = int(getattr(trainer, "current_epoch", -1)) + 1
         if epoch_label < 1 or (epoch_label % self.every_n_epochs) != 0:
             return
-        owner = self.owner_graph_generator
-        previous_fit_state = bool(getattr(owner, "is_fitted_", False))
-        owner.is_fitted_ = True
         try:
-            verbose_log(
-                owner,
-                f"epoch {epoch_label}: sampling training progress graphs",
-                level=2,
-            )
-            variant_sampler = getattr(owner, "_sample_training_decode_variants", None)
-            if callable(variant_sampler):
-                variants = variant_sampler(self.n_samples)
-                raw_graphs = variants.get("raw", [])
-                ilp_graphs = variants.get("ilp", [])
-                oracle_graphs = variants.get("oracle", [None] * self.n_samples)
-            else:
-                raw_graphs = owner.sample(
-                    n_samples=self.n_samples,
-                    apply_feasibility_filtering=False,
-                    use_ilp_decoder=False,
-                )
-                ilp_graphs = owner.sample(
-                    n_samples=self.n_samples,
-                    apply_feasibility_filtering=False,
-                    use_ilp_decoder=True,
-                )
-                oracle_graphs = [None] * self.n_samples
-            epoch_record = {
-                "epoch": epoch_label,
-                "raw": list(raw_graphs),
-                "ilp": list(ilp_graphs),
-                "oracle": list(oracle_graphs),
-            }
-            self.epoch_samples.append({"epoch": epoch_label})
-            try:
-                self._write_pdf_page(epoch_record)
-            except Exception as exc:
-                logger.warning("Unable to render training sample PDF: %s", exc)
-            else:
-                verbose_log(
-                    owner,
-                    f"epoch {epoch_label}: appended training sample PDF page to {self.output_path}",
-                    level=2,
-                )
-        finally:
-            owner.is_fitted_ = previous_fit_state
+            self._sample_and_write_pdf_page(epoch_label)
+        except Exception as exc:
+            logger.warning("Unable to render training sample PDF: %s", exc)
 
 
 class GraphGeneratorBatchSnapshotCallback(pl.callbacks.Callback):

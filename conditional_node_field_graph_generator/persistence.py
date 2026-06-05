@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import os
 from pathlib import Path
+import shutil
 import tempfile
 from contextlib import nullcontext
 
@@ -130,6 +131,12 @@ def _save_graph_generator_loss_curves_pdf_worker(graph_generator, output_path: s
     _save_graph_generator_loss_curves_pdf(graph_generator, output_path=Path(output_path), log=log)
 
 
+def _copy_file_contents(source_path: Path, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(source_path, "rb") as source, open(output_path, "wb") as target:
+        shutil.copyfileobj(source, target)
+
+
 def _save_graph_generator_loss_curves_pdf(graph_generator, *, output_path: Path, log: bool) -> None:
     exporter = getattr(graph_generator, "export_metrics_pdf", None)
     if not callable(exporter):
@@ -161,9 +168,10 @@ def _save_graph_generator_loss_curves_pdf(graph_generator, *, output_path: Path,
     saved_path = Path(saved_path)
     if saved_path != temp_path:
         os.replace(saved_path, temp_path)
-    os.replace(temp_path, output_path)
+    _copy_file_contents(temp_path, output_path)
+    temp_path.unlink(missing_ok=True)
     if log:
-        logger.info("Saved graph generator loss curves as: %s", Path(saved_path).name)
+        logger.info("Saved graph generator loss curves as: %s", output_path.name)
         logger.info("%s", output_path)
 
 
