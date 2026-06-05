@@ -355,11 +355,22 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
                 log=False,
                 save_loss_curves_pdf=save_loss_curves_pdf,
             )
-            verbose_log(
-                owner,
-                f"epoch {epoch_label}: finished generator snapshot in {max(0.0, time.time() - snapshot_started_at):.2f}s",
-                level=1,
-            )
+            completed_at = time.time()
+            epoch_started_at = getattr(pl_module, "_epoch_started_at", None)
+            if epoch_started_at is not None:
+                epoch_seconds = max(0.0, completed_at - float(epoch_started_at))
+                setattr(pl_module, "_last_completed_epoch_seconds", epoch_seconds)
+                verbose_log(
+                    owner,
+                    f"epoch {epoch_label}: completed epoch in {epoch_seconds:.2f}s",
+                    level=1,
+                )
+            else:
+                verbose_log(
+                    owner,
+                    f"epoch {epoch_label}: finished generator snapshot in {max(0.0, completed_at - snapshot_started_at):.2f}s",
+                    level=2,
+                )
         finally:
             owner.is_fitted_ = previous_fit_state
 

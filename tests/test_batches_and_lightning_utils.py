@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 
 import networkx as nx
@@ -543,6 +544,53 @@ def test_graph_generator_epoch_snapshot_callback_saves_loss_pdf_on_configured_in
     callback.on_validation_epoch_end(_Trainer(), object())
 
     assert calls == [True]
+
+
+def test_graph_generator_epoch_snapshot_callback_logs_complete_epoch_time(monkeypatch, tmp_path, caplog):
+    def fake_save_graph_generator(
+        graph_generator,
+        model_name=None,
+        model_dir=None,
+        log=True,
+        save_loss_curves_pdf=True,
+    ):
+        del graph_generator, model_name, model_dir, log, save_loss_curves_pdf
+        return "saved.pkl"
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.persistence.save_graph_generator",
+        fake_save_graph_generator,
+    )
+    times = [103.0, 108.5]
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.metrics_collection.time.time",
+        lambda: times.pop(0) if times else 108.5,
+    )
+
+    class _Owner:
+        def __init__(self):
+            self.model_name = "demo-chem"
+            self.model_dir = tmp_path
+            self.is_fitted_ = False
+            self.verbose = 1
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 2
+
+    class _Module:
+        _epoch_started_at = 100.0
+
+    caplog.set_level(logging.INFO, logger="conditional_node_field_graph_generator")
+
+    callback = GraphGeneratorEpochSnapshotCallback(_Owner())
+    pl_module = _Module()
+    callback.on_validation_epoch_end(_Trainer(), pl_module)
+
+    assert "epoch 3: completed epoch in 8.50s" in caplog.text
+    assert "finished generator snapshot" not in caplog.text
+    assert pl_module._last_completed_epoch_seconds == pytest.approx(8.5)
 
 
 def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):
