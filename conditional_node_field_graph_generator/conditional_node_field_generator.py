@@ -2530,11 +2530,21 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             trainable_parameter_count = sum(
                 param.numel() for param in self.model.parameters() if param.requires_grad
             )
+            parameter_size_mb = sum(
+                param.numel() * param.element_size() for param in self.model.parameters()
+            ) / 1_000_000
+            trainable_parameter_size_mb = sum(
+                param.numel() * param.element_size()
+                for param in self.model.parameters()
+                if param.requires_grad
+            ) / 1_000_000
             verbose_log(
                 self,
                 "ANN size: "
                 f"parameters={parameter_count:,}, "
-                f"trainable={trainable_parameter_count:,}.",
+                f"trainable={trainable_parameter_count:,}, "
+                f"parameter_size={parameter_size_mb:.2f} MB, "
+                f"trainable_size={trainable_parameter_size_mb:.2f} MB.",
                 level=1,
             )
         self.is_setup_ = True

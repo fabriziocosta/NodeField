@@ -19,41 +19,90 @@ def _format_minutes_seconds(elapsed_seconds: float) -> str:
     return f"{minutes}m {seconds:.1f}s"
 
 
+def _run_timed_step(owner: Any, label: str, callback):
+    verbose_log(owner, label)
+    started_at = time.time()
+    result = callback()
+    verbose_log(
+        owner,
+        f"Finished {label[0].lower()}{label[1:]} in "
+        f"{_format_minutes_seconds(time.time() - started_at)}",
+    )
+    return result
+
+
 def build_fit_artifacts(
     owner: Any,
     graphs: List[nx.Graph],
     targets: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
     """Fit vectorizers and assemble compressed embeddings, labels, and supervision state."""
-    owner.graph_vectorizer.fit(graphs)
-    owner.node_graph_vectorizer.fit(graphs)
-    raw_node_embeddings_list = owner._raw_node_encode(graphs)
-    raw_graph_embeddings = owner._raw_graph_encode(graphs)
-    owner._fit_embedding_svds(raw_node_embeddings_list, raw_graph_embeddings)
+    _run_timed_step(
+        owner,
+        f"Fitting graph vectorizer on {len(graphs)} graphs",
+        lambda: owner.graph_vectorizer.fit(graphs),
+    )
+    _run_timed_step(
+        owner,
+        f"Fitting node graph vectorizer on {len(graphs)} graphs",
+        lambda: owner.node_graph_vectorizer.fit(graphs),
+    )
+    raw_node_embeddings_list = _run_timed_step(
+        owner,
+        f"Encoding node embeddings for {len(graphs)} graphs",
+        lambda: owner._raw_node_encode(graphs),
+    )
+    raw_graph_embeddings = _run_timed_step(
+        owner,
+        f"Encoding graph embeddings for {len(graphs)} graphs",
+        lambda: owner._raw_graph_encode(graphs),
+    )
+    _run_timed_step(
+        owner,
+        "Fitting embedding SVDs",
+        lambda: owner._fit_embedding_svds(raw_node_embeddings_list, raw_graph_embeddings),
+    )
     if owner.feasibility_estimator is not None:
-        verbose_log(owner, f"Fitting feasibility estimator on {len(graphs)} graphs")
-        feasibility_started_at = time.time()
-        owner.feasibility_estimator.fit(graphs)
-        verbose_log(
+        _run_timed_step(
             owner,
-            "Finished fitting feasibility estimator in "
-            f"{_format_minutes_seconds(time.time() - feasibility_started_at)}",
+            f"Fitting feasibility estimator on {len(graphs)} graphs",
+            lambda: owner.feasibility_estimator.fit(graphs),
         )
-    node_label_targets = owner.graphs_to_node_label_targets(graphs)
-    edge_label_targets, edge_label_pairs = owner.graphs_to_edge_label_targets(graphs)
-    supervision_plan = owner._build_supervision_plan(
-        graphs,
-        node_label_targets=node_label_targets,
-        edge_label_targets=edge_label_targets,
+    node_label_targets = _run_timed_step(
+        owner,
+        f"Building node-label targets for {len(graphs)} graphs",
+        lambda: owner.graphs_to_node_label_targets(graphs),
+    )
+    edge_label_targets, edge_label_pairs = _run_timed_step(
+        owner,
+        f"Building edge-label targets for {len(graphs)} graphs",
+        lambda: owner.graphs_to_edge_label_targets(graphs),
+    )
+    supervision_plan = _run_timed_step(
+        owner,
+        "Building supervision plan",
+        lambda: owner._build_supervision_plan(
+            graphs,
+            node_label_targets=node_label_targets,
+            edge_label_targets=edge_label_targets,
+        ),
     )
     owner.supervision_plan_ = supervision_plan
     if owner.conditional_node_generator_model is not None:
         setattr(owner.conditional_node_generator_model, "supervision_plan_", supervision_plan)
 
-    node_embeddings_list = owner._compress_node_embeddings(raw_node_embeddings_list)
-    graph_conditioning = owner._build_graph_conditioning_from_raw(
-        graphs,
-        raw_graph_embeddings,
+    node_embeddings_list = _run_timed_step(
+        owner,
+        f"Compressing node embeddings for {len(graphs)} graphs",
+        lambda: owner._compress_node_embeddings(raw_node_embeddings_list),
+    )
+    graph_conditioning = _run_timed_step(
+        owner,
+        f"Building graph conditioning for {len(graphs)} graphs",
+        lambda: owner._build_graph_conditioning_from_raw(
+            graphs,
+            raw_graph_embeddings,
+        ),
     )
     owner.training_graph_conditioning_ = GraphConditioningBatch(
         graph_embeddings=np.asarray(graph_conditioning.graph_embeddings),
