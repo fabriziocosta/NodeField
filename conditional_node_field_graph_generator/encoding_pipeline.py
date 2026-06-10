@@ -177,7 +177,12 @@ class EncodingPipeline:
             f"to {requested_dimension} dimensions.",
             level=1,
         )
-        svd = TruncatedSVD(n_components=requested_dimension, random_state=0)
+        svd = TruncatedSVD(
+            n_components=requested_dimension,
+            n_iter=int(getattr(self.owner, "embedding_svd_n_iter", 2)),
+            n_oversamples=int(getattr(self.owner, "embedding_svd_n_oversamples", 5)),
+            random_state=0,
+        )
         svd.fit(fit_matrix)
         verbose_log(
             self.owner,

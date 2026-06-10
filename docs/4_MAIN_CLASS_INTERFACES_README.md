@@ -909,6 +909,8 @@ ConditionalNodeFieldGraphGenerator(
     embedding_svd_fit_max_rows: Optional[int] = None,
     embedding_svd_fit_random_state: int = 0,
     embedding_svd_transform_batch_size: Optional[int] = None,
+    embedding_svd_n_iter: int = 2,
+    embedding_svd_n_oversamples: int = 5,
 )
 ```
 
@@ -959,6 +961,10 @@ ConditionalNodeFieldGraphGenerator(
 - `embedding_svd_transform_batch_size`
   Optional row batch size for SVD projection. Useful when projecting large
   sparse matrices into dense compressed embeddings.
+
+- `embedding_svd_n_iter`, `embedding_svd_n_oversamples`
+  Randomized `TruncatedSVD` accuracy/runtime controls. Lower values fit faster;
+  increase them if the compressed basis is too noisy.
 
 #### Structural Supervision Parameters
 

@@ -90,6 +90,10 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.embedding_svd_fit_random_state = 0
     if not hasattr(graph_generator, "embedding_svd_transform_batch_size"):
         graph_generator.embedding_svd_transform_batch_size = None
+    if not hasattr(graph_generator, "embedding_svd_n_iter"):
+        graph_generator.embedding_svd_n_iter = 2
+    if not hasattr(graph_generator, "embedding_svd_n_oversamples"):
+        graph_generator.embedding_svd_n_oversamples = 5
     for attr_name, default_value in (
         ("node_embedding_svd_", None),
         ("graph_embedding_svd_", None),
