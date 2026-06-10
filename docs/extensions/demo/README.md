@@ -48,6 +48,9 @@ Demo training notes:
   `graph_embedding_svd_dimension`
 - SVD compression is enabled by default in new demo generators, with a default
   requested dimension of `256` for both node and graph embeddings
+- demo NSPPK vectorizers return sparse histogram matrices by default; the
+  orchestrator keeps those matrices sparse through `TruncatedSVD` fitting and
+  materializes dense arrays only for the compressed node and graph embeddings
 - `build_graph_generator(...)` now uses `locality_horizon=3` by default so new
   demo models train the auxiliary horizon-locality head used by horizon-aware
   ILP decoding
