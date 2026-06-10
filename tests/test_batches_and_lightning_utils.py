@@ -650,7 +650,7 @@ def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(m
     ]
 
 
-def test_training_sample_callback_uses_three_variant_sampler(monkeypatch, tmp_path):
+def test_training_sample_callback_uses_sample_return_decode_stages(monkeypatch, tmp_path):
     write_calls = []
 
     monkeypatch.setattr(
@@ -664,7 +664,9 @@ def test_training_sample_callback_uses_three_variant_sampler(monkeypatch, tmp_pa
             self.is_fitted_ = False
             self.calls = 0
 
-        def _sample_training_decode_variants(self, n_samples):
+        def sample(self, n_samples=1, return_decode_stages=False, **kwargs):
+            del kwargs
+            assert return_decode_stages is True
             self.calls += 1
             variants = {}
             for key in ("raw", "ilp", "oracle"):

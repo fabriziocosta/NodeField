@@ -942,8 +942,11 @@ def test_fit_rejects_invalid_training_sample_progress_options():
         )
 
 
-def test_sample_training_decode_variants_reuses_single_generated_batch():
+def test_sample_return_decode_stages_reuses_single_generated_batch():
     generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.is_fitted_ = True
+    generator.conditional_node_generator_model = object()
+    generator.graph_decoder = object()
     conditioning = GraphConditioningBatch(
         graph_embeddings=np.zeros((2, 3), dtype=float),
         node_counts=np.array([2, 2], dtype=np.int64),
@@ -959,7 +962,7 @@ def test_sample_training_decode_variants_reuses_single_generated_batch():
         return graph
 
     generator.feasibility_estimator = object()
-    generator._sample_conditions = lambda n_samples: conditioning
+    generator._sample_conditions = lambda n_samples, **kwargs: conditioning
 
     def _predict_generated_nodes(graph_conditioning, **kwargs):
         prediction_calls.append((graph_conditioning, kwargs))
@@ -978,13 +981,15 @@ def test_sample_training_decode_variants_reuses_single_generated_batch():
     generator._decode_generated_nodes = _decode_generated_nodes
     generator._decode_generated_nodes_with_oracle = _decode_generated_nodes_with_oracle
 
-    variants = generator._sample_training_decode_variants(2)
+    variants = generator.sample(2, return_decode_stages=True)
 
     assert prediction_calls == [
         (
             conditioning,
             {
                 "sampling_mode": "unguided",
+                "desired_target": None,
+                "guidance_scale": 1.0,
             },
         )
     ]
@@ -1003,22 +1008,25 @@ def test_sample_training_decode_variants_reuses_single_generated_batch():
     assert decode_calls[2][2]["graph_conditioning"] is conditioning
 
 
-def test_sample_training_decode_variants_marks_oracle_missing_without_estimator():
+def test_sample_return_decode_stages_marks_oracle_missing_without_estimator():
     generator = ConditionalNodeFieldGraphGenerator(verbose=False)
+    generator.is_fitted_ = True
+    generator.conditional_node_generator_model = object()
+    generator.graph_decoder = object()
     conditioning = GraphConditioningBatch(
         graph_embeddings=np.zeros((2, 3), dtype=float),
         node_counts=np.array([2, 2], dtype=np.int64),
         edge_counts=np.array([1, 1], dtype=np.int64),
     )
     generator.feasibility_estimator = None
-    generator._sample_conditions = lambda n_samples: conditioning
+    generator._sample_conditions = lambda n_samples, **kwargs: conditioning
     generator._predict_generated_nodes = lambda graph_conditioning, **kwargs: object()
     generator._decode_generated_nodes = lambda generated_nodes, **kwargs: [nx.Graph(), nx.Graph()]
     generator._decode_generated_nodes_with_oracle = lambda *args, **kwargs: pytest.fail(
         "oracle decode should not be called without a feasibility estimator"
     )
 
-    variants = generator._sample_training_decode_variants(2)
+    variants = generator.sample(2, return_decode_stages=True)
 
     assert variants["oracle"] == [None, None]
 
