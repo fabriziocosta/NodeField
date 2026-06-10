@@ -659,9 +659,21 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                         graph_conditioning=sampled_conditioning,
                     )
             else:
+                sample = getattr(owner, "sample", None)
+                if callable(sample):
+                    try:
+                        variants = sample(
+                            n_samples=self.n_samples,
+                            return_decode_stages=True,
+                        )
+                    except TypeError:
+                        variants = None
+                else:
+                    variants = None
                 variant_sampler = getattr(owner, "_sample_training_decode_variants", None)
-                if callable(variant_sampler):
+                if variants is None and callable(variant_sampler):
                     variants = variant_sampler(self.n_samples)
+                if variants is not None:
                     raw_graphs = variants.get("raw", [])
                     ilp_graphs = variants.get("ilp", [])
                     oracle_graphs = variants.get("oracle", [None] * self.n_samples)
