@@ -3278,6 +3278,30 @@ def test_fit_compresses_sparse_node_and_graph_embeddings_with_svd():
     assert encoded_conditioning.graph_embeddings.shape == (2, 2)
 
 
+def test_embedding_svd_fit_row_sampling_and_chunked_projection():
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_vectorizer=_SparseGraphVectorizer(dimension=9),
+        node_graph_vectorizer=_SparseNodeVectorizer(dimension=11),
+        use_embedding_svd=True,
+        node_embedding_svd_dimension=3,
+        graph_embedding_svd_dimension=2,
+        embedding_svd_fit_max_rows=4,
+        embedding_svd_transform_batch_size=2,
+        verbose=False,
+    )
+    pipeline = generator._ensure_encoding_pipeline()
+    matrix = sparse.csr_matrix(np.arange(80, dtype=float).reshape(10, 8))
+
+    sampled = pipeline.sample_svd_fit_rows(matrix, requested_dimension=3, label="node")
+
+    assert sparse.issparse(sampled)
+    assert sampled.shape == (4, 8)
+    generator.fit(_sampling_graphs(), train_node_generator=False)
+    encoded_nodes, encoded_conditioning = generator.encode(_sampling_graphs()[:2])
+    assert encoded_nodes[0].shape[1] == 3
+    assert encoded_conditioning.graph_embeddings.shape == (2, 2)
+
+
 def test_embedding_svd_graph_dimension_defaults_to_node_dimension():
     generator = ConditionalNodeFieldGraphGenerator(
         graph_vectorizer=_SparseGraphVectorizer(dimension=8),

@@ -906,6 +906,9 @@ ConditionalNodeFieldGraphGenerator(
     use_embedding_svd: bool = True,
     node_embedding_svd_dimension: int = 256,
     graph_embedding_svd_dimension: Optional[int] = None,
+    embedding_svd_fit_max_rows: Optional[int] = None,
+    embedding_svd_fit_random_state: int = 0,
+    embedding_svd_transform_batch_size: Optional[int] = None,
 )
 ```
 
@@ -947,6 +950,15 @@ ConditionalNodeFieldGraphGenerator(
   If omitted, the graph side uses `node_embedding_svd_dimension`. Graph and node
   compression are fitted independently; graph conditioning is not derived by
   summing compressed node embeddings.
+
+- `embedding_svd_fit_max_rows`
+  Optional maximum number of rows used to fit each SVD basis. When set, the
+  orchestrator samples rows for `TruncatedSVD.fit(...)` but still projects every
+  node and graph row through the fitted basis.
+
+- `embedding_svd_transform_batch_size`
+  Optional row batch size for SVD projection. Useful when projecting large
+  sparse matrices into dense compressed embeddings.
 
 #### Structural Supervision Parameters
 

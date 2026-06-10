@@ -51,6 +51,9 @@ Demo training notes:
 - demo NSPPK vectorizers return sparse histogram matrices by default; the
   orchestrator keeps those matrices sparse through `TruncatedSVD` fitting and
   materializes dense arrays only for the compressed node and graph embeddings
+- demo SVD fitting samples at most `50_000` rows when learning each projection
+  basis, then projects the full node and graph embedding matrices through the
+  fitted basis in batches
 - `build_graph_generator(...)` now uses `locality_horizon=3` by default so new
   demo models train the auxiliary horizon-locality head used by horizon-aware
   ILP decoding

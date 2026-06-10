@@ -365,6 +365,9 @@ class ConditionalNodeFieldGraphGenerator(object):
             use_embedding_svd: bool = True,
             node_embedding_svd_dimension: int = 256,
             graph_embedding_svd_dimension: Optional[int] = None,
+            embedding_svd_fit_max_rows: Optional[int] = None,
+            embedding_svd_fit_random_state: int = 0,
+            embedding_svd_transform_batch_size: Optional[int] = None,
             ) -> None:
         """Store the collaborating components and configuration used for the pipeline.
 
@@ -410,6 +413,17 @@ class ConditionalNodeFieldGraphGenerator(object):
             None
             if graph_embedding_svd_dimension is None
             else int(graph_embedding_svd_dimension)
+        )
+        self.embedding_svd_fit_max_rows = (
+            None
+            if embedding_svd_fit_max_rows is None
+            else int(embedding_svd_fit_max_rows)
+        )
+        self.embedding_svd_fit_random_state = int(embedding_svd_fit_random_state)
+        self.embedding_svd_transform_batch_size = (
+            None
+            if embedding_svd_transform_batch_size is None
+            else int(embedding_svd_transform_batch_size)
         )
         self.node_embedding_svd_ = None
         self.graph_embedding_svd_ = None

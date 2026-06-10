@@ -953,6 +953,9 @@ def build_graph_generator(
     use_embedding_svd=True,
     node_embedding_svd_dimension=256,
     graph_embedding_svd_dimension=None,
+    embedding_svd_fit_max_rows=50_000,
+    embedding_svd_fit_random_state=0,
+    embedding_svd_transform_batch_size=25_000,
 ):
     if nbits is not None:
         if node_vectorizer_nbits is None:
@@ -1153,6 +1156,9 @@ def build_graph_generator(
         use_embedding_svd=use_embedding_svd,
         node_embedding_svd_dimension=node_embedding_svd_dimension,
         graph_embedding_svd_dimension=graph_embedding_svd_dimension,
+        embedding_svd_fit_max_rows=embedding_svd_fit_max_rows,
+        embedding_svd_fit_random_state=embedding_svd_fit_random_state,
+        embedding_svd_transform_batch_size=embedding_svd_transform_batch_size,
         verbose=verbose,
     )
 

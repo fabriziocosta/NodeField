@@ -762,6 +762,9 @@ You can replace `node_graph_vectorizer` as long as it produces per-graph node em
 Both vectorizers may return sparse matrices. If orchestrator SVD compression is
 enabled, sparse node rows are stacked with `scipy.sparse.vstack` and compressed
 with `sklearn.decomposition.TruncatedSVD` before neural training.
+Set `embedding_svd_fit_max_rows` to learn each SVD basis from a bounded row
+sample while still projecting every node and graph embedding through the fitted
+basis. Set `embedding_svd_transform_batch_size` to batch those projections.
 
 ### Swap The Conditional Node Generator
 

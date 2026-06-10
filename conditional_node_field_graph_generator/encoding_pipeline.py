@@ -59,10 +59,89 @@ class EncodingPipeline:
                 return 1
         return int(matrix.shape[1])
 
+    @staticmethod
+    def matrix_summary(matrix) -> str:
+        shape = getattr(matrix, "shape", None)
+        if sparse.issparse(matrix):
+            nnz = int(matrix.nnz)
+            total = int(matrix.shape[0]) * int(matrix.shape[1]) if len(matrix.shape) == 2 else 0
+            density = (nnz / total) if total else 0.0
+            return f"shape={shape}, sparse=True, nnz={nnz}, density={density:.6f}"
+        array = np.asarray(matrix)
+        size_mb = array.nbytes / (1024.0 * 1024.0)
+        return f"shape={shape}, sparse=False, dtype={array.dtype}, size={size_mb:.1f} MiB"
+
+    @staticmethod
+    def row_count(matrix) -> int:
+        shape = getattr(matrix, "shape", None)
+        if shape is None or len(shape) == 0:
+            return 0
+        return int(shape[0])
+
     def resolved_graph_embedding_svd_dimension(self) -> int:
         if self.owner.graph_embedding_svd_dimension is None:
             return int(self.owner.node_embedding_svd_dimension)
         return int(self.owner.graph_embedding_svd_dimension)
+
+    def svd_fit_max_rows(self) -> Optional[int]:
+        value = getattr(self.owner, "embedding_svd_fit_max_rows", None)
+        if value is None:
+            return None
+        value = int(value)
+        if value < 1:
+            return None
+        return value
+
+    def svd_transform_batch_size(self) -> Optional[int]:
+        value = getattr(self.owner, "embedding_svd_transform_batch_size", None)
+        if value is None:
+            return None
+        value = int(value)
+        if value < 1:
+            return None
+        return value
+
+    def svd_fit_random_state(self, label: str) -> int:
+        base_seed = int(getattr(self.owner, "embedding_svd_fit_random_state", 0))
+        return base_seed + (1 if label == "graph" else 0)
+
+    def sample_svd_fit_rows(self, matrix, requested_dimension: int, label: str):
+        max_rows = self.svd_fit_max_rows()
+        row_count = self.row_count(matrix)
+        if max_rows is None or row_count <= max_rows:
+            return matrix
+        min_rows = int(requested_dimension) + 1
+        if max_rows < min_rows:
+            raise ValueError(
+                "embedding_svd_fit_max_rows must be greater than the requested "
+                f"{label}_embedding_svd_dimension ({requested_dimension})."
+            )
+        rng = np.random.default_rng(self.svd_fit_random_state(label))
+        row_indices = np.sort(rng.choice(row_count, size=max_rows, replace=False))
+        sampled_matrix = matrix[row_indices]
+        verbose_log(
+            self.owner,
+            f"Sampled {label} embedding SVD fit rows: {row_count} -> {max_rows}.",
+            level=1,
+        )
+        return sampled_matrix
+
+    def transform_with_optional_batches(self, svd, matrix, label: str) -> np.ndarray:
+        batch_size = self.svd_transform_batch_size()
+        row_count = self.row_count(matrix)
+        if batch_size is None or row_count <= batch_size:
+            return np.asarray(svd.transform(matrix), dtype=float)
+        verbose_log(
+            self.owner,
+            f"Projecting {label} embeddings in batches of {batch_size} rows "
+            f"({row_count} total rows).",
+            level=1,
+        )
+        chunks = []
+        for start_idx in range(0, row_count, batch_size):
+            end_idx = min(start_idx + batch_size, row_count)
+            chunks.append(np.asarray(svd.transform(matrix[start_idx:end_idx]), dtype=float))
+        return np.vstack(chunks) if chunks else np.zeros((0, int(svd.n_components)), dtype=float)
 
     def raw_node_encode(self, graphs: List[nx.Graph]) -> List[Any]:
         if int(self.owner.verbose) >= 3:
@@ -91,8 +170,15 @@ class EncodingPipeline:
                 level=1,
             )
             return None, raw_dimension, raw_dimension, False
+        fit_matrix = self.sample_svd_fit_rows(matrix, requested_dimension, label)
+        verbose_log(
+            self.owner,
+            f"Fitting {label} embedding SVD on {self.matrix_summary(fit_matrix)} "
+            f"to {requested_dimension} dimensions.",
+            level=1,
+        )
         svd = TruncatedSVD(n_components=requested_dimension, random_state=0)
-        svd.fit(matrix)
+        svd.fit(fit_matrix)
         verbose_log(
             self.owner,
             f"Fitted {label} embedding SVD: {raw_dimension} -> {requested_dimension}.",
@@ -101,7 +187,13 @@ class EncodingPipeline:
         return svd, raw_dimension, requested_dimension, True
 
     def fit_embedding_svds(self, raw_node_embeddings_list: List[Any], raw_graph_embeddings) -> None:
+        verbose_log(self.owner, "Stacking raw node embeddings for SVD.", level=1)
         node_matrix = self.stack_embedding_rows(raw_node_embeddings_list)
+        verbose_log(
+            self.owner,
+            f"Stacked node embedding matrix: {self.matrix_summary(node_matrix)}.",
+            level=1,
+        )
         graph_matrix = raw_graph_embeddings
         if sparse.issparse(graph_matrix):
             graph_matrix = graph_matrix.tocsr()
@@ -109,6 +201,11 @@ class EncodingPipeline:
             graph_matrix = np.asarray(graph_matrix, dtype=float)
             if graph_matrix.ndim == 1:
                 graph_matrix = graph_matrix.reshape(1, -1)
+        verbose_log(
+            self.owner,
+            f"Prepared graph embedding matrix: {self.matrix_summary(graph_matrix)}.",
+            level=1,
+        )
         (
             self.owner.node_embedding_svd_,
             self.owner.node_embedding_raw_dimension_,
@@ -134,14 +231,18 @@ class EncodingPipeline:
         if not bool(getattr(self.owner, "node_embedding_svd_fitted_", False)):
             return [self.to_numpy_2d(embedding) for embedding in raw_node_embeddings_list]
         return [
-            np.asarray(self.owner.node_embedding_svd_.transform(embedding), dtype=float)
+            self.transform_with_optional_batches(self.owner.node_embedding_svd_, embedding, "node")
             for embedding in raw_node_embeddings_list
         ]
 
     def compress_graph_embeddings(self, raw_graph_embeddings) -> np.ndarray:
         if not bool(getattr(self.owner, "graph_embedding_svd_fitted_", False)):
             return self.to_numpy_2d(raw_graph_embeddings)
-        return np.asarray(self.owner.graph_embedding_svd_.transform(raw_graph_embeddings), dtype=float)
+        return self.transform_with_optional_batches(
+            self.owner.graph_embedding_svd_,
+            raw_graph_embeddings,
+            "graph",
+        )
 
     def build_graph_conditioning_from_raw(
         self,
