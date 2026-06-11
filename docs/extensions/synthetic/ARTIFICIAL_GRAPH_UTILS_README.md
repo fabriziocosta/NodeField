@@ -92,20 +92,50 @@ Important behavior:
 
 This distinction is used to create positive and negative synthetic classes.
 
-### Cycle/path/star artificial datasets
+### Cycle/path/ray artificial datasets
 
 - `generate_artificial_dataset(...)`
-  Builds batches of connected cycle -> path -> star-ray graphs. `path_length`
-  is the number of path-labeled nodes between the cycle anchor and the
-  star/ray hub; the hub itself is star-labeled so high-degree ray nodes remain
-  in the star component. `ray_length` is the number of star-labeled nodes added
-  per ray after the hub, so `ray_length=0` adds no ray nodes. `num_rays=0`
-  omits the star/ray hub entirely. `num_cycles=0` omits the cycle section and
-  starts each unit from the path section, or from the ray hub when
-  `path_length=0`; this allows pure ray trees. `n_iterations` repeats the same
-  construction by attaching a new cycle -> path -> ray structure to every
-  endpoint produced by the previous iteration; when structural parameters are
-  ranges, each attached structure samples fresh sizes from those same ranges.
+  Builds batches of connected graphs from repeated cycle -> path -> ray units.
+  The original single-unit shape is still the default with `n_iterations=1`.
+
+Structural parameters have node-count semantics:
+
+- `num_cycles`
+  Number of cycle motifs per unit. `num_cycles=0` omits the cycle section.
+
+- `cycle_length`
+  Size of each cycle when `num_cycles > 0`. If `num_cycles=0`,
+  `cycle_length` is ignored.
+
+- `path_length`
+  Number of path-labeled nodes in the unit. The star/ray hub is not counted as
+  a path node.
+
+- `num_rays`
+  Number of rays after the path section. `num_rays=0` omits the star/ray hub
+  entirely.
+
+- `ray_length`
+  Number of star-labeled nodes added per ray after the hub. `ray_length=0`
+  adds no ray nodes. If `num_rays > 0`, the star/ray hub may still exist as the
+  ray attachment point.
+
+- `n_iterations`
+  Number of repeated attachment waves. Each unit attaches new units to the
+  endpoints produced by the previous unit. With `n_iterations=2`, the shape is
+  cycle -> path -> rays -> attached cycle/path/ray units. With
+  `n_iterations=3`, attachment continues from the endpoints of those attached
+  units.
+
+When `num_cycles=0`, a unit starts from the next available section:
+
+- path-only graphs are allowed with `path_length > 0` and `num_rays=0`
+- ray-only trees are allowed with `path_length=0` and `num_rays > 0`
+- fully empty units (`num_cycles=0`, `path_length=0`, `num_rays=0`) are invalid
+
+When structural parameters are integer ranges, each materialized unit samples a
+fresh size from the same parameter range. Generated graphs record the actual
+per-unit draws in `graph.graph["metadata"]["iteration_parameters"]`.
 
 By default, `generate_artificial_dataset` also writes a reproducibility config:
 
@@ -123,8 +153,35 @@ graphs, plot_artificial_graphs = generate_artificial_dataset(
 ```
 
 Set `num_cycles > 1` to chain same-length cycles through shared edges. The
-first cycle connects to the path/star structure as before; each additional
-cycle shares one random edge with the previous cycle.
+first cycle connects to the path/ray structure; each additional cycle shares one
+random edge with the previous cycle. Set `num_cycles=0` to skip cycles entirely.
+
+Examples:
+
+```python
+# A pure ray tree: one hub and three length-2 rays.
+graphs, plot_artificial_graphs = generate_artificial_dataset(
+    num_graphs=100,
+    cycle_length=0,
+    num_cycles=0,
+    path_length=0,
+    num_rays=3,
+    ray_length=2,
+    seed=13,
+)
+
+# Iterative cycle/path/ray graphs with fresh per-unit samples.
+graphs, plot_artificial_graphs = generate_artificial_dataset(
+    num_graphs=100,
+    cycle_length=(3, 5),
+    num_cycles=2,
+    n_iterations=3,
+    path_length=(0, 2),
+    num_rays=2,
+    ray_length=(0, 2),
+    seed=13,
+)
+```
 
 The function returns a plain list of NetworkX graphs plus an artificial-graph
 plot function:
@@ -140,8 +197,10 @@ graph_generator.fit(
 ```
 
 The plotter fixes cycle/path/star node colors to red/blue/green ramps derived
-from `node_alphabet_size`; callers may still override size, labels, node size,
-edge width, layout, and related rendering options.
+from `node_alphabet_size`; callers may still override labels, node size, edge
+width, layout, and related rendering options. The `size` argument is the display
+size per graph panel: one graph with `size=5` uses `figsize=(5, 5)`, while a
+two-column row uses `figsize=(10, 5)`.
 
 The function prints the generated YAML file name, for example:
 
@@ -159,9 +218,29 @@ graphs, plot_artificial_graphs = generate_artificial_dataset(
 ```
 
 Config filenames use the same sanitized crumb style as model names and include
-only the dataset-defining values, such as graph count, cycle length, path length,
-ray count, ray length, and non-default label alphabets. Pass `save_config=False`
-when no config file should be written.
+only dataset-defining values, such as graph count, cycle length, cycle count,
+iteration count, path length, ray count, ray length, and non-default label
+alphabets. Pass `save_config=False` when no config file should be written.
+
+### Conditioning-vector analysis notebook
+
+`notebooks/artificial_conditioning_vector_test.ipynb` compares generated graphs
+against conditioning graphs for this artificial family.
+
+Important analysis behavior:
+
+- conditional samples are generated once per selected conditioning graph and
+  reused for all tables, histograms, scatter plots, and examples
+- conditioning graph statistics use `metadata["iteration_parameters"]` when
+  present, so cycle, path, and ray counts are aggregated across all iterations
+- generated graph statistics are measured from labels and topology only
+- cycle count is measured across all cycle-labeled components with
+  `networkx.cycle_basis`
+- path size is the total number of path-labeled nodes
+- generated ray count is observable-only; zero-length ray multiplicity is not
+  inferred from the conditioning metadata
+- node-label and node-degree histograms compare the conditioning graph against
+  the cached generated samples
 
 ## 4. Synthetic classification datasets
 

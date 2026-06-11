@@ -7,4 +7,9 @@ Main entry points:
 - [`datasets.py`](datasets.py)
 - [`composition.py`](composition.py)
 
+Artificial cycle/path/ray datasets support repeated units through
+`n_iterations`, cycle-free/path-only/ray-only shapes with `num_cycles=0`, and
+per-unit sampled structural ranges recorded in graph metadata as
+`iteration_parameters`.
+
 New code should import from `conditional_node_field_graph_generator.extensions.synthetic`.
