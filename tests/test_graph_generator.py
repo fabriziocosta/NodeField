@@ -3103,6 +3103,27 @@ def test_decode_generated_nodes_with_oracle_falls_back_when_initial_seed_decode_
     assert optimize_calls[0] is False
 
 
+def test_decode_generated_nodes_with_oracle_skips_seed_timeout(monkeypatch):
+    estimator = _OracleOnceEstimator([[]])
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=True)
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_decoder=decoder,
+        feasibility_estimator=estimator,
+        verbose=False,
+    )
+
+    def _timeout_initial_decode(*args, **kwargs):
+        del args, kwargs
+        raise TimeoutError("seed decode timed out")
+
+    monkeypatch.setattr(decoder, "decode_adjacency_matrix", _timeout_initial_decode)
+
+    decoded = generator._decode_generated_nodes_with_oracle(_oracle_generated_batch())
+
+    assert decoded == [None]
+    assert estimator.calls == []
+
+
 def test_decode_generated_nodes_reruns_joint_label_repair_after_structural_change(monkeypatch):
     estimator = _OracleOnceEstimator([
         [[(1, 0), (2, 1), (3, 2), (3, 0)]],

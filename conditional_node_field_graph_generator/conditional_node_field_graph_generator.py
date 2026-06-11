@@ -1239,7 +1239,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self,
         generated_nodes: GeneratedNodeBatch,
         graph_conditioning: Optional[GraphConditioningBatch] = None,
-    ) -> List[nx.Graph]:
+    ) -> List[Optional[nx.Graph]]:
         return _decode_generated_nodes_with_oracle(self, generated_nodes, graph_conditioning=graph_conditioning)
 
     def _build_supervision_plan(

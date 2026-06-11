@@ -1806,7 +1806,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         owner,
         generated_nodes: GeneratedNodeBatch,
         graph_conditioning: Optional[GraphConditioningBatch] = None,
-    ) -> List[nx.Graph]:
+    ) -> List[Optional[nx.Graph]]:
         return decode_generated_nodes_with_oracle(
             owner,
             generated_nodes,
@@ -1951,7 +1951,7 @@ def decode_generated_nodes_with_oracle(
     owner,
     generated_nodes: GeneratedNodeBatch,
     graph_conditioning: Optional[GraphConditioningBatch] = None,
-) -> List[nx.Graph]:
+) -> List[Optional[nx.Graph]]:
     """Decode one generated batch using the feasibility oracle, label repairs, and structural cuts."""
     from .oracle_utils import update_oracle_edge_memory
 
@@ -1972,7 +1972,7 @@ def decode_generated_nodes_with_oracle(
         predicted_edge_probability_matrices=predicted_edge_probability_matrices,
     )
 
-    decoded_graphs: List[nx.Graph] = []
+    decoded_graphs: List[Optional[nx.Graph]] = []
     for graph_idx in range(len(predicted_edge_probability_matrices)):
         single_generated_nodes = build_single_generated_node_batch(generated_nodes, graph_idx)
         desired_node_count = None if graph_conditioning is None else int(np.asarray(graph_conditioning.node_counts)[graph_idx])
@@ -2015,12 +2015,19 @@ def decode_generated_nodes_with_oracle(
                 desired_node_counts=None if desired_node_count is None else [desired_node_count],
                 desired_edge_counts=None if desired_edge_count is None else [desired_edge_count],
             )[0]
+        except TimeoutError:
+            verbose_log(
+                owner,
+                "Oracle initial adjacency decode timed out; skipping oracle graph for this sample.",
+                level=2,
+            )
+            decoded_graphs.append(None)
+            continue
         except RuntimeError:
-            if int(owner.verbose) >= 1:
-                verbose_log(
-                    owner,
-                    "Oracle initial adjacency decode failed under connectivity constraints; "
-                    "retrying with connectivity disabled for the seed solve.",
+            verbose_log(
+                owner,
+                "Oracle initial adjacency decode failed under connectivity constraints; "
+                "retrying with connectivity disabled for the seed solve.",
             )
             try:
                 single_adj_mtx = optimize_oracle_adjacency_matrix(
@@ -2030,6 +2037,14 @@ def decode_generated_nodes_with_oracle(
                     target_edge_count=desired_edge_count,
                     connectivity=False,
                 )
+            except TimeoutError:
+                verbose_log(
+                    owner,
+                    "Oracle fallback seed adjacency decode timed out; skipping oracle graph for this sample.",
+                    level=2,
+                )
+                decoded_graphs.append(None)
+                continue
             except Exception as fallback_exc:
                 raise RuntimeError(
                     "Oracle initial adjacency decode failed before any oracle cuts could be applied."
@@ -2361,12 +2376,12 @@ def decode_generated_nodes_with_oracle(
                     edge_violation_prior=local_edge_violation_prior,
                 )
             except TimeoutError:
-                if int(owner.verbose) >= 1:
-                    verbose_log(
-                        owner,
-                        "Oracle-guided adjacency refinement timed out; "
-                        "returning the best graph seen before the slow refinement.",
-                    )
+                verbose_log(
+                    owner,
+                    "Oracle-guided adjacency refinement timed out; "
+                    "returning the best graph seen before the slow refinement.",
+                    level=2,
+                )
                 break
             current_edge_label_matrix = owner._fill_unlabeled_active_edges(
                 adj_mtx=single_adj_mtx,
