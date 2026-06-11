@@ -95,7 +95,17 @@ This distinction is used to create positive and negative synthetic classes.
 ### Cycle/path/star artificial datasets
 
 - `generate_artificial_dataset(...)`
-  Builds batches of connected cycle -> path -> star-ray graphs.
+  Builds batches of connected cycle -> path -> star-ray graphs. `path_length`
+  is the number of path-labeled nodes between the cycle anchor and the
+  star/ray hub; the hub itself is star-labeled so high-degree ray nodes remain
+  in the star component. `ray_length` is the number of star-labeled nodes added
+  per ray after the hub, so `ray_length=0` adds no ray nodes. `num_rays=0`
+  omits the star/ray hub entirely. `num_cycles=0` omits the cycle section and
+  starts each unit from the path section, or from the ray hub when
+  `path_length=0`; this allows pure ray trees. `n_iterations` repeats the same
+  construction by attaching a new cycle -> path -> ray structure to every
+  endpoint produced by the previous iteration; when structural parameters are
+  ranges, each attached structure samples fresh sizes from those same ranges.
 
 By default, `generate_artificial_dataset` also writes a reproducibility config:
 
@@ -103,6 +113,7 @@ By default, `generate_artificial_dataset` also writes a reproducibility config:
 graphs, plot_artificial_graphs = generate_artificial_dataset(
     num_graphs=100,
     cycle_length=(3, 6),
+    n_iterations=1,
     num_cycles=1,
     path_length=(1, 4),
     num_rays=3,

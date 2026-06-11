@@ -248,6 +248,7 @@ def make_artificial_graph_plotter(
         graph,
         *,
         ax=None,
+        size=4,
         title=None,
         layout="kamada_kawai",
         show_label=True,
@@ -262,17 +263,18 @@ def make_artificial_graph_plotter(
         del kwargs
         import matplotlib.pyplot as plt
 
+        fig = None
         if ax is None:
-            _, ax = plt.subplots(1, 1, figsize=(4, 4))
+            fig, ax = plt.subplots(1, 1, figsize=(float(size), float(size)))
         ax.axis("off")
         if title is not None:
             ax.set_title(str(title), fontsize=title_font_size)
         if graph is None:
             ax.text(0.5, 0.5, "None", ha="center", va="center")
-            return None
+            return fig
         if graph.number_of_nodes() == 0:
             ax.text(0.5, 0.5, "empty", ha="center", va="center")
-            return None
+            return fig
         pos = _layout(graph, layout)
         labels = {}
         node_colors = []
@@ -292,7 +294,7 @@ def make_artificial_graph_plotter(
         )
         if show_label:
             nx.draw_networkx_labels(graph, pos, labels=labels, font_size=label_font_size, ax=ax)
-        return None
+        return fig
 
     def plot_artificial_graphs(
         graph_or_graphs=None,
@@ -308,7 +310,7 @@ def make_artificial_graph_plotter(
         if graph_or_graphs is None and "graph" in kwargs:
             graph_or_graphs = kwargs.pop("graph")
         if isinstance(graph_or_graphs, nx.Graph) or graph_or_graphs is None:
-            return _draw_single_graph(graph_or_graphs, **kwargs)
+            return _draw_single_graph(graph_or_graphs, size=size, **kwargs)
 
         graph_list = list(graph_or_graphs)
         if not graph_list:
@@ -352,21 +354,44 @@ def generate_cycle_path_star_graph(
     num_rays,
     ray_length,
     num_cycles=1,
+    n_iterations=1,
     node_alphabet_size=1,
     edge_alphabet_size=1,
     node_alphabet_kind="int",
     edge_alphabet_kind="int",
     component_specific_alphabets=True,
     seed=None,
+    _unit_parameter_sampler=None,
 ):
-    """Generate one connected cycle -> path -> star-ray NetworkX graph."""
+    """Generate one connected iterative cycle -> path -> star-ray NetworkX graph."""
 
-    if cycle_length < 0 or path_length < 0 or num_rays < 0 or ray_length < 0:
-        raise ValueError("Structural parameters must be non-negative.")
-    if not isinstance(num_cycles, int) or num_cycles < 1:
-        raise ValueError("num_cycles must be an integer >= 1.")
-    if cycle_length == 0 and num_cycles > 1:
-        raise ValueError("num_cycles must be 1 when cycle_length is 0.")
+    if not isinstance(n_iterations, int) or n_iterations < 1:
+        raise ValueError("n_iterations must be an integer >= 1.")
+
+    def validate_unit_parameters(params):
+        if (
+            params["cycle_length"] < 0
+            or params["path_length"] < 0
+            or params["num_rays"] < 0
+            or params["ray_length"] < 0
+        ):
+            raise ValueError("Structural parameters must be non-negative.")
+        if not isinstance(params["num_cycles"], int) or params["num_cycles"] < 0:
+            raise ValueError("num_cycles must be an integer >= 0.")
+        if params["num_cycles"] == 0 and params["path_length"] == 0 and params["num_rays"] == 0:
+            raise ValueError("At least one of num_cycles, path_length, or num_rays must be positive.")
+        if params["cycle_length"] == 0 and params["num_cycles"] > 1:
+            raise ValueError("num_cycles must be 1 when cycle_length is 0.")
+
+    fixed_unit_parameters = {
+        "cycle_length": cycle_length,
+        "num_cycles": num_cycles,
+        "path_length": path_length,
+        "num_rays": num_rays,
+        "ray_length": ray_length,
+    }
+    if _unit_parameter_sampler is None:
+        validate_unit_parameters(fixed_unit_parameters)
 
     rng = random.Random(seed)
     node_labels_by_component = _make_component_alphabets(
@@ -404,59 +429,90 @@ def generate_cycle_path_star_graph(
             label_component=component,
         )
 
-    if cycle_length == 0:
-        cycle_nodes = [add_node("cycle_anchor", "cycle")]
-    elif cycle_length < 3:
-        raise ValueError("cycle_length must be 0 or >= 3 for a simple cycle.")
-    else:
-        cycle_nodes = [add_node("cycle", "cycle") for _ in range(cycle_length)]
-        for i in range(cycle_length):
-            add_edge(cycle_nodes[i], cycle_nodes[(i + 1) % cycle_length], "cycle", "cycle")
-        previous_cycle_nodes = cycle_nodes
-        for _ in range(1, num_cycles):
-            shared_edge_idx = rng.randrange(cycle_length)
-            shared_u = previous_cycle_nodes[shared_edge_idx]
-            shared_v = previous_cycle_nodes[(shared_edge_idx + 1) % cycle_length]
-            new_cycle_nodes = [shared_u, shared_v]
-            new_cycle_nodes.extend(add_node("cycle", "cycle") for _ in range(cycle_length - 2))
-            for i in range(1, cycle_length):
-                add_edge(new_cycle_nodes[i], new_cycle_nodes[(i + 1) % cycle_length], "cycle", "cycle")
-            previous_cycle_nodes = new_cycle_nodes
+    iteration_parameters = []
 
-    anchor = rng.choice(cycle_nodes)
-    graph.nodes[anchor]["role"] = "cycle_anchor"
+    def add_cycle_path_star_unit(attach_to=None):
+        params = dict(_unit_parameter_sampler() if _unit_parameter_sampler is not None else fixed_unit_parameters)
+        validate_unit_parameters(params)
+        iteration_parameters.append(params)
 
-    current = anchor
-    for _ in range(path_length):
-        new_node = add_node("path", "path")
-        add_edge(current, new_node, "path", "path")
-        current = new_node
+        unit_cycle_length = params["cycle_length"]
+        unit_num_cycles = params["num_cycles"]
+        unit_path_length = params["path_length"]
+        unit_num_rays = params["num_rays"]
+        unit_ray_length = params["ray_length"]
 
-    hub = current
-    graph.nodes[hub]["role"] = "star_hub"
-    assign_node_label(hub, "star")
+        current = None
+        if unit_num_cycles > 0:
+            if unit_cycle_length == 0:
+                cycle_nodes = [add_node("cycle_anchor", "cycle")]
+            elif unit_cycle_length < 3:
+                raise ValueError("cycle_length must be 0 or >= 3 for a simple cycle.")
+            else:
+                cycle_nodes = [add_node("cycle", "cycle") for _ in range(unit_cycle_length)]
+                for i in range(unit_cycle_length):
+                    add_edge(cycle_nodes[i], cycle_nodes[(i + 1) % unit_cycle_length], "cycle", "cycle")
+                previous_cycle_nodes = cycle_nodes
+                for _ in range(1, unit_num_cycles):
+                    shared_edge_idx = rng.randrange(unit_cycle_length)
+                    shared_u = previous_cycle_nodes[shared_edge_idx]
+                    shared_v = previous_cycle_nodes[(shared_edge_idx + 1) % unit_cycle_length]
+                    new_cycle_nodes = [shared_u, shared_v]
+                    new_cycle_nodes.extend(add_node("cycle", "cycle") for _ in range(unit_cycle_length - 2))
+                    for i in range(1, unit_cycle_length):
+                        add_edge(new_cycle_nodes[i], new_cycle_nodes[(i + 1) % unit_cycle_length], "cycle", "cycle")
+                    previous_cycle_nodes = new_cycle_nodes
 
-    for ray_id in range(num_rays):
-        current = hub
-        if ray_length == 0:
-            leaf = add_node(f"ray_{ray_id}_leaf", "star")
-            add_edge(hub, leaf, "star_ray", "star")
-            continue
+            current = rng.choice(cycle_nodes)
+            graph.nodes[current]["role"] = "cycle_anchor"
+            if attach_to is not None:
+                add_edge(attach_to, current, "iteration_link", "cycle")
 
-        for step in range(ray_length):
-            role = f"ray_{ray_id}_node"
-            if step == ray_length - 1:
-                role = f"ray_{ray_id}_leaf"
-            new_node = add_node(role, "star")
-            add_edge(current, new_node, "star_ray", "star")
+        for _ in range(unit_path_length):
+            new_node = add_node("path", "path")
+            if current is not None:
+                add_edge(current, new_node, "path", "path")
+            elif attach_to is not None:
+                add_edge(attach_to, new_node, "iteration_link", "path")
             current = new_node
+
+        ray_endpoints = []
+        if unit_num_rays > 0:
+            hub = add_node("star_hub", "star")
+            if current is not None:
+                add_edge(current, hub, "star_ray", "star")
+            elif attach_to is not None:
+                add_edge(attach_to, hub, "iteration_link", "star")
+
+            for ray_id in range(unit_num_rays):
+                current = hub
+                for step in range(unit_ray_length):
+                    role = f"ray_{ray_id}_node"
+                    if step == unit_ray_length - 1:
+                        role = f"ray_{ray_id}_leaf"
+                    new_node = add_node(role, "star")
+                    add_edge(current, new_node, "star_ray", "star")
+                    current = new_node
+                ray_endpoints.append(current)
+        return ray_endpoints
+
+    frontier = [None]
+    for _ in range(n_iterations):
+        next_frontier = []
+        for attach_to in frontier:
+            next_frontier.extend(add_cycle_path_star_unit(attach_to=attach_to))
+        frontier = next_frontier
+        if not frontier:
+            break
 
     graph.graph["metadata"] = {
         "cycle_length": cycle_length,
         "num_cycles": num_cycles,
+        "n_iterations": n_iterations,
         "path_length": path_length,
         "num_rays": num_rays,
         "ray_length": ray_length,
+        "iteration_parameters": iteration_parameters,
         "node_alphabet_size": node_alphabet_size,
         "edge_alphabet_size": edge_alphabet_size,
         "component_specific_alphabets": component_specific_alphabets,
@@ -511,6 +567,7 @@ _ARTIFICIAL_DATASET_CONFIG_KEYS = (
     "num_graphs",
     "cycle_length",
     "num_cycles",
+    "n_iterations",
     "path_length",
     "num_rays",
     "ray_length",
@@ -603,6 +660,9 @@ def _artificial_dataset_config_stem(config):
     ]
     if config.get("num_cycles", 1) != 1:
         crumbs.insert(3, f"nc{_format_config_crumb(config['num_cycles'])}")
+    if config.get("n_iterations", 1) != 1:
+        iteration_crumb_index = 4 if config.get("num_cycles", 1) != 1 else 3
+        crumbs.insert(iteration_crumb_index, f"ni{_format_config_crumb(config['n_iterations'])}")
     if config.get("node_alphabet_size", 1) != 1:
         crumbs.append(f"na{_format_config_crumb(config['node_alphabet_size'])}")
     if config.get("edge_alphabet_size", 1) != 1:
@@ -627,6 +687,7 @@ def generate_artificial_dataset(
     num_graphs=None,
     cycle_length=None,
     num_cycles=1,
+    n_iterations=1,
     path_length=None,
     num_rays=None,
     ray_length=None,
@@ -645,6 +706,7 @@ def generate_artificial_dataset(
         "num_graphs": num_graphs,
         "cycle_length": cycle_length,
         "num_cycles": num_cycles,
+        "n_iterations": n_iterations,
         "path_length": path_length,
         "num_rays": num_rays,
         "ray_length": ray_length,
@@ -676,6 +738,7 @@ def generate_artificial_dataset(
     num_graphs = config["num_graphs"]
     cycle_length = config["cycle_length"]
     num_cycles = config["num_cycles"]
+    n_iterations = config["n_iterations"]
     path_length = config["path_length"]
     num_rays = config["num_rays"]
     ray_length = config["ray_length"]
@@ -688,6 +751,8 @@ def generate_artificial_dataset(
 
     if not isinstance(num_graphs, int) or num_graphs < 0:
         raise ValueError("num_graphs must be a non-negative integer.")
+    if not isinstance(n_iterations, int) or n_iterations < 1:
+        raise ValueError("n_iterations must be an integer >= 1.")
 
     if save_config:
         _write_artificial_dataset_config(config)
@@ -696,19 +761,6 @@ def generate_artificial_dataset(
     graphs = []
 
     for _ in range(num_graphs):
-        sampled_cycle_length = _sample_int_parameter(
-            cycle_length,
-            rng,
-            "cycle_length",
-            minimum=0,
-            valid_values=lambda candidate: candidate == 0 or candidate >= 3,
-        )
-        sampled_num_cycles = _sample_int_parameter(num_cycles, rng, "num_cycles", minimum=1)
-        if sampled_cycle_length == 0 and sampled_num_cycles > 1:
-            raise ValueError("num_cycles must be 1 when cycle_length is 0.")
-        sampled_path_length = _sample_int_parameter(path_length, rng, "path_length", minimum=0)
-        sampled_num_rays = _sample_int_parameter(num_rays, rng, "num_rays", minimum=0)
-        sampled_ray_length = _sample_int_parameter(ray_length, rng, "ray_length", minimum=0)
         sampled_node_alphabet_size = _sample_int_parameter(
             node_alphabet_size,
             rng,
@@ -722,19 +774,52 @@ def generate_artificial_dataset(
             minimum=1,
         )
 
+        def sample_unit_parameters():
+            sampled_num_cycles = _sample_int_parameter(num_cycles, rng, "num_cycles", minimum=0)
+            sampled_cycle_length = _sample_int_parameter(
+                cycle_length,
+                rng,
+                "cycle_length",
+                minimum=0,
+                valid_values=(
+                    None
+                    if sampled_num_cycles == 0
+                    else lambda candidate: candidate == 0 or candidate >= 3
+                ),
+            )
+            if sampled_cycle_length == 0 and sampled_num_cycles > 1:
+                raise ValueError("num_cycles must be 1 when cycle_length is 0.")
+            return {
+                "cycle_length": sampled_cycle_length,
+                "num_cycles": sampled_num_cycles,
+                "path_length": _sample_int_parameter(path_length, rng, "path_length", minimum=0),
+                "num_rays": _sample_int_parameter(num_rays, rng, "num_rays", minimum=0),
+                "ray_length": _sample_int_parameter(ray_length, rng, "ray_length", minimum=0),
+            }
+
+        pending_unit_parameters = [sample_unit_parameters()]
+
+        def next_unit_parameters():
+            if pending_unit_parameters:
+                return pending_unit_parameters.pop(0)
+            return sample_unit_parameters()
+
+        first_unit_parameters = pending_unit_parameters[0]
         graphs.append(
             generate_cycle_path_star_graph(
-                cycle_length=sampled_cycle_length,
-                num_cycles=sampled_num_cycles,
-                path_length=sampled_path_length,
-                num_rays=sampled_num_rays,
-                ray_length=sampled_ray_length,
+                cycle_length=first_unit_parameters["cycle_length"],
+                num_cycles=first_unit_parameters["num_cycles"],
+                n_iterations=n_iterations,
+                path_length=first_unit_parameters["path_length"],
+                num_rays=first_unit_parameters["num_rays"],
+                ray_length=first_unit_parameters["ray_length"],
                 node_alphabet_size=sampled_node_alphabet_size,
                 edge_alphabet_size=sampled_edge_alphabet_size,
                 node_alphabet_kind=node_alphabet_kind,
                 edge_alphabet_kind=edge_alphabet_kind,
                 component_specific_alphabets=component_specific_alphabets,
                 seed=rng.randint(0, 2**32 - 1),
+                _unit_parameter_sampler=next_unit_parameters,
             )
         )
 
