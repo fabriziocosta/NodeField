@@ -355,6 +355,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_failure_mode: str = "return_partial",
             feasibility_rejection_mode: str = "fallback_unfiltered",
             max_feasibility_seconds_per_sample: Optional[float] = 10.0,
+            max_decode_seconds_per_sample: Optional[float] = None,
+            max_decode_attempts_per_sample: int = 1,
             model_name: Optional[str] = None,
             model_dir: Optional[str] = None,
             stream_snapshot_every_n_batches: int = 10,
@@ -399,6 +401,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_failure_mode (str): Optional input value.
             feasibility_rejection_mode (str): Optional input value.
             max_feasibility_seconds_per_sample (Optional[float]): Optional input value.
+            max_decode_seconds_per_sample (Optional[float]): Optional input value.
+            max_decode_attempts_per_sample (int): Optional input value.
             model_name (Optional[str]): Optional input value.
             model_dir (Optional[str]): Optional input value.
             stream_snapshot_every_n_batches (int): Optional input value.
@@ -481,6 +485,10 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.max_feasibility_seconds_per_sample = (
             None if max_feasibility_seconds_per_sample is None else float(max_feasibility_seconds_per_sample)
         )
+        self.max_decode_seconds_per_sample = (
+            None if max_decode_seconds_per_sample is None else float(max_decode_seconds_per_sample)
+        )
+        self.max_decode_attempts_per_sample = int(max_decode_attempts_per_sample)
         self.model_name = None if model_name is None else sanitize_model_token(model_name)
         self.model_dir = model_dir
         self._generation_timeout_deadline: Optional[float] = None
@@ -519,6 +527,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             and self.max_feasibility_seconds_per_sample <= 0.0
         ):
             raise ValueError("max_feasibility_seconds_per_sample must be > 0 when provided")
+        if self.max_decode_seconds_per_sample is not None and self.max_decode_seconds_per_sample <= 0.0:
+            raise ValueError("max_decode_seconds_per_sample must be > 0 when provided")
+        if self.max_decode_attempts_per_sample < 1:
+            raise ValueError("max_decode_attempts_per_sample must be >= 1")
         if self.stream_batch_timeout_seconds is not None and self.stream_batch_timeout_seconds <= 0.0:
             raise ValueError("stream_batch_timeout_seconds must be > 0 when provided")
         if self.stream_snapshot_timeout_seconds is not None and self.stream_snapshot_timeout_seconds <= 0.0:

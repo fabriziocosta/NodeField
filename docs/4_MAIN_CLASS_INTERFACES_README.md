@@ -903,6 +903,8 @@ ConditionalNodeFieldGraphGenerator(
     feasibility_failure_mode: str = "return_partial",
     feasibility_rejection_mode: str = "fallback_unfiltered",
     max_feasibility_seconds_per_sample: Optional[float] = 10.0,
+    max_decode_seconds_per_sample: Optional[float] = None,
+    max_decode_attempts_per_sample: int = 1,
     use_embedding_svd: bool = True,
     node_embedding_svd_dimension: int = 256,
     graph_embedding_svd_dimension: Optional[int] = None,
@@ -1099,6 +1101,25 @@ Oracle semantics:
   generation.
   Decrease: faster failure or fallback per slot.
   Set to `None`: use the batch-wide retry path without a per-sample timeout.
+
+- `max_decode_seconds_per_sample`
+  Optional per-slot decode budget used even when feasibility filtering is off.
+  When set, each requested output is decoded independently with this solver time
+  limit, and failed or over-budget ILP attempts can be replaced by fresh
+  generation attempts.
+  Set to `None`: use the ordinary batch decode path.
+
+- `max_decode_attempts_per_sample`
+  Number of fresh generation/decode attempts allowed for each requested output
+  when `max_decode_seconds_per_sample` is set.
+  Increase: better chance of skipping unusually slow ILP instances, but more
+  worst-case compute.
+
+Saved generators loaded from disk are backfilled with these runtime attributes
+by `load_graph_generator`. Older models therefore keep the default batch decode
+behavior after loading, and callers can opt into the retry path by setting
+`graph_generator.max_decode_seconds_per_sample` and
+`graph_generator.max_decode_attempts_per_sample` on the restored object.
 
 Generation logging:
 - per-attempt feasibility logs now report the local attempt state only

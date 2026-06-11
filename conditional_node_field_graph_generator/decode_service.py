@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Optional, Sequence, Union
 
 import networkx as nx
@@ -146,6 +147,131 @@ class DecodeService:
             return None, "rejected", int(total_generated), int(total_feasible)
         return fallback_graphs[0], "unfiltered", int(total_generated), int(total_feasible)
 
+    def _decode_single_conditioning_unfiltered_with_timeout(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        *,
+        sampling_mode: str,
+        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+        guidance_scale: float = 1.0,
+        predictor_scale: float = 1.0,
+        desired_class: Optional[Union[int, Sequence[Any]]] = None,
+        classifier_scale: float = 1.0,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
+        timeout_seconds: float,
+        attempt_idx: int = 0,
+    ) -> Optional[nx.Graph]:
+        owner = self.owner
+        previous_deadline = owner._set_generation_timeout_deadline(timeout_seconds)
+        graph_decoder = getattr(owner, "graph_decoder", None)
+        previous_active_time_limit = None if graph_decoder is None else getattr(
+            graph_decoder,
+            "active_time_limit_seconds",
+            None,
+        )
+        if graph_decoder is not None:
+            graph_decoder.active_time_limit_seconds = owner._resolve_solver_time_limit_seconds(
+                getattr(graph_decoder, "adjacency_time_limit_seconds", None)
+            )
+        started_at = time.perf_counter()
+        try:
+            decoded_graphs = self.decode_conditioning_batch(
+                graph_conditioning,
+                sampling_mode=sampling_mode,
+                desired_target=desired_target,
+                guidance_scale=guidance_scale,
+                predictor_scale=predictor_scale,
+                desired_class=desired_class,
+                classifier_scale=classifier_scale,
+                feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                use_ilp_decoder=use_ilp_decoder,
+                edge_probability_threshold=edge_probability_threshold,
+                attempt_idx=attempt_idx,
+            )
+        finally:
+            if graph_decoder is not None:
+                graph_decoder.active_time_limit_seconds = previous_active_time_limit
+            owner._restore_generation_timeout_deadline(previous_deadline)
+
+        elapsed_seconds = time.perf_counter() - started_at
+        if elapsed_seconds > float(timeout_seconds):
+            raise TimeoutError(
+                f"Decode attempt exceeded {float(timeout_seconds):.1f}s "
+                f"(elapsed={elapsed_seconds:.1f}s)."
+            )
+        if not decoded_graphs:
+            return None
+        return decoded_graphs[0]
+
+    def _decode_unfiltered_slots_with_timeout(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        *,
+        sampling_mode: str,
+        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+        guidance_scale: float = 1.0,
+        predictor_scale: float = 1.0,
+        desired_class: Optional[Union[int, Sequence[Any]]] = None,
+        classifier_scale: float = 1.0,
+        feasibility_oracle_candidates_per_attempt: Optional[int] = None,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
+        timeout_seconds: float,
+    ) -> list[Optional[nx.Graph]]:
+        owner = self.owner
+        max_attempts = max(1, int(getattr(owner, "max_decode_attempts_per_sample", 1)))
+        decoded_slots: list[Optional[nx.Graph]] = []
+        returned_count = 0
+        rejected_count = 0
+        total_attempts = 0
+        for slot_idx in range(len(graph_conditioning)):
+            slot_conditioning = owner._slice_graph_conditioning(graph_conditioning, [slot_idx])
+            accepted_graph = None
+            for attempt_idx in range(max_attempts):
+                total_attempts += 1
+                try:
+                    accepted_graph = self._decode_single_conditioning_unfiltered_with_timeout(
+                        slot_conditioning,
+                        sampling_mode=sampling_mode,
+                        desired_target=desired_target,
+                        guidance_scale=guidance_scale,
+                        predictor_scale=predictor_scale,
+                        desired_class=desired_class,
+                        classifier_scale=classifier_scale,
+                        feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                        use_ilp_decoder=use_ilp_decoder,
+                        edge_probability_threshold=edge_probability_threshold,
+                        timeout_seconds=timeout_seconds,
+                        attempt_idx=attempt_idx,
+                    )
+                except (RuntimeError, TimeoutError) as exc:
+                    if int(getattr(owner, "verbose", 0)) >= 2:
+                        verbose_log(
+                            owner,
+                            "Decode attempt failed; retrying with a fresh sample "
+                            f"(slot={slot_idx}, attempt={attempt_idx + 1}/{max_attempts}, error={exc}).",
+                            level=2,
+                        )
+                    accepted_graph = None
+                if accepted_graph is not None:
+                    break
+            decoded_slots.append(accepted_graph)
+            if accepted_graph is None:
+                rejected_count += 1
+            else:
+                returned_count += 1
+        self._record_decode_summary(
+            requested_count=len(graph_conditioning),
+            generated_count=total_attempts,
+            candidate_feasible_count=returned_count,
+            feasible_count=0,
+            unfiltered_count=returned_count,
+            rejected_count=rejected_count,
+        )
+        return decoded_slots
+
     def decode_generated_nodes(
         self,
         generated_nodes: GeneratedNodeBatch,
@@ -238,6 +364,21 @@ class DecodeService:
         owner = self.owner
         use_filtering = should_apply_feasibility_filtering(owner, apply_feasibility_filtering)
         if owner.feasibility_estimator is None or not use_filtering:
+            timeout_seconds = getattr(owner, "max_decode_seconds_per_sample", None)
+            if timeout_seconds is not None and use_ilp_decoder:
+                return self._decode_unfiltered_slots_with_timeout(
+                    graph_conditioning,
+                    sampling_mode=sampling_mode,
+                    desired_target=desired_target,
+                    guidance_scale=guidance_scale,
+                    predictor_scale=predictor_scale,
+                    desired_class=desired_class,
+                    classifier_scale=classifier_scale,
+                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                    use_ilp_decoder=use_ilp_decoder,
+                    edge_probability_threshold=edge_probability_threshold,
+                    timeout_seconds=float(timeout_seconds),
+                )
             return list(
                 self.decode_conditioning_batch(
                     graph_conditioning,

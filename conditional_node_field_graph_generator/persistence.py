@@ -78,6 +78,10 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.stream_pdf_timeout_seconds = 60.0
     if not hasattr(graph_generator, "stream_max_consecutive_stalls"):
         graph_generator.stream_max_consecutive_stalls = 3
+    if not hasattr(graph_generator, "max_decode_seconds_per_sample"):
+        graph_generator.max_decode_seconds_per_sample = None
+    if not hasattr(graph_generator, "max_decode_attempts_per_sample"):
+        graph_generator.max_decode_attempts_per_sample = 1
     if not hasattr(graph_generator, "use_embedding_svd"):
         graph_generator.use_embedding_svd = False
     if not hasattr(graph_generator, "node_embedding_svd_dimension"):
@@ -123,6 +127,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.decode_service_ = DecodeService(graph_generator)
     graph_decoder = getattr(graph_generator, "graph_decoder", None)
     if graph_decoder is not None:
+        if not hasattr(graph_decoder, "adjacency_time_limit_seconds"):
+            graph_decoder.adjacency_time_limit_seconds = 60.0
         if not hasattr(graph_decoder, "parallel_decode_timeout_seconds"):
             graph_decoder.parallel_decode_timeout_seconds = 30.0
         if not hasattr(graph_decoder, "active_time_limit_seconds"):

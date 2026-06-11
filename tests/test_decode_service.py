@@ -20,6 +20,9 @@ class _Owner:
         self.max_feasibility_attempts = 3
         self.feasibility_failure_mode = "return_partial"
         self.feasibility_rejection_mode = "fallback_unfiltered"
+        self.max_decode_seconds_per_sample = None
+        self.max_decode_attempts_per_sample = 1
+        self.graph_decoder = None
         self._calls = 0
         self.conditional_node_generator_model = types.SimpleNamespace(
             predict_classifier_guided=lambda *args, **kwargs: None,
@@ -55,6 +58,9 @@ class _Owner:
     def _restore_generation_timeout_deadline(self, previous_deadline):
         del previous_deadline
         return None
+
+    def _resolve_solver_time_limit_seconds(self, default_seconds=None):
+        return default_seconds
 
 
 def test_decode_service_retries_until_slots_are_filled():
@@ -128,8 +134,12 @@ def test_decode_service_timeout_mode_records_final_summary_with_fallback(monkeyp
         if not hasattr(owner, "_single_calls"):
             owner._single_calls = 0
         owner._single_calls += 1
-        return ("fallback-graph" if owner._single_calls == 1 else {"slot": 1, "feasible": True},
-                "unfiltered" if owner._single_calls == 1 else "feasible")
+        return (
+            "fallback-graph" if owner._single_calls == 1 else {"slot": 1, "feasible": True},
+            "unfiltered" if owner._single_calls == 1 else "feasible",
+            0,
+            0,
+        )
 
     monkeypatch.setattr(service, "_decode_single_conditioning_with_timeout", _fake_single)
 
@@ -184,3 +194,42 @@ def test_decode_service_strict_mode_skips_unfiltered_fallback(monkeypatch):
     assert owner.last_decode_summary_["generated"] == 0
     assert owner.last_decode_summary_["candidate_feasible"] == 0
     assert owner.last_decode_summary_["candidate_feasible_fraction"] == 0.0
+
+
+def test_decode_service_retries_unfiltered_decode_after_failure():
+    owner = _Owner()
+    owner.use_feasibility_filtering = False
+    owner.feasibility_estimator = None
+    owner.max_decode_seconds_per_sample = 30.0
+    owner.max_decode_attempts_per_sample = 3
+    service = DecodeService(owner)
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.asarray([[0.0]], dtype=float),
+        node_counts=np.asarray([2], dtype=int),
+        edge_counts=np.asarray([1], dtype=int),
+    )
+
+    calls = {"count": 0}
+
+    def _fake_decode(*args, **kwargs):
+        del args, kwargs
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("slow ILP aborted")
+        return [{"slot": 0, "feasible": False}]
+
+    service.decode_conditioning_batch = _fake_decode
+
+    decoded = service.decode_with_feasibility_slots(
+        conditioning,
+        sampling_mode="unguided",
+        apply_feasibility_filtering=False,
+    )
+
+    assert decoded == [{"slot": 0, "feasible": False}]
+    assert calls["count"] == 2
+    assert owner.last_decode_summary_["requested"] == 1
+    assert owner.last_decode_summary_["returned"] == 1
+    assert owner.last_decode_summary_["generated"] == 2
+    assert owner.last_decode_summary_["unfiltered"] == 1
+    assert owner.last_decode_summary_["rejected"] == 0

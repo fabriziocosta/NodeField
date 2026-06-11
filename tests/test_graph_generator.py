@@ -2638,6 +2638,12 @@ def test_load_graph_generator_restores_legacy_sample_oracle_runtime_defaults(tmp
     generator = _make_fitted_sampling_generator()
     generator.model_name = "legacy-sample-oracle"
     delattr(generator, "feasibility_oracle_candidates_per_attempt")
+    delattr(generator, "max_decode_seconds_per_sample")
+    delattr(generator, "max_decode_attempts_per_sample")
+    delattr(generator.graph_decoder, "adjacency_time_limit_seconds")
+    delattr(generator.graph_decoder, "parallel_decode_timeout_seconds")
+    delattr(generator.graph_decoder, "active_time_limit_seconds")
+    delattr(generator.graph_decoder, "solver_threads")
     delattr(generator, "decode_service_")
 
     save_graph_generator(generator, model_dir=tmp_path, log=False)
@@ -2648,6 +2654,12 @@ def test_load_graph_generator_restores_legacy_sample_oracle_runtime_defaults(tmp
         restored.feasibility_oracle_candidates_per_attempt
         == ConditionalNodeFieldGraphGenerator._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
     )
+    assert restored.max_decode_seconds_per_sample is None
+    assert restored.max_decode_attempts_per_sample == 1
+    assert restored.graph_decoder.adjacency_time_limit_seconds == pytest.approx(60.0)
+    assert restored.graph_decoder.parallel_decode_timeout_seconds == pytest.approx(30.0)
+    assert restored.graph_decoder.active_time_limit_seconds is None
+    assert restored.graph_decoder.solver_threads is None
     assert restored.decode_service_.owner is restored
 
     captured = {}
