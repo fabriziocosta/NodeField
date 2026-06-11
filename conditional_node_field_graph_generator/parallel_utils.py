@@ -29,6 +29,7 @@ def _parallel_map(
     verbose: bool = False,
     timeout_seconds: Optional[float] = None,
     timeout_fallback_label: str = "parallel work",
+    fallback_on_timeout: bool = True,
 ):
     if max_workers <= 1 or len(jobs) <= 1:
         return [func(job) for job in jobs]
@@ -41,6 +42,10 @@ def _parallel_map(
             return [future.result(timeout=float(timeout_seconds)) for future in futures]
         except FuturesTimeoutError:
             executor.shutdown(wait=False, cancel_futures=True)
+            if not fallback_on_timeout:
+                raise TimeoutError(
+                    f"Process-based {timeout_fallback_label} exceeded {float(timeout_seconds):.1f}s."
+                )
             if verbose:
                 logger.warning(
                     "Process-based %s exceeded %.1fs; falling back to sequential execution.",

@@ -2,6 +2,8 @@
 
 import logging
 import multiprocessing as mp
+import os
+import signal
 import sys
 import time
 import warnings
@@ -120,6 +122,10 @@ def run_with_fork_timeout(worker, *args, timeout_seconds: float | None = None):
 
     def _runner(queue_, worker_, worker_args_):
         try:
+            try:
+                os.setsid()
+            except Exception:
+                pass
             queue_.put(("ok", worker_(*worker_args_)))
         except Exception as exc:  # pragma: no cover
             queue_.put(("err", repr(exc)))
@@ -128,8 +134,17 @@ def run_with_fork_timeout(worker, *args, timeout_seconds: float | None = None):
     process.start()
     process.join(timeout_seconds)
     if process.is_alive():
-        process.terminate()
-        process.join()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except Exception:
+            process.terminate()
+        process.join(2.0)
+        if process.is_alive():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except Exception:
+                process.kill()
+            process.join()
         raise TimeoutError(f"Timed out after {timeout_seconds:.1f}s.")
     if process.exitcode not in (0, None) and result_queue.empty():
         raise RuntimeError(f"Worker exited with code {process.exitcode}.")

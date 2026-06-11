@@ -15,7 +15,7 @@ from .conditional_node_field_generator import GeneratedNodeBatch, GraphCondition
 from . import diagnostics as _shared_diagnostics
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .parallel_utils import _normalize_n_jobs, _parallel_map
-from .runtime_utils import verbose_log
+from .runtime_utils import run_with_fork_timeout, verbose_log
 
 Edge = Tuple[int, int]
 _DECODER_PROBABILITY_EPS = 1e-6
@@ -399,6 +399,38 @@ def sample_oracle_cuts_for_iteration(
     return [accumulated_cuts[idx] for idx in selected_indices]
 
 
+def _optimize_adjacency_matrix_worker(graph_decoder, args, kwargs) -> np.ndarray:
+    return graph_decoder.optimize_adjacency_matrix(*args, **kwargs)
+
+
+def _oracle_adjacency_timeout_seconds(owner) -> Optional[float]:
+    timeout_seconds = getattr(owner, "max_decode_seconds_per_sample", None)
+    if timeout_seconds is None:
+        timeout_seconds = getattr(owner, "max_feasibility_seconds_per_sample", None)
+    if timeout_seconds is None:
+        graph_decoder = getattr(owner, "graph_decoder", None)
+        if graph_decoder is not None:
+            timeout_seconds = getattr(graph_decoder, "active_time_limit_seconds", None)
+            if timeout_seconds is None:
+                timeout_seconds = getattr(graph_decoder, "adjacency_time_limit_seconds", None)
+    if timeout_seconds is None:
+        return None
+    return max(1.0, float(timeout_seconds))
+
+
+def optimize_oracle_adjacency_matrix(owner, *args, **kwargs) -> np.ndarray:
+    timeout_seconds = _oracle_adjacency_timeout_seconds(owner)
+    if timeout_seconds is None:
+        return owner.graph_decoder.optimize_adjacency_matrix(*args, **kwargs)
+    return run_with_fork_timeout(
+        _optimize_adjacency_matrix_worker,
+        owner.graph_decoder,
+        args,
+        kwargs,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def solve_oracle_relaxed_adjacency(
     owner,
     *,
@@ -422,11 +454,14 @@ def solve_oracle_relaxed_adjacency(
     for solve_iteration_idx in range(start_iteration_idx, owner.max_oracle_iterations):
         active_cuts = sample_oracle_cuts_for_iteration(owner, accumulated_cuts, solve_iteration_idx)
         try:
-            return owner.graph_decoder.optimize_adjacency_matrix(
+            return optimize_oracle_adjacency_matrix(
+                owner,
                 solve_prob_matrix,
                 target_degrees,
                 forbidden_edge_sets=active_cuts,
             )
+        except TimeoutError:
+            raise
         except Exception as exc:
             last_error = exc
             if int(owner.verbose) >= 1:
@@ -1290,14 +1325,23 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "Decoder plots for verbose>=4 are only shown when n_jobs=1; skipping plots during parallel adjacency decode.",
                 level=4,
             )
-        if self.n_jobs == 1 or len(jobs) <= 1:
-            return [_decode_single_adjacency_job(*job) for job in jobs]
         timeout_seconds = self.parallel_decode_timeout_seconds
         if self.active_time_limit_seconds is not None:
-            timeout_seconds = max(
-                float(timeout_seconds) if timeout_seconds is not None else 0.0,
-                float(self.active_time_limit_seconds) + 5.0,
+            timeout_seconds = min(
+                float(timeout_seconds) if timeout_seconds is not None else float(self.active_time_limit_seconds),
+                float(self.active_time_limit_seconds),
             )
+        if self.n_jobs == 1 or len(jobs) <= 1:
+            if timeout_seconds is None:
+                return [_decode_single_adjacency_job(*job) for job in jobs]
+            return [
+                run_with_fork_timeout(
+                    _decode_single_adjacency_job_star,
+                    job,
+                    timeout_seconds=float(timeout_seconds),
+                )
+                for job in jobs
+            ]
         return _parallel_map(
             _decode_single_adjacency_job_star,
             jobs,
@@ -1305,6 +1349,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             verbose=bool(self.verbose),
             timeout_seconds=timeout_seconds,
             timeout_fallback_label="parallel adjacency decode",
+            fallback_on_timeout=False,
         )
 
     def decode_adjacency_matrix_direct(
@@ -1976,9 +2021,10 @@ def decode_generated_nodes_with_oracle(
                     owner,
                     "Oracle initial adjacency decode failed under connectivity constraints; "
                     "retrying with connectivity disabled for the seed solve.",
-                )
+            )
             try:
-                single_adj_mtx = owner.graph_decoder.optimize_adjacency_matrix(
+                single_adj_mtx = optimize_oracle_adjacency_matrix(
+                    owner,
                     masked_prob_matrix,
                     target_degrees,
                     target_edge_count=desired_edge_count,
@@ -2305,14 +2351,23 @@ def decode_generated_nodes_with_oracle(
                     new_structural_cut_count=len(persistent_structural_cuts),
                 )
                 break
-            single_adj_mtx = solve_oracle_relaxed_adjacency(
-                owner,
-                masked_prob_matrix=masked_prob_matrix,
-                target_degrees=target_degrees,
-                accumulated_cuts=accumulated_structural_cuts,
-                start_iteration_idx=_iteration_idx + 1,
-                edge_violation_prior=local_edge_violation_prior,
-            )
+            try:
+                single_adj_mtx = solve_oracle_relaxed_adjacency(
+                    owner,
+                    masked_prob_matrix=masked_prob_matrix,
+                    target_degrees=target_degrees,
+                    accumulated_cuts=accumulated_structural_cuts,
+                    start_iteration_idx=_iteration_idx + 1,
+                    edge_violation_prior=local_edge_violation_prior,
+                )
+            except TimeoutError:
+                if int(owner.verbose) >= 1:
+                    verbose_log(
+                        owner,
+                        "Oracle-guided adjacency refinement timed out; "
+                        "returning the best graph seen before the slow refinement.",
+                    )
+                break
             current_edge_label_matrix = owner._fill_unlabeled_active_edges(
                 adj_mtx=single_adj_mtx,
                 edge_label_matrix=current_edge_label_matrix,
