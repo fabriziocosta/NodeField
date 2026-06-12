@@ -108,6 +108,23 @@ def build_fit_artifacts(
         graph_embeddings=np.asarray(graph_conditioning.graph_embeddings),
         node_counts=np.asarray(graph_conditioning.node_counts, dtype=np.int64),
         edge_counts=np.asarray(graph_conditioning.edge_counts, dtype=np.int64),
+        condition_node_embeddings=(
+            None
+            if graph_conditioning.condition_node_embeddings is None
+            else (
+                np.asarray(graph_conditioning.condition_node_embeddings)
+                if isinstance(graph_conditioning.condition_node_embeddings, np.ndarray)
+                else [
+                    np.asarray(embedding, dtype=float)
+                    for embedding in graph_conditioning.condition_node_embeddings
+                ]
+            )
+        ),
+        condition_node_presence_mask=(
+            None
+            if graph_conditioning.condition_node_presence_mask is None
+            else np.asarray(graph_conditioning.condition_node_presence_mask, dtype=bool)
+        ),
     )
     return {
         "node_label_targets": node_label_targets,

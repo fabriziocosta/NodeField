@@ -51,9 +51,40 @@ class GraphConditioningBatch:
     graph_embeddings: np.ndarray
     node_counts: np.ndarray
     edge_counts: np.ndarray
+    condition_node_embeddings: Optional[Union[List[np.ndarray], np.ndarray]] = None
+    condition_node_presence_mask: Optional[np.ndarray] = None
 
     def __len__(self) -> int:
         return int(len(self.graph_embeddings))
+
+    def take(self, indices: Sequence[int]) -> "GraphConditioningBatch":
+        idx = np.asarray(indices, dtype=np.int64)
+        condition_node_embeddings = self.condition_node_embeddings
+        if condition_node_embeddings is not None:
+            if isinstance(condition_node_embeddings, np.ndarray):
+                condition_node_embeddings = np.asarray(condition_node_embeddings)[idx]
+            else:
+                condition_node_embeddings = [
+                    np.asarray(condition_node_embeddings[int(index)], dtype=float)
+                    for index in idx
+                ]
+        condition_node_presence_mask = None
+        if self.condition_node_presence_mask is not None:
+            condition_node_presence_mask = np.asarray(self.condition_node_presence_mask)[idx]
+        return GraphConditioningBatch(
+            graph_embeddings=np.asarray(self.graph_embeddings)[idx],
+            node_counts=np.asarray(self.node_counts)[idx],
+            edge_counts=np.asarray(self.edge_counts)[idx],
+            condition_node_embeddings=condition_node_embeddings,
+            condition_node_presence_mask=condition_node_presence_mask,
+        )
+
+    def repeat(self, repeats: int) -> "GraphConditioningBatch":
+        repeats = int(repeats)
+        if repeats < 1:
+            raise ValueError("repeats must be >= 1")
+        indices = np.repeat(np.arange(len(self), dtype=np.int64), repeats)
+        return self.take(indices)
 
 
 @dataclass
@@ -899,7 +930,10 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         """
         if self.edge_count_condition_index is None:
             raise RuntimeError("Edge-count loss requires edge_count_condition_index to be configured.")
-        scaled_edge_counts = global_condition[:, self.edge_count_condition_index]
+        if global_condition.dim() == 3:
+            scaled_edge_counts = global_condition[:, 0, self.edge_count_condition_index]
+        else:
+            scaled_edge_counts = global_condition[:, self.edge_count_condition_index]
         if abs(self.edge_count_condition_scale) < 1e-12:
             return torch.full_like(scaled_edge_counts, self.edge_count_condition_min)
         return (scaled_edge_counts - self.edge_count_condition_min) / self.edge_count_condition_scale
@@ -908,7 +942,10 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         """Recover unscaled node-count targets from the scaled conditioning tensor."""
         if self.node_count_condition_index is None:
             raise RuntimeError("Node-count loss requires node_count_condition_index to be configured.")
-        scaled_node_counts = global_condition[:, self.node_count_condition_index]
+        if global_condition.dim() == 3:
+            scaled_node_counts = global_condition[:, 0, self.node_count_condition_index]
+        else:
+            scaled_node_counts = global_condition[:, self.node_count_condition_index]
         if abs(self.node_count_condition_scale) < 1e-12:
             return torch.full_like(scaled_node_counts, self.node_count_condition_min)
         return (scaled_node_counts - self.node_count_condition_min) / self.node_count_condition_scale
@@ -1068,7 +1105,10 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         if not self._has_target_conditioning():
             return global_condition
         cond = global_condition.clone()
-        cond[:, self._target_condition_slice()] = 0.0
+        if cond.dim() == 3:
+            cond[:, :, self._target_condition_slice()] = 0.0
+        else:
+            cond[:, self._target_condition_slice()] = 0.0
         return cond
 
     def _apply_cfg_dropout(self, global_condition: torch.Tensor) -> torch.Tensor:
@@ -1081,7 +1121,10 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         if not torch.any(drop_mask):
             return global_condition
         cond = global_condition.clone()
-        cond[drop_mask, self._target_condition_slice()] = 0.0
+        if cond.dim() == 3:
+            cond[drop_mask, :, self._target_condition_slice()] = 0.0
+        else:
+            cond[drop_mask, self._target_condition_slice()] = 0.0
         return cond
 
     def _compute_score_field(
@@ -1992,12 +2035,14 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
     def _transform_data(self, X_array: np.ndarray, y_array: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         batch_size, row_count, feature_count = X_array.shape
         X_scaled = self.x_scaler.transform(X_array.reshape(-1, feature_count)).reshape(batch_size, row_count, feature_count)
+        y_scaled = self._transform_condition_array(y_array)
+        return X_scaled, y_scaled
+
+    def _transform_condition_array(self, y_array: np.ndarray) -> np.ndarray:
         if y_array.ndim == 3:
             cond_batch, token_count, cond_dim = y_array.shape
-            y_scaled = self.y_scaler.transform(y_array.reshape(-1, cond_dim)).reshape(cond_batch, token_count, cond_dim)
-        else:
-            y_scaled = self.y_scaler.transform(y_array)
-        return X_scaled, y_scaled
+            return self.y_scaler.transform(y_array.reshape(-1, cond_dim)).reshape(cond_batch, token_count, cond_dim)
+        return self.y_scaler.transform(y_array)
 
     def _inverse_transform_input(self, X_array: np.ndarray) -> np.ndarray:
         batch_size, row_count, feature_count = X_array.shape
@@ -2059,6 +2104,79 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             graph_embeddings = graph_embeddings[:, None]
         node_counts = np.asarray(graph_conditioning.node_counts, dtype=float).reshape(-1, 1)
         edge_counts = np.asarray(graph_conditioning.edge_counts, dtype=float).reshape(-1, 1)
+        condition_node_embeddings = graph_conditioning.condition_node_embeddings
+        if condition_node_embeddings is not None:
+            if isinstance(condition_node_embeddings, np.ndarray):
+                condition_tokens = np.asarray(condition_node_embeddings, dtype=float)
+                if condition_tokens.ndim != 3:
+                    raise ValueError(
+                        "condition_node_embeddings ndarray must have shape (B, M, C); "
+                        f"received {condition_tokens.shape}."
+                    )
+            else:
+                condition_node_embeddings = [
+                    np.asarray(embedding, dtype=float)
+                    for embedding in condition_node_embeddings
+                ]
+                if len(condition_node_embeddings) != len(graph_embeddings):
+                    raise ValueError(
+                        "condition_node_embeddings length must match graph_embeddings length "
+                        f"({len(condition_node_embeddings)} != {len(graph_embeddings)})."
+                    )
+                max_tokens = max((embedding.shape[0] for embedding in condition_node_embeddings), default=0)
+                feature_dims = {
+                    int(embedding.shape[1])
+                    for embedding in condition_node_embeddings
+                    if embedding.ndim == 2
+                }
+                if len(feature_dims) != 1:
+                    raise ValueError(
+                        "All condition_node_embeddings entries must be 2D arrays with the same feature dimension."
+                    )
+                feature_dim = int(next(iter(feature_dims)))
+                condition_tokens = np.zeros(
+                    (len(condition_node_embeddings), max_tokens, feature_dim),
+                    dtype=float,
+                )
+                for index, embedding in enumerate(condition_node_embeddings):
+                    if embedding.ndim != 2:
+                        raise ValueError(
+                            "Each condition_node_embeddings entry must have shape (M_i, C); "
+                            f"entry {index} has shape {embedding.shape}."
+                        )
+                    condition_tokens[index, :embedding.shape[0], :] = embedding
+            if condition_tokens.shape[0] != graph_embeddings.shape[0]:
+                raise ValueError(
+                    "condition_node_embeddings batch size must match graph_embeddings batch size "
+                    f"({condition_tokens.shape[0]} != {graph_embeddings.shape[0]})."
+                )
+            token_count = int(condition_tokens.shape[1])
+            if token_count < 1:
+                raise ValueError("condition_node_embeddings must contain at least one token per batch item.")
+            if graph_conditioning.condition_node_presence_mask is None:
+                active_mask = np.any(np.abs(condition_tokens) > 0.0, axis=2)
+                active_mask[~np.any(active_mask, axis=1), 0] = True
+            else:
+                active_mask = np.asarray(graph_conditioning.condition_node_presence_mask, dtype=float)
+                if active_mask.shape != condition_tokens.shape[:2]:
+                    raise ValueError(
+                        "condition_node_presence_mask must have shape (B, M) matching condition_node_embeddings "
+                        f"({active_mask.shape} != {condition_tokens.shape[:2]})."
+                    )
+            repeated_graph_embeddings = np.repeat(graph_embeddings[:, None, :], token_count, axis=1)
+            active_feature = np.asarray(active_mask, dtype=float).reshape(len(graph_embeddings), token_count, 1)
+            repeated_node_counts = np.repeat(node_counts[:, None, :], token_count, axis=1)
+            repeated_edge_counts = np.repeat(edge_counts[:, None, :], token_count, axis=1)
+            return np.concatenate(
+                [
+                    condition_tokens,
+                    repeated_graph_embeddings,
+                    active_feature,
+                    repeated_node_counts,
+                    repeated_edge_counts,
+                ],
+                axis=2,
+            )
         return np.concatenate([graph_embeddings, node_counts, edge_counts], axis=1)
 
     def _fit_target_encoder(self, targets: Sequence[Any]) -> None:
@@ -2302,7 +2420,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
 
         X_array = self._build_padded_node_array(node_encodings_list, max_num_rows)
         base_condition_array = self._compose_condition_array(graph_conditioning)
-        self.target_condition_start_ = int(base_condition_array.shape[1])
+        self.target_condition_start_ = int(base_condition_array.shape[-1])
         if targets is not None:
             if len(targets) != len(node_encodings_list):
                 raise ValueError(
@@ -2311,20 +2429,28 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 )
             self._fit_target_encoder(targets)
             target_condition_array = self._encode_targets(targets)
-            y_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
+            if base_condition_array.ndim == 3:
+                target_condition_array = np.repeat(
+                    target_condition_array[:, None, :],
+                    base_condition_array.shape[1],
+                    axis=1,
+                )
+                y_array = np.concatenate([base_condition_array, target_condition_array], axis=2)
+            else:
+                y_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
         else:
             self._reset_target_encoder()
             y_array = base_condition_array
-        self.condition_token_count = 1
+        self.condition_token_count = int(base_condition_array.shape[1]) if base_condition_array.ndim == 3 else 1
         valid_mask = np.asarray(node_batch.node_presence_mask, dtype=bool)
 
         encoded_node_label_targets = None
         if node_label_targets is not None:
             self._fit_node_label_vocab(node_label_targets)
             encoded_node_label_targets = self._encode_node_label_targets(node_label_targets, max_num_rows)
-            self.base_condition_feature_dimension = base_condition_array.shape[1]
+            self.base_condition_feature_dimension = base_condition_array.shape[-1]
         else:
-            self.base_condition_feature_dimension = base_condition_array.shape[1]
+            self.base_condition_feature_dimension = base_condition_array.shape[-1]
             self.use_node_label_head = False
             self.num_node_label_classes_ = 0
             self.node_label_classes_ = None
@@ -2337,10 +2463,14 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             self.edge_label_classes_ = None
             self.edge_label_to_index_ = None
 
-        self.condition_feature_dimension = y_array.shape[1]
-        self.node_count_condition_index_ = int(base_condition_array.shape[1] - 2)
-        self.edge_count_condition_index_ = int(base_condition_array.shape[1] - 1)
-        self.base_condition_scaler_ = MinMaxScaler().fit(base_condition_array)
+        self.condition_feature_dimension = y_array.shape[-1]
+        self.node_count_condition_index_ = int(base_condition_array.shape[-1] - 2)
+        self.edge_count_condition_index_ = int(base_condition_array.shape[-1] - 1)
+        self.base_condition_scaler_ = MinMaxScaler()
+        if base_condition_array.ndim == 3:
+            self.base_condition_scaler_.fit(base_condition_array.reshape(-1, base_condition_array.shape[-1]))
+        else:
+            self.base_condition_scaler_.fit(base_condition_array)
 
         self._fit_scalers(X_array, y_array)
 
@@ -2585,7 +2715,15 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                         f"(got {len(targets)} targets for {len(base_condition_array)} graphs)."
                     )
                 target_condition_array = self._encode_targets(targets)
-            y_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
+            if base_condition_array.ndim == 3:
+                target_condition_array = np.repeat(
+                    target_condition_array[:, None, :],
+                    base_condition_array.shape[1],
+                    axis=1,
+                )
+                y_array = np.concatenate([base_condition_array, target_condition_array], axis=2)
+            else:
+                y_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
         else:
             y_array = base_condition_array
         mask_array = np.asarray(node_batch.node_presence_mask, dtype=bool)
@@ -2783,6 +2921,11 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             if hidden_dimension is None
             else int(hidden_dimension)
         )
+        if int(getattr(self, "condition_token_count", 1)) != 1:
+            raise RuntimeError(
+                "Separate post-hoc guidance predictors currently require vector conditioning; "
+                "tokenized cross-attention conditioning is supported for node generation and CFG only."
+            )
         self.guidance_predictor_ = GuidancePredictorMLP(
             number_of_rows_per_example=self.number_of_rows_per_example,
             input_feature_dimension=self.input_feature_dimension,
@@ -3121,19 +3264,34 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 target_condition_array = np.zeros((len(base_condition_array), self.target_condition_dim_), dtype=float)
             else:
                 target_condition_array = self._encode_targets(desired_targets)
-            cond_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
+            if base_condition_array.ndim == 3:
+                target_condition_array = np.repeat(
+                    target_condition_array[:, None, :],
+                    base_condition_array.shape[1],
+                    axis=1,
+                )
+                cond_array = np.concatenate([base_condition_array, target_condition_array], axis=2)
+            else:
+                cond_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
         else:
             if desired_targets is not None and int(self.verbose) >= 1:
                 logger.warning(
                     "desired_target was provided, but guidance conditioning is not available; falling back to unguided generation."
                 )
             cond_array = base_condition_array
-        cond_scaled = self.y_scaler.transform(cond_array)
+        cond_scaled = self._transform_condition_array(cond_array)
         cond_tensor = torch.tensor(cond_scaled, dtype=torch.float32, device=self.device)
         cond_uncond_tensor = None
         if use_cfg_guidance:
             cond_uncond_scaled = np.asarray(cond_scaled, dtype=float).copy()
-            cond_uncond_scaled[:, self.target_condition_start_:self.target_condition_start_ + self.target_condition_dim_] = 0.0
+            target_slice = slice(
+                self.target_condition_start_,
+                self.target_condition_start_ + self.target_condition_dim_,
+            )
+            if cond_uncond_scaled.ndim == 3:
+                cond_uncond_scaled[:, :, target_slice] = 0.0
+            else:
+                cond_uncond_scaled[:, target_slice] = 0.0
             cond_uncond_tensor = torch.tensor(cond_uncond_scaled, dtype=torch.float32, device=self.device)
 
         generated = self.model.generate(
@@ -3200,12 +3358,17 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
 
         self.device = next(self.model.parameters()).device
         base_condition_array = self._compose_condition_array(graph_conditioning)
+        if base_condition_array.ndim == 3:
+            raise RuntimeError(
+                "Separate post-hoc guidance predictors currently require vector conditioning; "
+                "tokenized cross-attention conditioning is supported for node generation and CFG only."
+            )
         if self.guidance_enabled_:
             target_condition_array = np.zeros((len(base_condition_array), self.target_condition_dim_), dtype=float)
             cond_array = np.concatenate([base_condition_array, target_condition_array], axis=1)
         else:
             cond_array = base_condition_array
-        cond_scaled = self.y_scaler.transform(cond_array)
+        cond_scaled = self._transform_condition_array(cond_array)
         cond_tensor = torch.tensor(cond_scaled, dtype=torch.float32, device=self.device)
         base_condition_scaled = self.base_condition_scaler_.transform(base_condition_array)
         base_condition_tensor = torch.tensor(base_condition_scaled, dtype=torch.float32, device=self.device)

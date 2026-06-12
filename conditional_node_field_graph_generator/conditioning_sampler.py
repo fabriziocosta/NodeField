@@ -17,11 +17,7 @@ class ConditioningSampler:
     @staticmethod
     def sample_conditioning_rows(source: GraphConditioningBatch, indices: np.ndarray) -> GraphConditioningBatch:
         idx = np.asarray(indices, dtype=np.int64)
-        return GraphConditioningBatch(
-            graph_embeddings=np.asarray(source.graph_embeddings)[idx],
-            node_counts=np.asarray(source.node_counts)[idx],
-            edge_counts=np.asarray(source.edge_counts)[idx],
-        )
+        return source.take(idx)
 
     @staticmethod
     def interpolated_conditioning_from_pair(

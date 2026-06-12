@@ -2247,11 +2247,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             GraphConditioningBatch: Computed result.
         """
         idx = np.asarray(indices, dtype=np.int64)
-        return GraphConditioningBatch(
-            graph_embeddings=np.asarray(graph_conditioning.graph_embeddings)[idx],
-            node_counts=np.asarray(graph_conditioning.node_counts)[idx],
-            edge_counts=np.asarray(graph_conditioning.edge_counts)[idx],
-        )
+        return graph_conditioning.take(idx)
 
     @staticmethod
     def _repeat_graph_conditioning(
@@ -2269,15 +2265,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         """
         if repeats < 1:
             raise ValueError("repeats must be >= 1")
-        return GraphConditioningBatch(
-            graph_embeddings=np.repeat(
-                np.asarray(graph_conditioning.graph_embeddings),
-                repeats,
-                axis=0,
-            ),
-            node_counts=np.repeat(np.asarray(graph_conditioning.node_counts), repeats, axis=0),
-            edge_counts=np.repeat(np.asarray(graph_conditioning.edge_counts), repeats, axis=0),
-        )
+        return graph_conditioning.repeat(repeats)
 
     @staticmethod
     def _accept_feasible_candidates_by_slot(
@@ -2400,11 +2388,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         indices_array = np.asarray(indices, dtype=np.int64)
         return GeneratedGuidanceBatch(
             node_embeddings_list=[batch.node_embeddings_list[int(idx)] for idx in indices_array],
-            graph_conditioning=GraphConditioningBatch(
-                graph_embeddings=np.asarray(batch.graph_conditioning.graph_embeddings)[indices_array],
-                node_counts=np.asarray(batch.graph_conditioning.node_counts)[indices_array],
-                edge_counts=np.asarray(batch.graph_conditioning.edge_counts)[indices_array],
-            ),
+            graph_conditioning=batch.graph_conditioning.take(indices_array),
             decoded_graphs=[batch.decoded_graphs[int(idx)] for idx in indices_array],
             violation_counts=np.asarray(batch.violation_counts)[indices_array],
             guidance_targets=np.asarray(batch.guidance_targets)[indices_array],
@@ -2423,6 +2407,44 @@ class ConditionalNodeFieldGraphGenerator(object):
         graph_embeddings = [np.asarray(batch.graph_conditioning.graph_embeddings) for batch in non_empty_batches]
         node_counts = [np.asarray(batch.graph_conditioning.node_counts) for batch in non_empty_batches]
         edge_counts = [np.asarray(batch.graph_conditioning.edge_counts) for batch in non_empty_batches]
+        condition_node_embeddings = None
+        if all(
+            batch.graph_conditioning.condition_node_embeddings is not None
+            for batch in non_empty_batches
+        ):
+            if all(
+                isinstance(batch.graph_conditioning.condition_node_embeddings, np.ndarray)
+                for batch in non_empty_batches
+            ):
+                condition_node_embeddings = np.concatenate(
+                    [
+                        np.asarray(batch.graph_conditioning.condition_node_embeddings)
+                        for batch in non_empty_batches
+                    ],
+                    axis=0,
+                )
+            else:
+                condition_node_embeddings = [
+                    np.asarray(embedding, dtype=float)
+                    for batch in non_empty_batches
+                    for embedding in (
+                        list(batch.graph_conditioning.condition_node_embeddings)
+                        if not isinstance(batch.graph_conditioning.condition_node_embeddings, np.ndarray)
+                        else list(np.asarray(batch.graph_conditioning.condition_node_embeddings))
+                    )
+                ]
+        condition_node_presence_mask = None
+        if all(
+            batch.graph_conditioning.condition_node_presence_mask is not None
+            for batch in non_empty_batches
+        ):
+            condition_node_presence_mask = np.concatenate(
+                [
+                    np.asarray(batch.graph_conditioning.condition_node_presence_mask)
+                    for batch in non_empty_batches
+                ],
+                axis=0,
+            )
         return GeneratedGuidanceBatch(
             node_embeddings_list=[
                 np.asarray(embedding, dtype=float)
@@ -2433,6 +2455,8 @@ class ConditionalNodeFieldGraphGenerator(object):
                 graph_embeddings=np.concatenate(graph_embeddings, axis=0),
                 node_counts=np.concatenate(node_counts, axis=0),
                 edge_counts=np.concatenate(edge_counts, axis=0),
+                condition_node_embeddings=condition_node_embeddings,
+                condition_node_presence_mask=condition_node_presence_mask,
             ),
             decoded_graphs=[
                 graph

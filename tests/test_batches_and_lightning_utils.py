@@ -1110,3 +1110,58 @@ def test_plot_metrics_accepts_node_field_key():
         val_metrics={"total": [11.0, 10.0], "node_field": [9.0, 8.0]},
         window=2,
     )
+
+
+def test_tokenized_graph_conditioning_composes_and_scales_as_memory_tokens():
+    graph_conditioning = GraphConditioningBatch(
+        graph_embeddings=np.asarray([[0.25], [0.75]], dtype=float),
+        node_counts=np.asarray([3, 5], dtype=np.int64),
+        edge_counts=np.asarray([2, 4], dtype=np.int64),
+        condition_node_embeddings=[
+            np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=float),
+            np.asarray([[0.5, 0.5]], dtype=float),
+        ],
+        condition_node_presence_mask=np.asarray(
+            [
+                [True, True],
+                [True, False],
+            ],
+            dtype=bool,
+        ),
+    )
+    node_batch = NodeGenerationBatch(
+        node_embeddings_list=[
+            np.asarray([[0.1, 0.2], [0.2, 0.3], [0.3, 0.4]], dtype=float),
+            np.asarray([[0.4, 0.5], [0.5, 0.6], [0.6, 0.7], [0.7, 0.8], [0.8, 0.9]], dtype=float),
+        ],
+        node_presence_mask=np.asarray(
+            [
+                [True, True, True, False, False],
+                [True, True, True, True, True],
+            ],
+            dtype=bool,
+        ),
+        node_degree_targets=np.zeros((2, 5), dtype=np.int64),
+    )
+    generator = ConditionalNodeFieldGenerator(
+        latent_embedding_dimension=8,
+        number_of_transformer_layers=1,
+        transformer_attention_head_count=1,
+        maximum_epochs=1,
+        batch_size=2,
+        verbose=False,
+    )
+
+    condition_array = generator._compose_condition_array(graph_conditioning)
+
+    assert condition_array.shape == (2, 2, 6)
+    np.testing.assert_array_equal(condition_array[:, :, -2], np.asarray([[3.0, 3.0], [5.0, 5.0]]))
+    np.testing.assert_array_equal(condition_array[:, :, -1], np.asarray([[2.0, 2.0], [4.0, 4.0]]))
+    np.testing.assert_array_equal(condition_array[:, :, -3], np.asarray([[1.0, 1.0], [1.0, 0.0]]))
+
+    generator.setup(node_batch=node_batch, graph_conditioning=graph_conditioning)
+    payload = generator._build_processed_training_payload(node_batch, graph_conditioning)
+
+    assert generator.condition_token_count == 2
+    assert generator.condition_feature_dimension == 6
+    assert payload["y_scaled"].shape == (2, 2, 6)
