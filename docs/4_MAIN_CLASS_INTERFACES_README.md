@@ -898,7 +898,7 @@ ConditionalNodeFieldGraphGenerator(
     feasibility_estimator: Any = None,
     feasibility_oracle_candidates_per_attempt: int = 2,
     use_feasibility_filtering: bool = True,
-    max_oracle_iterations: int = 8,
+    max_oracle_iterations: int = 10,
     oracle_use_node_label_cuts: bool = False,
     oracle_use_edge_label_cuts: bool = False,
     oracle_edge_memory_penalty: float = 0.5,

@@ -437,6 +437,12 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_failure_mode="drop")
 
 
+def test_graph_generator_defaults_to_ten_oracle_iterations():
+    generator = ConditionalNodeFieldGraphGenerator()
+
+    assert generator.max_oracle_iterations == 10
+
+
 def test_fit_from_stream_reuses_cached_warmup_batches_during_training():
     graph_vectorizer = _GraphVectorizer()
     node_vectorizer = _NodeVectorizer()

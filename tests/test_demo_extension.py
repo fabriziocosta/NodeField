@@ -341,6 +341,7 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
     )
 
     assert default_generator.feasibility_oracle_candidates_per_attempt == 8
+    assert default_generator.max_oracle_iterations == 10
     assert default_generator.oracle_use_node_label_cuts is False
     assert default_generator.oracle_use_edge_label_cuts is False
     assert default_generator.node_graph_vectorizer.dense is False

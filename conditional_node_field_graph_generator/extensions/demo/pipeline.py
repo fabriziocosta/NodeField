@@ -925,7 +925,7 @@ def build_graph_generator(
     locality_sampling_strategy="stratified_preserve",
     locality_target_positive_ratio=0.5,
     feasibility_oracle_candidates_per_attempt=8,
-    max_oracle_iterations=16,
+    max_oracle_iterations=10,
     oracle_use_node_label_cuts=False,
     oracle_use_edge_label_cuts=False,
     use_feasibility_filtering=True,

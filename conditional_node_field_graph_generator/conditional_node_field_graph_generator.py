@@ -325,6 +325,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             self.feasibility_oracle_candidates_per_attempt = int(
                 self._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
             )
+        if not hasattr(self, "max_oracle_iterations"):
+            self.max_oracle_iterations = 10
         if not hasattr(self, "decode_service_") or getattr(self.decode_service_, "owner", None) is not self:
             self.decode_service_ = DecodeService(self)
 
@@ -343,7 +345,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_estimator: Any = None,
             feasibility_oracle_candidates_per_attempt: int = _DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT,
             use_feasibility_filtering: bool = True,
-            max_oracle_iterations: int = 8,
+            max_oracle_iterations: int = 10,
             oracle_use_node_label_cuts: bool = False,
             oracle_use_edge_label_cuts: bool = False,
             oracle_edge_label_min_changes_per_violation: int = 1,
