@@ -436,6 +436,19 @@ def test_load_graph_generator_repairs_legacy_nsppk_fit_flags(tmp_path):
     assert restored.node_graph_vectorizer.nsppk.base_nsppk.is_fitted_ is True
 
 
+def test_load_graph_generator_repairs_legacy_node_generator_locality_horizon(tmp_path):
+    import types
+
+    generator = _SaveableGenerator(model_name="demo-chem", model_dir=tmp_path)
+    generator.locality_horizon = 3
+    generator.conditional_node_generator_model = types.SimpleNamespace()
+    filename = save_graph_generator(generator)
+
+    restored = load_graph_generator(filename, model_dir=tmp_path)
+
+    assert restored.conditional_node_generator_model.locality_horizon_ == 3
+
+
 def test_load_graph_generator_restores_legacy_oracle_runtime_defaults(tmp_path):
     class _Generator(_SaveableGenerator):
         def __init__(self, model_name=None, model_dir=None):
@@ -456,6 +469,13 @@ def test_load_graph_generator_restores_legacy_oracle_runtime_defaults(tmp_path):
     assert restored.graph_decoder.parallel_decode_timeout_seconds == 30.0
     assert restored.graph_decoder.active_time_limit_seconds is None
     assert restored.graph_decoder.solver_threads is None
+    assert restored.graph_decoder.use_horizon_ilp_constraints is True
+    assert restored.graph_decoder.horizon_constraint_weight == pytest.approx(2.0)
+    assert restored.graph_decoder.horizon_positive_threshold == pytest.approx(0.8)
+    assert restored.graph_decoder.horizon_negative_threshold == pytest.approx(0.2)
+    assert restored.graph_decoder.horizon_pair_budget == 24
+    assert restored.graph_decoder.horizon_paths_per_pair == 8
+    assert restored.graph_decoder.horizon_max_iterations == 1
 
 
 def test_graph_generator_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):

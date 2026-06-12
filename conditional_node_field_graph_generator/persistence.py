@@ -57,6 +57,9 @@ def _restore_loaded_vectorizer_fit_state(graph_generator) -> None:
 
 def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
     """Backfill runtime attrs added after older persisted generators were saved."""
+    node_generator = getattr(graph_generator, "conditional_node_generator_model", None)
+    if node_generator is not None and not hasattr(node_generator, "locality_horizon_"):
+        node_generator.locality_horizon_ = int(getattr(graph_generator, "locality_horizon", 1))
     if not hasattr(graph_generator, "feasibility_oracle_candidates_per_attempt"):
         default_oracle_candidates = int(
             getattr(graph_generator, "_DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT", 2)
@@ -127,14 +130,21 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.decode_service_ = DecodeService(graph_generator)
     graph_decoder = getattr(graph_generator, "graph_decoder", None)
     if graph_decoder is not None:
-        if not hasattr(graph_decoder, "adjacency_time_limit_seconds"):
-            graph_decoder.adjacency_time_limit_seconds = 60.0
-        if not hasattr(graph_decoder, "parallel_decode_timeout_seconds"):
-            graph_decoder.parallel_decode_timeout_seconds = 30.0
-        if not hasattr(graph_decoder, "active_time_limit_seconds"):
-            graph_decoder.active_time_limit_seconds = None
-        if not hasattr(graph_decoder, "solver_threads"):
-            graph_decoder.solver_threads = None
+        for attr_name, default_value in (
+            ("adjacency_time_limit_seconds", 60.0),
+            ("parallel_decode_timeout_seconds", 30.0),
+            ("active_time_limit_seconds", None),
+            ("solver_threads", None),
+            ("use_horizon_ilp_constraints", True),
+            ("horizon_constraint_weight", 2.0),
+            ("horizon_positive_threshold", 0.8),
+            ("horizon_negative_threshold", 0.2),
+            ("horizon_pair_budget", 24),
+            ("horizon_paths_per_pair", 8),
+            ("horizon_max_iterations", 1),
+        ):
+            if not hasattr(graph_decoder, attr_name):
+                setattr(graph_decoder, attr_name, default_value)
     if getattr(graph_generator, "model_name", None) is not None:
         graph_generator.model_name = sanitize_model_token(graph_generator.model_name)
 
