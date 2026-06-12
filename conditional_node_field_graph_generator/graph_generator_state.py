@@ -32,6 +32,7 @@ class OracleConfig:
     max_iterations: int
     use_node_label_cuts: bool
     use_edge_label_cuts: bool
+    edge_label_min_changes_per_violation: int
     edge_memory_penalty: float
     edge_memory_update: float
     edge_memory_decay: float

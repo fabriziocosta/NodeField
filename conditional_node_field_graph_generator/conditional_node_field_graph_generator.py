@@ -346,6 +346,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_oracle_iterations: int = 8,
             oracle_use_node_label_cuts: bool = False,
             oracle_use_edge_label_cuts: bool = False,
+            oracle_edge_label_min_changes_per_violation: int = 1,
             oracle_edge_memory_penalty: float = 0.5,
             oracle_edge_memory_update: float = 1.0,
             oracle_edge_memory_decay: float = 1.0,
@@ -392,6 +393,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_oracle_iterations (int): Optional input value.
             oracle_use_node_label_cuts (bool): Optional input value.
             oracle_use_edge_label_cuts (bool): Optional input value.
+            oracle_edge_label_min_changes_per_violation (int): Optional input value.
             oracle_edge_memory_penalty (float): Optional input value.
             oracle_edge_memory_update (float): Optional input value.
             oracle_edge_memory_decay (float): Optional input value.
@@ -474,6 +476,9 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.max_oracle_iterations = int(max_oracle_iterations)
         self.oracle_use_node_label_cuts = bool(oracle_use_node_label_cuts)
         self.oracle_use_edge_label_cuts = bool(oracle_use_edge_label_cuts)
+        self.oracle_edge_label_min_changes_per_violation = int(
+            oracle_edge_label_min_changes_per_violation
+        )
         self.oracle_edge_memory_penalty = float(oracle_edge_memory_penalty)
         self.oracle_edge_memory_update = float(oracle_edge_memory_update)
         self.oracle_edge_memory_decay = float(oracle_edge_memory_decay)
@@ -510,6 +515,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise ValueError("feasibility_oracle_candidates_per_attempt must be >= 0")
         if self.max_oracle_iterations < 1:
             raise ValueError("max_oracle_iterations must be >= 1")
+        if self.oracle_edge_label_min_changes_per_violation < 1:
+            raise ValueError("oracle_edge_label_min_changes_per_violation must be >= 1")
         if self.oracle_edge_memory_penalty < 0.0:
             raise ValueError("oracle_edge_memory_penalty must be >= 0")
         if self.oracle_edge_memory_update < 0.0:
@@ -574,6 +581,9 @@ class ConditionalNodeFieldGraphGenerator(object):
             max_iterations=int(self.max_oracle_iterations),
             use_node_label_cuts=bool(self.oracle_use_node_label_cuts),
             use_edge_label_cuts=bool(self.oracle_use_edge_label_cuts),
+            edge_label_min_changes_per_violation=int(
+                self.oracle_edge_label_min_changes_per_violation
+            ),
             edge_memory_penalty=float(self.oracle_edge_memory_penalty),
             edge_memory_update=float(self.oracle_edge_memory_update),
             edge_memory_decay=float(self.oracle_edge_memory_decay),
@@ -1024,11 +1034,15 @@ class ConditionalNodeFieldGraphGenerator(object):
             label_indices = [edge_label_to_index.get(label) for label in label_tuple]
             if any(label_idx is None for label_idx in label_indices):
                 continue
+            min_changes = min(
+                len(edge_set),
+                max(1, int(getattr(self, "oracle_edge_label_min_changes_per_violation", 1))),
+            )
             prob += (
                 pulp.lpSum(
                     z[(edge, int(label_idx))]
                     for edge, label_idx in zip(edge_set, label_indices)
-                ) <= len(edge_set) - 1
+                ) <= len(edge_set) - min_changes
             ), f"ForbiddenEdgeLabels_{cut_idx}"
         solver_kwargs = {"msg": False}
         solver_time_limit = self._resolve_solver_time_limit_seconds()
@@ -1171,11 +1185,15 @@ class ConditionalNodeFieldGraphGenerator(object):
                 label_indices = [edge_label_to_index.get(label) for label in label_tuple]
                 if any(label_idx is None for label_idx in label_indices):
                     continue
+                min_changes = min(
+                    len(edge_set),
+                    max(1, int(getattr(self, "oracle_edge_label_min_changes_per_violation", 1))),
+                )
                 prob += (
                     pulp.lpSum(
                         z[(edge, int(label_idx))]
                         for edge, label_idx in zip(edge_set, label_indices)
-                    ) <= len(edge_set) - 1
+                    ) <= len(edge_set) - min_changes
                 ), f"JointForbiddenEdgeLabels_{cut_idx}"
 
         solver_kwargs = {"msg": False}

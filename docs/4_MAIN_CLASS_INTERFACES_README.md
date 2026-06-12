@@ -1038,6 +1038,11 @@ ConditionalNodeFieldGraphGenerator(
   Disable: keep the edge-label assignments implied by the model and current
   structure.
 
+- `oracle_edge_label_min_changes_per_violation`
+  Minimum number of labels that must change within each localized violating
+  edge set. The default `1` preserves prior behavior. Higher values apply more
+  aggressive semantic repair, which can help break invalid aromatic fragments.
+
 - `oracle_edge_memory_penalty`
   Weight of the temporary per-graph penalty applied in logit space to edges
   that repeatedly appear in violating edge sets during one oracle trace.

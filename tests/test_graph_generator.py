@@ -422,6 +422,8 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_candidates_per_attempt=0)
     with pytest.raises(ValueError, match="max_oracle_iterations"):
         ConditionalNodeFieldGraphGenerator(max_oracle_iterations=0)
+    with pytest.raises(ValueError, match="oracle_edge_label_min_changes_per_violation"):
+        ConditionalNodeFieldGraphGenerator(oracle_edge_label_min_changes_per_violation=0)
     with pytest.raises(ValueError, match="oracle_edge_memory_penalty"):
         ConditionalNodeFieldGraphGenerator(oracle_edge_memory_penalty=-0.1)
     with pytest.raises(ValueError, match="oracle_edge_memory_update"):
@@ -2978,6 +2980,52 @@ def test_decode_generated_nodes_repairs_edge_labels_before_structural_cuts():
     assert decoded[0].edges[(0, 1)]["label"] == "="
     assert sorted(decoded[0].edges()) == [(0, 1)]
     assert estimator.edge_calls >= 2
+
+
+def test_oracle_edge_label_pressure_changes_multiple_labels_per_violation():
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        oracle_use_edge_label_cuts=True,
+        oracle_edge_label_min_changes_per_violation=2,
+    )
+    generator.edge_label_classes_ = np.asarray(["aromatic", "single"], dtype=object)
+    generator.edge_label_to_index_ = {"aromatic": 0, "single": 1}
+    adjacency = np.asarray(
+        [
+            [0, 1, 0, 0],
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [0, 0, 1, 0],
+        ],
+        dtype=float,
+    )
+    current_labels = np.asarray(
+        [
+            [None, "aromatic", None, None],
+            ["aromatic", None, "aromatic", None],
+            [None, "aromatic", None, "aromatic"],
+            [None, None, "aromatic", None],
+        ],
+        dtype=object,
+    )
+    label_probabilities = np.zeros((4, 4, 2), dtype=float)
+    label_probabilities[..., 0] = 0.9
+    label_probabilities[..., 1] = 0.1
+    violating_edges = ((0, 1), (1, 2), (2, 3))
+
+    _, repaired = generator._repair_labels_with_oracle(
+        existence_mask=np.ones(4, dtype=bool),
+        adj_mtx=adjacency,
+        current_node_labels=np.asarray(["C"] * 4, dtype=object),
+        current_edge_label_matrix=current_labels,
+        node_label_probabilities=None,
+        edge_label_probabilities=label_probabilities,
+        forbidden_node_assignments=[],
+        forbidden_edge_assignments=[(violating_edges, ("aromatic",) * 3)],
+    )
+
+    changed_count = sum(repaired[i, j] != "aromatic" for i, j in violating_edges)
+    assert changed_count >= 2
 
 
 def test_decode_generated_nodes_jointly_repairs_node_and_edge_labels():
