@@ -2911,40 +2911,77 @@ class ConditionalNodeFieldGraphGenerator(object):
             interpolate_between_n_samples=interpolate_between_n_samples,
         )
         if return_decode_stages:
-            generated_nodes = self._predict_generated_nodes(
+            max_attempts = max(1, int(getattr(self, "max_decode_attempts_per_sample", 1)))
+            initial_generated_nodes = self._predict_generated_nodes(
                 sampled_conditioning,
                 sampling_mode="unguided",
                 desired_target=desired_target,
                 guidance_scale=guidance_scale,
             )
-            raw_graphs = self._decode_generated_nodes(
-                generated_nodes,
-                graph_conditioning=sampled_conditioning,
-                feasibility_oracle_candidates_per_attempt=0,
-                use_ilp_decoder=False,
-            )
-            ilp_graphs = self._decode_generated_nodes(
-                generated_nodes,
-                graph_conditioning=sampled_conditioning,
-                feasibility_oracle_candidates_per_attempt=0,
-                use_ilp_decoder=True,
-            )
             use_oracle = (
                 use_feasibility_oracle is not False
                 and getattr(self, "feasibility_estimator", None) is not None
             )
-            if use_oracle:
-                oracle_graphs = self._decode_generated_nodes_with_oracle(
-                    generated_nodes,
-                    graph_conditioning=sampled_conditioning,
-                )
-            else:
-                oracle_graphs = [None] * int(n_samples)
-            return {
-                "raw": list(raw_graphs),
-                "ilp": list(ilp_graphs),
-                "oracle": list(oracle_graphs),
+            variants: Dict[str, List[Optional[nx.Graph]]] = {
+                "raw": [None] * int(n_samples),
+                "ilp": [None] * int(n_samples),
+                "oracle": [None] * int(n_samples),
             }
+            for slot_idx in range(int(n_samples)):
+                slot_conditioning = self._slice_graph_conditioning(sampled_conditioning, [slot_idx])
+                last_error = None
+                for attempt_idx in range(max_attempts):
+                    try:
+                        slot_generated_nodes = (
+                            _build_single_generated_node_batch(initial_generated_nodes, slot_idx)
+                            if attempt_idx == 0
+                            else self._predict_generated_nodes(
+                                slot_conditioning,
+                                sampling_mode="unguided",
+                                desired_target=desired_target,
+                                guidance_scale=guidance_scale,
+                            )
+                        )
+                        raw_graphs = self._decode_generated_nodes(
+                            slot_generated_nodes,
+                            graph_conditioning=slot_conditioning,
+                            feasibility_oracle_candidates_per_attempt=0,
+                            use_ilp_decoder=False,
+                        )
+                        ilp_graphs = self._decode_generated_nodes(
+                            slot_generated_nodes,
+                            graph_conditioning=slot_conditioning,
+                            feasibility_oracle_candidates_per_attempt=0,
+                            use_ilp_decoder=True,
+                        )
+                        oracle_graphs = [None]
+                        if use_oracle:
+                            oracle_graphs = self._decode_generated_nodes_with_oracle(
+                                slot_generated_nodes,
+                                graph_conditioning=slot_conditioning,
+                            )
+                        variants["raw"][slot_idx] = raw_graphs[0] if raw_graphs else None
+                        variants["ilp"][slot_idx] = ilp_graphs[0] if ilp_graphs else None
+                        variants["oracle"][slot_idx] = oracle_graphs[0] if oracle_graphs else None
+                        last_error = None
+                        break
+                    except (RuntimeError, TimeoutError) as exc:
+                        last_error = exc
+                        if attempt_idx + 1 < max_attempts:
+                            verbose_log(
+                                self,
+                                "Decode-stage generation failed; retrying this graph with a fresh sample "
+                                f"(slot={slot_idx}, attempt={attempt_idx + 1}/{max_attempts}, error={exc}).",
+                                level=2,
+                            )
+                if last_error is not None:
+                    verbose_log(
+                        self,
+                        "Decode-stage generation exhausted retries; skipping graph "
+                        f"(slot={slot_idx}, attempts={max_attempts}, error={last_error}).",
+                        level=1,
+                    )
+            return variants
         return self.decode_service_.decode(
             sampled_conditioning,
             sampling_mode="unguided",

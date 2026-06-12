@@ -952,7 +952,9 @@ def test_sample_return_decode_stages_reuses_single_generated_batch():
         node_counts=np.array([2, 2], dtype=np.int64),
         edge_counts=np.array([1, 1], dtype=np.int64),
     )
-    generated = object()
+    generated = GeneratedNodeBatch(
+        node_presence_mask=np.ones((2, 1), dtype=bool),
+    )
     prediction_calls = []
     decode_calls = []
 
@@ -997,15 +999,15 @@ def test_sample_return_decode_stages_reuses_single_generated_batch():
     assert [graph.nodes[0]["label"] for graph in variants["raw"]] == ["raw", "raw"]
     assert [graph.nodes[0]["label"] for graph in variants["ilp"]] == ["ilp", "ilp"]
     assert [graph.nodes[0]["label"] for graph in variants["oracle"]] == ["oracle", "oracle"]
-    assert len(decode_calls) == 3
-    assert all(call[1] is generated for call in decode_calls)
-    assert decode_calls[0][2]["graph_conditioning"] is conditioning
+    assert len(decode_calls) == 6
     assert decode_calls[0][2]["use_ilp_decoder"] is False
-    assert decode_calls[1][2]["graph_conditioning"] is conditioning
     assert decode_calls[1][2]["use_ilp_decoder"] is True
     assert decode_calls[1][2]["feasibility_oracle_candidates_per_attempt"] == 0
     assert decode_calls[2][0] == "oracle"
-    assert decode_calls[2][2]["graph_conditioning"] is conditioning
+    assert decode_calls[3][2]["use_ilp_decoder"] is False
+    assert decode_calls[4][2]["use_ilp_decoder"] is True
+    assert decode_calls[5][0] == "oracle"
+    assert all(len(call[2]["graph_conditioning"]) == 1 for call in decode_calls)
 
 
 def test_sample_return_decode_stages_marks_oracle_missing_without_estimator():
@@ -1020,7 +1022,9 @@ def test_sample_return_decode_stages_marks_oracle_missing_without_estimator():
     )
     generator.feasibility_estimator = None
     generator._sample_conditions = lambda n_samples, **kwargs: conditioning
-    generator._predict_generated_nodes = lambda graph_conditioning, **kwargs: object()
+    generator._predict_generated_nodes = lambda graph_conditioning, **kwargs: GeneratedNodeBatch(
+        node_presence_mask=np.ones((len(graph_conditioning), 1), dtype=bool),
+    )
     generator._decode_generated_nodes = lambda generated_nodes, **kwargs: [nx.Graph(), nx.Graph()]
     generator._decode_generated_nodes_with_oracle = lambda *args, **kwargs: pytest.fail(
         "oracle decode should not be called without a feasibility estimator"
@@ -1029,6 +1033,91 @@ def test_sample_return_decode_stages_marks_oracle_missing_without_estimator():
     variants = generator.sample(2, return_decode_stages=True)
 
     assert variants["oracle"] == [None, None]
+
+
+def test_sample_return_decode_stages_retries_after_timeout():
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        max_decode_attempts_per_sample=2,
+    )
+    generator.is_fitted_ = True
+    generator.conditional_node_generator_model = object()
+    generator.graph_decoder = object()
+    generator.feasibility_estimator = None
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.zeros((1, 3), dtype=float),
+        node_counts=np.array([2], dtype=np.int64),
+        edge_counts=np.array([1], dtype=np.int64),
+    )
+    generated_batches = [
+        GeneratedNodeBatch(node_presence_mask=np.ones((1, 1), dtype=bool)),
+        GeneratedNodeBatch(node_presence_mask=np.ones((1, 1), dtype=bool)),
+    ]
+    prediction_calls = []
+    ilp_calls = []
+    generator._sample_conditions = lambda n_samples, **kwargs: conditioning
+
+    def _predict_generated_nodes(graph_conditioning, **kwargs):
+        del graph_conditioning, kwargs
+        generated = generated_batches[len(prediction_calls)]
+        prediction_calls.append(generated)
+        return generated
+
+    def _decode_generated_nodes(generated_nodes, **kwargs):
+        if kwargs["use_ilp_decoder"]:
+            ilp_calls.append(generated_nodes)
+            if len(ilp_calls) == 1:
+                raise TimeoutError("slow ILP")
+        return [nx.Graph()]
+
+    generator._predict_generated_nodes = _predict_generated_nodes
+    generator._decode_generated_nodes = _decode_generated_nodes
+
+    variants = generator.sample(1, return_decode_stages=True)
+
+    assert prediction_calls == generated_batches
+    assert ilp_calls == generated_batches
+    assert len(variants["raw"]) == 1
+    assert len(variants["ilp"]) == 1
+    assert variants["oracle"] == [None]
+
+
+def test_sample_return_decode_stages_skips_only_slot_after_retries_exhausted():
+    generator = ConditionalNodeFieldGraphGenerator(
+        verbose=False,
+        max_decode_attempts_per_sample=2,
+    )
+    generator.is_fitted_ = True
+    generator.conditional_node_generator_model = object()
+    generator.graph_decoder = object()
+    generator.feasibility_estimator = None
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.zeros((2, 3), dtype=float),
+        node_counts=np.array([2, 2], dtype=np.int64),
+        edge_counts=np.array([1, 1], dtype=np.int64),
+    )
+    generator._sample_conditions = lambda n_samples, **kwargs: conditioning
+    generator._predict_generated_nodes = lambda graph_conditioning, **kwargs: GeneratedNodeBatch(
+        node_presence_mask=np.ones((len(graph_conditioning), 1), dtype=bool),
+    )
+
+    def _decode_generated_nodes(generated_nodes, **kwargs):
+        slot_marker = float(kwargs["graph_conditioning"].graph_embeddings[0, 0])
+        if kwargs["use_ilp_decoder"] and slot_marker == 0.0:
+            raise TimeoutError("slow ILP")
+        return [nx.Graph()]
+
+    conditioning.graph_embeddings[1, 0] = 1.0
+    generator._decode_generated_nodes = _decode_generated_nodes
+
+    variants = generator.sample(2, return_decode_stages=True)
+
+    assert variants["raw"][0] is None
+    assert variants["ilp"][0] is None
+    assert variants["oracle"][0] is None
+    assert variants["raw"][1] is not None
+    assert variants["ilp"][1] is not None
+    assert variants["oracle"][1] is None
 
 
 def test_toggle_verbose_updates_nested_components():
