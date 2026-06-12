@@ -13,6 +13,7 @@ from scipy import sparse
 from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
+import conditional_node_field_graph_generator.conditional_node_field_graph_decoder as decoder_module
 import conditional_node_field_graph_generator.parallel_utils as parallel_utils
 from conditional_node_field_graph_generator.persistence import (
     load_graph_generator,
@@ -1912,6 +1913,109 @@ def test_decode_adjacency_matrix_enforces_desired_edge_count():
     assert int(np.sum(adj_mtx) // 2) == 1
 
 
+def test_soft_edge_count_allows_nearby_solution_when_exact_count_is_cut_off():
+    prob_matrix = np.asarray(
+        [
+            [0.0, 0.95, 0.90],
+            [0.95, 0.0, 0.85],
+            [0.90, 0.85, 0.0],
+        ],
+        dtype=float,
+    )
+    forbidden_two_edge_sets = [
+        [(0, 1), (0, 2)],
+        [(0, 1), (1, 2)],
+        [(0, 2), (1, 2)],
+    ]
+    hard_decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        degree_slack_penalty=1.0,
+        edge_count_slack_penalty=None,
+    )
+    with pytest.raises(RuntimeError, match="Adjacency ILP did not produce an optimal solution"):
+        hard_decoder.optimize_adjacency_matrix(
+            prob_matrix,
+            target_degrees=[1, 2, 1],
+            target_edge_count=2,
+            forbidden_edge_sets=forbidden_two_edge_sets,
+        )
+
+    soft_decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        degree_slack_penalty=1.0,
+        edge_count_slack_penalty=2.0,
+    )
+    adjacency = soft_decoder.optimize_adjacency_matrix(
+        prob_matrix,
+        target_degrees=[1, 2, 1],
+        target_edge_count=2,
+        forbidden_edge_sets=forbidden_two_edge_sets,
+    )
+
+    assert int(np.sum(adjacency) // 2) == 1
+
+
+def test_default_edge_count_slack_is_capped_at_one_edge():
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        degree_slack_penalty=1.0,
+    )
+    prob_matrix = np.ones((4, 4), dtype=float) - np.eye(4, dtype=float)
+    forbidden_two_edge_sets = [
+        [first_edge, second_edge]
+        for edge_idx, first_edge in enumerate(
+            [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+        )
+        for second_edge in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)][
+            edge_idx + 1 :
+        ]
+    ]
+
+    with pytest.raises(RuntimeError, match="Adjacency ILP did not produce an optimal solution"):
+        decoder.optimize_adjacency_matrix(
+            prob_matrix,
+            target_degrees=[1, 2, 2, 1],
+            target_edge_count=3,
+            forbidden_edge_sets=forbidden_two_edge_sets,
+        )
+
+
+@pytest.mark.parametrize("penalty", [-0.1, 0.0])
+def test_decoder_rejects_non_positive_edge_count_slack_penalty(penalty):
+    with pytest.raises(ValueError, match="edge_count_slack_penalty"):
+        ConditionalNodeFieldGraphDecoder(edge_count_slack_penalty=penalty)
+
+
+def test_oracle_relaxed_adjacency_forwards_target_edge_count(monkeypatch):
+    captured = {}
+
+    def _fake_optimize(owner, prob_matrix, target_degrees, **kwargs):
+        del owner, target_degrees
+        captured.update(kwargs)
+        return np.zeros_like(prob_matrix, dtype=int)
+
+    monkeypatch.setattr(decoder_module, "optimize_oracle_adjacency_matrix", _fake_optimize)
+    owner = types.SimpleNamespace(
+        max_oracle_iterations=2,
+        oracle_edge_memory_penalty=0.0,
+        verbose=False,
+    )
+
+    decoder_module.solve_oracle_relaxed_adjacency(
+        owner,
+        masked_prob_matrix=np.zeros((3, 3), dtype=float),
+        target_degrees=[1, 1, 0],
+        accumulated_cuts=[],
+        start_iteration_idx=0,
+        target_edge_count=1,
+    )
+
+    assert captured["target_edge_count"] == 1
+
+
 def test_decode_adjacency_matrix_direct_selects_top_edges_by_desired_count():
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
     generated_nodes = GeneratedNodeBatch(
@@ -2637,6 +2741,7 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
         existence_threshold=0.7,
         enforce_connectivity=False,
         degree_slack_penalty=123.0,
+        edge_count_slack_penalty=4.0,
         warm_start_mst=False,
         n_jobs=3,
         use_horizon_ilp_constraints=False,
@@ -2657,6 +2762,7 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
     assert restored.existence_threshold == pytest.approx(0.7)
     assert restored.enforce_connectivity is False
     assert restored.degree_slack_penalty == pytest.approx(123.0)
+    assert restored.edge_count_slack_penalty == pytest.approx(4.0)
     assert restored.warm_start_mst is False
     assert restored.n_jobs == 3
     assert restored.use_horizon_ilp_constraints is False

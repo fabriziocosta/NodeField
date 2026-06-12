@@ -137,6 +137,7 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
             ("parallel_decode_timeout_seconds", 30.0),
             ("active_time_limit_seconds", None),
             ("solver_threads", None),
+            ("edge_count_slack_penalty", 2.0),
             ("use_horizon_ilp_constraints", True),
             ("horizon_constraint_weight", 2.0),
             ("horizon_positive_threshold", 0.8),

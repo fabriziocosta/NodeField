@@ -174,6 +174,7 @@ def _decode_single_adjacency_job(
     desired_node_count: Optional[int],
     desired_edge_count: Optional[int],
     degree_slack_penalty: float,
+    edge_count_slack_penalty: Optional[float],
     enforce_connectivity: bool,
     warm_start_mst: bool,
     verbose: int,
@@ -193,6 +194,7 @@ def _decode_single_adjacency_job(
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
         degree_slack_penalty=degree_slack_penalty,
+        edge_count_slack_penalty=edge_count_slack_penalty,
         enforce_connectivity=enforce_connectivity,
         warm_start_mst=warm_start_mst,
         diagnostic_graph_renderer=diagnostic_graph_renderer,
@@ -438,6 +440,7 @@ def solve_oracle_relaxed_adjacency(
     target_degrees: List[int],
     accumulated_cuts: Sequence[FrozenSet[Edge]],
     start_iteration_idx: int,
+    target_edge_count: Optional[int] = None,
     edge_violation_prior: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Retry adjacency optimization while progressively relaxing accumulated oracle cuts."""
@@ -458,6 +461,7 @@ def solve_oracle_relaxed_adjacency(
                 owner,
                 solve_prob_matrix,
                 target_degrees,
+                target_edge_count=target_edge_count,
                 forbidden_edge_sets=active_cuts,
             )
         except TimeoutError:
@@ -492,6 +496,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         existence_threshold: float = 0.5,
         enforce_connectivity: bool = True,
         degree_slack_penalty: float = 1e6,
+        edge_count_slack_penalty: Optional[float] = 2.0,
         warm_start_mst: bool = True,
         n_jobs: int = 1,
         diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
@@ -510,6 +515,11 @@ class ConditionalNodeFieldGraphDecoder(object):
         self.existence_threshold = existence_threshold
         self.enforce_connectivity = enforce_connectivity
         self.degree_slack_penalty = degree_slack_penalty
+        self.edge_count_slack_penalty = (
+            None if edge_count_slack_penalty is None else float(edge_count_slack_penalty)
+        )
+        if self.edge_count_slack_penalty is not None and self.edge_count_slack_penalty <= 0.0:
+            raise ValueError("edge_count_slack_penalty must be > 0 when provided")
         self.warm_start_mst = warm_start_mst
         self.n_jobs = _normalize_n_jobs(n_jobs)
         self.diagnostic_graph_renderer = diagnostic_graph_renderer
@@ -748,7 +758,31 @@ class ConditionalNodeFieldGraphDecoder(object):
                     target_edge_count,
                     connectivity=connectivity,
                 )
-                prob += (pulp.lpSum(var for var in x.values()) == resolved_edge_count), "EdgeCount"
+                if self.edge_count_slack_penalty is None:
+                    prob += (pulp.lpSum(var for var in x.values()) == resolved_edge_count), "EdgeCount"
+                else:
+                    edge_count_under = pulp.LpVariable(
+                        "edge_count_under",
+                        lowBound=0,
+                        upBound=1,
+                        cat="Integer",
+                    )
+                    edge_count_over = pulp.LpVariable(
+                        "edge_count_over",
+                        lowBound=0,
+                        upBound=1,
+                        cat="Integer",
+                    )
+                    prob += (
+                        pulp.lpSum(var for var in x.values())
+                        + edge_count_under
+                        - edge_count_over
+                        == resolved_edge_count
+                    ), "EdgeCountSoft"
+                    objective_terms.append(
+                        -float(self.edge_count_slack_penalty)
+                        * (edge_count_under + edge_count_over)
+                    )
 
             if connectivity:
                 directed_edges = [(i, j) for (i, j) in x] + [(j, i) for (i, j) in x]
@@ -1293,6 +1327,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 None if desired_node_counts is None else int(desired_node_counts[graph_idx]),
                 None if desired_edge_counts is None else int(desired_edge_counts[graph_idx]),
                 float(self.degree_slack_penalty),
+                self.edge_count_slack_penalty,
                 bool(self.enforce_connectivity),
                 bool(self.warm_start_mst),
                 int(self.verbose),
@@ -1823,6 +1858,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "existence_threshold": self.existence_threshold,
                 "enforce_connectivity": self.enforce_connectivity,
                 "degree_slack_penalty": self.degree_slack_penalty,
+                "edge_count_slack_penalty": self.edge_count_slack_penalty,
                 "warm_start_mst": self.warm_start_mst,
                 "n_jobs": self.n_jobs,
                 "adjacency_time_limit_seconds": self.adjacency_time_limit_seconds,
@@ -1864,6 +1900,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             existence_threshold=config.get("existence_threshold", 0.5),
             enforce_connectivity=config.get("enforce_connectivity", True),
             degree_slack_penalty=config.get("degree_slack_penalty", 1e6),
+            edge_count_slack_penalty=config.get("edge_count_slack_penalty", 2.0),
             warm_start_mst=config.get("warm_start_mst", True),
             n_jobs=config.get("n_jobs", 1),
             adjacency_time_limit_seconds=config.get("adjacency_time_limit_seconds", 60.0),
@@ -2373,6 +2410,7 @@ def decode_generated_nodes_with_oracle(
                     target_degrees=target_degrees,
                     accumulated_cuts=accumulated_structural_cuts,
                     start_iteration_idx=_iteration_idx + 1,
+                    target_edge_count=desired_edge_count,
                     edge_violation_prior=local_edge_violation_prior,
                 )
             except TimeoutError:

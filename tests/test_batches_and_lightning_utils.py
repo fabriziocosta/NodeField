@@ -470,6 +470,7 @@ def test_load_graph_generator_restores_legacy_oracle_runtime_defaults(tmp_path):
     assert restored.graph_decoder.parallel_decode_timeout_seconds == 30.0
     assert restored.graph_decoder.active_time_limit_seconds is None
     assert restored.graph_decoder.solver_threads is None
+    assert restored.graph_decoder.edge_count_slack_penalty == pytest.approx(2.0)
     assert restored.graph_decoder.use_horizon_ilp_constraints is True
     assert restored.graph_decoder.horizon_constraint_weight == pytest.approx(2.0)
     assert restored.graph_decoder.horizon_positive_threshold == pytest.approx(0.8)

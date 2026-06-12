@@ -315,12 +315,13 @@ The solver maximizes:
 
 - total selected edge probability,
 - minus a large penalty for total degree slack.
+- minus an optional penalty for an edge-count deviation capped at one edge.
 - minus soft slack penalties for violated horizon-locality constraints when
   horizon-aware ILP decoding is active.
 
 Conceptually:
 
-`maximize edge_score - degree_slack_penalty * degree_violation - horizon_penalty * horizon_slack`
+`maximize edge_score - degree_penalty * degree_slack - edge_count_penalty * edge_count_slack - horizon_penalty * horizon_slack`
 
 So the solver prefers:
 

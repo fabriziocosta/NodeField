@@ -753,6 +753,7 @@ ConditionalNodeFieldGraphDecoder(
     existence_threshold: float = 0.5,
     enforce_connectivity: bool = True,
     degree_slack_penalty: float = 1e6,
+    edge_count_slack_penalty: Optional[float] = 2.0,
     warm_start_mst: bool = True,
     n_jobs: int = 1,
     diagnostic_graph_renderer: Optional[Callable[..., Any]] = None,
@@ -785,6 +786,12 @@ Parameters:
   Penalty for violating target degree constraints in the ILP.
   Increase: stronger degree matching, but greater risk that edge probabilities are overridden.
   Decrease: more flexibility to follow edge probabilities, but weaker degree fidelity.
+
+- `edge_count_slack_penalty`
+  Penalty for missing or exceeding the desired edge count by one edge. The
+  default `2.0` permits at most one fewer or one additional edge when
+  probability, degree, or feasibility constraints justify the deviation.
+  `None` preserves exact edge-count equality.
 
 - `warm_start_mst`
   Whether to initialize the ILP with a maximum spanning tree.
