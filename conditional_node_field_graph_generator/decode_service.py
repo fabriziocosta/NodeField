@@ -364,6 +364,11 @@ class DecodeService:
         owner = self.owner
         use_filtering = should_apply_feasibility_filtering(owner, apply_feasibility_filtering)
         if owner.feasibility_estimator is None or not use_filtering:
+            unfiltered_oracle_candidates = (
+                0
+                if feasibility_oracle_candidates_per_attempt is None
+                else int(feasibility_oracle_candidates_per_attempt)
+            )
             timeout_seconds = getattr(owner, "max_decode_seconds_per_sample", None)
             if timeout_seconds is not None and use_ilp_decoder:
                 return self._decode_unfiltered_slots_with_timeout(
@@ -374,7 +379,7 @@ class DecodeService:
                     predictor_scale=predictor_scale,
                     desired_class=desired_class,
                     classifier_scale=classifier_scale,
-                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                    feasibility_oracle_candidates_per_attempt=unfiltered_oracle_candidates,
                     use_ilp_decoder=use_ilp_decoder,
                     edge_probability_threshold=edge_probability_threshold,
                     timeout_seconds=float(timeout_seconds),
@@ -388,7 +393,7 @@ class DecodeService:
                     predictor_scale=predictor_scale,
                     desired_class=desired_class,
                     classifier_scale=classifier_scale,
-                    feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                    feasibility_oracle_candidates_per_attempt=unfiltered_oracle_candidates,
                     use_ilp_decoder=use_ilp_decoder,
                     edge_probability_threshold=edge_probability_threshold,
                 )
@@ -503,6 +508,7 @@ class DecodeService:
         use_ilp_decoder: bool = True,
         edge_probability_threshold: Optional[float] = None,
     ) -> list[nx.Graph]:
+        use_filtering = should_apply_feasibility_filtering(self.owner, apply_feasibility_filtering)
         accepted = self.decode_with_feasibility_slots(
             graph_conditioning,
             sampling_mode=sampling_mode,
@@ -516,4 +522,15 @@ class DecodeService:
             use_ilp_decoder=use_ilp_decoder,
             edge_probability_threshold=edge_probability_threshold,
         )
+        if self.owner.feasibility_estimator is None or not use_filtering:
+            returned_graphs = [graph for graph in accepted if graph is not None]
+            missing_count = len(graph_conditioning) - len(returned_graphs)
+            if missing_count > 0:
+                verbose_log(
+                    self.owner,
+                    "Unfiltered decode did not return all requested graphs: "
+                    f"returned {len(returned_graphs)} of {len(graph_conditioning)}.",
+                    level=1,
+                )
+            return returned_graphs
         return finalize_feasibility_graphs(self.owner, accepted, len(graph_conditioning))

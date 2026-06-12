@@ -100,14 +100,21 @@ def test_decode_service_retries_until_slots_are_filled():
 
 def test_decode_service_bypasses_filtering_when_disabled():
     owner = _Owner()
+    owner.feasibility_oracle_candidates_per_attempt = 5
     service = DecodeService(owner)
     conditioning = GraphConditioningBatch(
         graph_embeddings=np.asarray([[0.0]], dtype=float),
         node_counts=np.asarray([2], dtype=int),
         edge_counts=np.asarray([1], dtype=int),
     )
+    captured_kwargs = {}
 
-    service.decode_conditioning_batch = lambda *args, **kwargs: [{"slot": 0, "feasible": False}]
+    def _fake_decode(*args, **kwargs):
+        del args
+        captured_kwargs.update(kwargs)
+        return [{"slot": 0, "feasible": False}]
+
+    service.decode_conditioning_batch = _fake_decode
 
     decoded = service.decode_with_feasibility_slots(
         conditioning,
@@ -116,6 +123,39 @@ def test_decode_service_bypasses_filtering_when_disabled():
     )
 
     assert decoded == [{"slot": 0, "feasible": False}]
+    assert captured_kwargs["feasibility_oracle_candidates_per_attempt"] == 0
+
+
+def test_decode_service_decode_filters_missing_unfiltered_slots_without_feasibility_finalizer(monkeypatch):
+    owner = _Owner()
+    owner.feasibility_oracle_candidates_per_attempt = 5
+    service = DecodeService(owner)
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.asarray([[0.0]], dtype=float),
+        node_counts=np.asarray([2], dtype=int),
+        edge_counts=np.asarray([1], dtype=int),
+    )
+    finalizer_called = {"value": False}
+
+    def _unexpected_finalizer(*args, **kwargs):
+        del args, kwargs
+        finalizer_called["value"] = True
+        return []
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.decode_service.finalize_feasibility_graphs",
+        _unexpected_finalizer,
+    )
+    service.decode_with_feasibility_slots = lambda *args, **kwargs: [None]
+
+    decoded = service.decode(
+        conditioning,
+        sampling_mode="unguided",
+        apply_feasibility_filtering=False,
+    )
+
+    assert decoded == []
+    assert finalizer_called["value"] is False
 
 
 def test_decode_service_timeout_mode_records_final_summary_with_fallback(monkeypatch):
@@ -200,6 +240,7 @@ def test_decode_service_retries_unfiltered_decode_after_failure():
     owner = _Owner()
     owner.use_feasibility_filtering = False
     owner.feasibility_estimator = None
+    owner.feasibility_oracle_candidates_per_attempt = 5
     owner.max_decode_seconds_per_sample = 30.0
     owner.max_decode_attempts_per_sample = 3
     service = DecodeService(owner)
@@ -210,9 +251,11 @@ def test_decode_service_retries_unfiltered_decode_after_failure():
     )
 
     calls = {"count": 0}
+    captured_kwargs = {}
 
     def _fake_decode(*args, **kwargs):
-        del args, kwargs
+        del args
+        captured_kwargs.update(kwargs)
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("slow ILP aborted")
@@ -228,6 +271,7 @@ def test_decode_service_retries_unfiltered_decode_after_failure():
 
     assert decoded == [{"slot": 0, "feasible": False}]
     assert calls["count"] == 2
+    assert captured_kwargs["feasibility_oracle_candidates_per_attempt"] == 0
     assert owner.last_decode_summary_["requested"] == 1
     assert owner.last_decode_summary_["returned"] == 1
     assert owner.last_decode_summary_["generated"] == 2
