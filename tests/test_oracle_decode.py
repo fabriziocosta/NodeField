@@ -31,8 +31,14 @@ def test_solve_oracle_relaxed_adjacency_retries_with_fewer_cuts():
     active_cut_counts = []
 
     class Decoder:
-        def optimize_adjacency_matrix(self, prob_matrix, target_degrees, forbidden_edge_sets=None):
-            del prob_matrix, target_degrees
+        def optimize_adjacency_matrix(
+            self,
+            prob_matrix,
+            target_degrees,
+            target_edge_count=None,
+            forbidden_edge_sets=None,
+        ):
+            del prob_matrix, target_degrees, target_edge_count
             active_cut_counts.append(len(list(forbidden_edge_sets or [])))
             if forbidden_edge_sets:
                 raise RuntimeError("forced failure while cuts remain")

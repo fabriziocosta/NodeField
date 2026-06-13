@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from .graph_decode_utils import _canonicalize_edge
+from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 
 Edge = Tuple[int, int]
 NodeSet = Tuple[int, ...]
@@ -14,6 +15,99 @@ ForbiddenNodeLabelAssignment = Tuple[NodeSet, Tuple[Any, ...]]
 ForbiddenEdgeLabelAssignment = Tuple[Tuple[Edge, ...], Tuple[Any, ...]]
 
 _ORACLE_PROBABILITY_EPS = 1e-6
+
+
+@dataclass(frozen=True)
+class OracleEdgeAdditionProposal:
+    edge: Edge
+    label: Any
+    priority: float
+
+
+def enumerate_localized_edge_addition_proposals(
+    *,
+    adjacency_matrix: np.ndarray,
+    violating_edge_sets: Sequence[FrozenSet[Edge]],
+    active_node_mask: np.ndarray,
+    edge_probability_matrix: np.ndarray,
+    edge_label_classes: Optional[Sequence[Any]],
+    edge_label_probabilities: Optional[np.ndarray],
+    predicted_edge_label_matrix: Optional[np.ndarray],
+    budget: int,
+) -> List[OracleEdgeAdditionProposal]:
+    """Rank missing labelled edges whose endpoints occur in one violation set."""
+    budget = max(0, int(budget))
+    if budget == 0:
+        return []
+
+    adjacency = np.asarray(adjacency_matrix, dtype=float)
+    n_nodes = int(adjacency.shape[0])
+    active_mask = np.asarray(active_node_mask, dtype=bool)[:n_nodes]
+    edge_probabilities = np.asarray(edge_probability_matrix, dtype=float)
+    label_probabilities = (
+        None
+        if edge_label_probabilities is None
+        else np.asarray(edge_label_probabilities, dtype=float)
+    )
+    predicted_labels = (
+        None
+        if predicted_edge_label_matrix is None
+        else np.asarray(predicted_edge_label_matrix, dtype=object)
+    )
+    label_classes = (
+        []
+        if edge_label_classes is None
+        else list(np.asarray(edge_label_classes, dtype=object).reshape(-1))
+    )
+
+    candidate_edges = set()
+    for edge_set in _normalize_violating_edge_sets(
+        violating_edge_sets,
+        n_nodes=n_nodes,
+    ):
+        nodes = sorted({node_idx for edge in edge_set for node_idx in edge})
+        for idx, i in enumerate(nodes):
+            if not active_mask[i]:
+                continue
+            for j in nodes[idx + 1 :]:
+                if active_mask[j] and adjacency[i, j] == 0:
+                    candidate_edges.add((i, j))
+
+    proposals = []
+    for i, j in sorted(candidate_edges):
+        edge_probability = float(edge_probabilities[i, j])
+        if label_probabilities is not None and label_classes:
+            for label_idx, label in enumerate(label_classes):
+                if label_idx >= label_probabilities.shape[-1]:
+                    continue
+                proposals.append(
+                    OracleEdgeAdditionProposal(
+                        edge=(i, j),
+                        label=label,
+                        priority=edge_probability + float(label_probabilities[i, j, label_idx]),
+                    )
+                )
+            continue
+
+        predicted_label = None if predicted_labels is None else predicted_labels[i, j]
+        if predicted_label is not None:
+            proposals.append(
+                OracleEdgeAdditionProposal(
+                    edge=(i, j),
+                    label=predicted_label,
+                    priority=edge_probability,
+                )
+            )
+
+    proposals.sort(
+        key=lambda proposal: (
+            -float(proposal.priority),
+            proposal.edge[0],
+            proposal.edge[1],
+            repr(proposal.label),
+        )
+    )
+    return proposals[:budget]
 
 
 def normalize_violating_node_sets(
@@ -92,7 +186,9 @@ __all__ = [
     "NodeSet",
     "ForbiddenNodeLabelAssignment",
     "ForbiddenEdgeLabelAssignment",
+    "OracleEdgeAdditionProposal",
     "_ORACLE_PROBABILITY_EPS",
+    "enumerate_localized_edge_addition_proposals",
     "normalize_violating_node_sets",
     "apply_oracle_edge_memory_penalty",
     "update_oracle_edge_memory",

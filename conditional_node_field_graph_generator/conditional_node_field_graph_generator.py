@@ -325,6 +325,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             self.feasibility_oracle_candidates_per_attempt = int(
                 self._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
             )
+        if not hasattr(self, "oracle_add_edge_repair_budget"):
+            self.oracle_add_edge_repair_budget = 32
         if not hasattr(self, "max_oracle_iterations"):
             self.max_oracle_iterations = 10
         if not hasattr(self, "decode_service_") or getattr(self.decode_service_, "owner", None) is not self:
@@ -346,6 +348,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_oracle_candidates_per_attempt: int = _DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT,
             use_feasibility_filtering: bool = True,
             max_oracle_iterations: int = 10,
+            oracle_add_edge_repair_budget: int = 32,
             oracle_use_node_label_cuts: bool = False,
             oracle_use_edge_label_cuts: bool = False,
             oracle_edge_label_min_changes_per_violation: int = 1,
@@ -393,6 +396,7 @@ class ConditionalNodeFieldGraphGenerator(object):
             feasibility_oracle_candidates_per_attempt (int): Optional input value.
             use_feasibility_filtering (bool): Optional input value.
             max_oracle_iterations (int): Optional input value.
+            oracle_add_edge_repair_budget (int): Optional input value.
             oracle_use_node_label_cuts (bool): Optional input value.
             oracle_use_edge_label_cuts (bool): Optional input value.
             oracle_edge_label_min_changes_per_violation (int): Optional input value.
@@ -476,6 +480,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.feasibility_oracle_candidates_per_attempt = int(feasibility_oracle_candidates_per_attempt)
         self.use_feasibility_filtering = bool(use_feasibility_filtering)
         self.max_oracle_iterations = int(max_oracle_iterations)
+        self.oracle_add_edge_repair_budget = int(oracle_add_edge_repair_budget)
         self.oracle_use_node_label_cuts = bool(oracle_use_node_label_cuts)
         self.oracle_use_edge_label_cuts = bool(oracle_use_edge_label_cuts)
         self.oracle_edge_label_min_changes_per_violation = int(
@@ -517,6 +522,8 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise ValueError("feasibility_oracle_candidates_per_attempt must be >= 0")
         if self.max_oracle_iterations < 1:
             raise ValueError("max_oracle_iterations must be >= 1")
+        if self.oracle_add_edge_repair_budget < 0:
+            raise ValueError("oracle_add_edge_repair_budget must be >= 0")
         if self.oracle_edge_label_min_changes_per_violation < 1:
             raise ValueError("oracle_edge_label_min_changes_per_violation must be >= 1")
         if self.oracle_edge_memory_penalty < 0.0:
@@ -581,6 +588,7 @@ class ConditionalNodeFieldGraphGenerator(object):
         self.oracle_config_ = OracleConfig(
             candidates_per_attempt=int(self.feasibility_oracle_candidates_per_attempt),
             max_iterations=int(self.max_oracle_iterations),
+            add_edge_repair_budget=int(self.oracle_add_edge_repair_budget),
             use_node_label_cuts=bool(self.oracle_use_node_label_cuts),
             use_edge_label_cuts=bool(self.oracle_use_edge_label_cuts),
             edge_label_min_changes_per_violation=int(

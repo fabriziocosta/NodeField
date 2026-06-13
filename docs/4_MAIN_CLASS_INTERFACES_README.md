@@ -788,10 +788,10 @@ Parameters:
   Decrease: more flexibility to follow edge probabilities, but weaker degree fidelity.
 
 - `edge_count_slack_penalty`
-  Penalty for missing or exceeding the desired edge count by one edge. The
-  default `2.0` permits at most one fewer or one additional edge when
-  probability, degree, or feasibility constraints justify the deviation.
-  `None` preserves exact edge-count equality.
+  Linear per-edge penalty for missing or exceeding the desired edge count. The
+  default `2.0` allows larger deviations when probability, degree, or
+  feasibility constraints justify them. `None` preserves exact edge-count
+  equality.
 
 - `warm_start_mst`
   Whether to initialize the ILP with a maximum spanning tree.
@@ -899,6 +899,7 @@ ConditionalNodeFieldGraphGenerator(
     feasibility_oracle_candidates_per_attempt: int = 2,
     use_feasibility_filtering: bool = True,
     max_oracle_iterations: int = 10,
+    oracle_add_edge_repair_budget: int = 32,
     oracle_use_node_label_cuts: bool = False,
     oracle_use_edge_label_cuts: bool = False,
     oracle_edge_memory_penalty: float = 0.5,
@@ -1028,6 +1029,12 @@ ConditionalNodeFieldGraphGenerator(
   oracle is active.
   Increase: more chances to remove violating motifs, but slower decode.
   Decrease: faster decode, but more residual violations may reach filtering.
+
+- `oracle_add_edge_repair_budget`
+  Maximum number of localized labelled-edge additions evaluated per graph in
+  each oracle round. Candidates are restricted to missing pairs whose endpoints
+  occur in the same reported violating edge set. `0` disables constructive
+  edge repair.
 
 - `oracle_use_node_label_cuts`
   Whether oracle-guided decode may accumulate forbidden node-label assignments

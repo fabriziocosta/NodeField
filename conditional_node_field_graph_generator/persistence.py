@@ -67,6 +67,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.feasibility_oracle_candidates_per_attempt = default_oracle_candidates
     if not hasattr(graph_generator, "max_oracle_iterations"):
         graph_generator.max_oracle_iterations = 10
+    if not hasattr(graph_generator, "oracle_add_edge_repair_budget"):
+        graph_generator.oracle_add_edge_repair_budget = 32
     if not hasattr(graph_generator, "oracle_use_node_label_cuts"):
         graph_generator.oracle_use_node_label_cuts = False
     if not hasattr(graph_generator, "oracle_use_edge_label_cuts"):

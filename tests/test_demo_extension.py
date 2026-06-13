@@ -332,6 +332,7 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
     overridden_generator = build_graph_generator(
         feasibility_oracle_candidates_per_attempt=0,
         max_oracle_iterations=3,
+        oracle_add_edge_repair_budget=7,
         oracle_use_node_label_cuts=True,
         oracle_use_edge_label_cuts=True,
         sparse_supervision_mask_ratio=0.4,
@@ -342,6 +343,7 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
 
     assert default_generator.feasibility_oracle_candidates_per_attempt == 8
     assert default_generator.max_oracle_iterations == 10
+    assert default_generator.oracle_add_edge_repair_budget == 32
     assert default_generator.oracle_use_node_label_cuts is False
     assert default_generator.oracle_use_edge_label_cuts is False
     assert default_generator.node_graph_vectorizer.dense is False
@@ -353,6 +355,7 @@ def test_build_graph_generator_sets_oracle_budget_and_forwards_overrides():
     assert default_generator.embedding_svd_n_oversamples == 5
     assert overridden_generator.feasibility_oracle_candidates_per_attempt == 0
     assert overridden_generator.max_oracle_iterations == 3
+    assert overridden_generator.oracle_add_edge_repair_budget == 7
     assert overridden_generator.oracle_use_node_label_cuts is True
     assert overridden_generator.oracle_use_edge_label_cuts is True
     assert overridden_generator.use_embedding_svd is True

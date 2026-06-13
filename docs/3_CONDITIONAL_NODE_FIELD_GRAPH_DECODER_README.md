@@ -315,7 +315,7 @@ The solver maximizes:
 
 - total selected edge probability,
 - minus a large penalty for total degree slack.
-- minus an optional penalty for an edge-count deviation capped at one edge.
+- minus an optional linear penalty for edge-count deviation.
 - minus soft slack penalties for violated horizon-locality constraints when
   horizon-aware ILP decoding is active.
 
@@ -403,12 +403,15 @@ For one graph:
 3. materialize a `networkx.Graph`,
 4. query the feasibility estimator for violating edge sets and, when supported,
    violating node sets,
-5. record newly discovered forbidden node-label or edge-label assignments,
-6. try soft node-label and edge-label repair proposals against the current
+5. when `number_of_violations(...)` is available, batch-test localized labelled
+   additions between nodes touched by each violating edge set,
+6. immediately adopt the best addition that strictly reduces total violations,
+7. otherwise record newly discovered forbidden node-label or edge-label assignments,
+8. try soft node-label and edge-label repair proposals against the current
    structure,
-7. keep a proposal only if it improves the full oracle state,
-8. add newly discovered persistent structural cuts,
-9. re-run the structural solve if needed.
+9. keep a proposal only if it improves the full oracle state,
+10. add newly discovered persistent structural cuts,
+11. re-run the structural solve if needed.
 
 Important points:
 
@@ -419,6 +422,8 @@ Important points:
 - if the required oracle hooks are missing, NodeField falls back to the older
   one-shot decode path,
 - the loop is bounded by `max_oracle_iterations`,
+- constructive edge additions are limited by `oracle_add_edge_repair_budget`
+  and use one batched feasibility-estimator call per round,
 - labels are still reconstructed outside the MILP itself, but may now be
   repaired between structural solves as soft follow-up moves,
 - structural cuts only encode violating edge motifs; node and edge-label

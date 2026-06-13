@@ -38,6 +38,9 @@ from conditional_node_field_graph_generator.conditional_node_field_generator imp
 from conditional_node_field_graph_generator.conditional_node_field_graph_decoder import (
     build_single_generated_node_batch,
 )
+from conditional_node_field_graph_generator.oracle_utils import (
+    enumerate_localized_edge_addition_proposals,
+)
 
 
 class _GraphVectorizer:
@@ -423,6 +426,8 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_candidates_per_attempt=0)
     with pytest.raises(ValueError, match="max_oracle_iterations"):
         ConditionalNodeFieldGraphGenerator(max_oracle_iterations=0)
+    with pytest.raises(ValueError, match="oracle_add_edge_repair_budget"):
+        ConditionalNodeFieldGraphGenerator(oracle_add_edge_repair_budget=-1)
     with pytest.raises(ValueError, match="oracle_edge_label_min_changes_per_violation"):
         ConditionalNodeFieldGraphGenerator(oracle_edge_label_min_changes_per_violation=0)
     with pytest.raises(ValueError, match="oracle_edge_memory_penalty"):
@@ -441,6 +446,7 @@ def test_graph_generator_defaults_to_ten_oracle_iterations():
     generator = ConditionalNodeFieldGraphGenerator()
 
     assert generator.max_oracle_iterations == 10
+    assert generator.oracle_add_edge_repair_budget == 32
 
 
 def test_fit_from_stream_reuses_cached_warmup_batches_during_training():
@@ -1343,6 +1349,257 @@ class _LabelAwareOracleEstimator:
         return [[]]
 
 
+class _ConstructiveEdgeEstimator:
+    def __init__(self, required_edges):
+        self.required_edges = {
+            (min(int(i), int(j)), max(int(i), int(j)), label)
+            for i, j, label in required_edges
+        }
+        self.violation_batch_sizes = []
+
+    def _missing_required_edges(self, graph):
+        missing = []
+        for i, j, label in sorted(self.required_edges, key=lambda item: (item[0], item[1], repr(item[2]))):
+            if not graph.has_edge(i, j) or graph.edges[i, j].get("label") != label:
+                missing.append((i, j, label))
+        return missing
+
+    def number_of_violations(self, graphs):
+        self.violation_batch_sizes.append(len(graphs))
+        return [len(self._missing_required_edges(graph)) for graph in graphs]
+
+    def violating_edge_sets(self, graphs):
+        output = []
+        for graph in graphs:
+            if not self._missing_required_edges(graph):
+                output.append([])
+                continue
+            path_edges = frozenset(
+                (min(int(i), int(j)), max(int(i), int(j)))
+                for i, j in graph.edges()
+            )
+            output.append([path_edges] if path_edges else [])
+        return output
+
+
+def _constructive_oracle_generated_batch(n_nodes=4):
+    edge_probabilities = np.full((n_nodes, n_nodes), 0.05, dtype=float)
+    np.fill_diagonal(edge_probabilities, 0.0)
+    for node_idx in range(n_nodes - 1):
+        edge_probabilities[node_idx, node_idx + 1] = 0.95
+        edge_probabilities[node_idx + 1, node_idx] = 0.95
+
+    edge_label_matrix = np.full((n_nodes, n_nodes), None, dtype=object)
+    edge_label_probabilities = np.zeros((n_nodes, n_nodes, 2), dtype=float)
+    edge_label_probabilities[..., 0] = 0.8
+    edge_label_probabilities[..., 1] = 0.2
+    for i in range(n_nodes):
+        for j in range(i + 1, n_nodes):
+            edge_label_matrix[i, j] = edge_label_matrix[j, i] = "bad"
+
+    return GeneratedNodeBatch(
+        node_presence_mask=np.ones((1, n_nodes), dtype=bool),
+        node_degree_predictions=np.asarray(
+            [[1.0] + [2.0] * (n_nodes - 2) + [1.0]],
+            dtype=float,
+        ),
+        node_labels=[np.asarray([f"node-{idx}" for idx in range(n_nodes)], dtype=object)],
+        edge_probability_matrices=[edge_probabilities],
+        edge_existence_probabilities=[edge_probabilities],
+        edge_label_matrices=[edge_label_matrix],
+        edge_label_probabilities=[edge_label_probabilities],
+    )
+
+
+def test_constructive_edge_proposals_are_localized_ranked_and_budgeted():
+    proposals = enumerate_localized_edge_addition_proposals(
+        adjacency_matrix=np.asarray(
+            [
+                [0, 1, 0, 0, 0],
+                [1, 0, 1, 0, 0],
+                [0, 1, 0, 1, 0],
+                [0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 0],
+            ],
+            dtype=int,
+        ),
+        violating_edge_sets=[frozenset({(0, 1), (1, 2), (2, 3)})],
+        active_node_mask=np.ones(5, dtype=bool),
+        edge_probability_matrix=np.asarray(
+            [
+                [0.0, 0.9, 0.4, 0.8, 0.99],
+                [0.9, 0.0, 0.9, 0.3, 0.99],
+                [0.4, 0.9, 0.0, 0.9, 0.99],
+                [0.8, 0.3, 0.9, 0.0, 0.99],
+                [0.99, 0.99, 0.99, 0.99, 0.0],
+            ],
+            dtype=float,
+        ),
+        edge_label_classes=["low", "high"],
+        edge_label_probabilities=np.asarray(
+            [
+                [[0.0, 0.0], [0.5, 0.5], [0.9, 0.1], [0.1, 0.9], [0.0, 1.0]],
+                [[0.5, 0.5], [0.0, 0.0], [0.5, 0.5], [0.8, 0.2], [0.0, 1.0]],
+                [[0.9, 0.1], [0.5, 0.5], [0.0, 0.0], [0.5, 0.5], [0.0, 1.0]],
+                [[0.1, 0.9], [0.8, 0.2], [0.5, 0.5], [0.0, 0.0], [0.0, 1.0]],
+                [[0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 0.0]],
+            ],
+            dtype=float,
+        ),
+        predicted_edge_label_matrix=None,
+        budget=2,
+    )
+
+    assert [(proposal.edge, proposal.label) for proposal in proposals] == [
+        ((0, 3), "high"),
+        ((0, 2), "low"),
+    ]
+    assert all(4 not in proposal.edge for proposal in proposals)
+
+
+def test_constructive_edge_proposals_use_predicted_label_without_probabilities():
+    proposals = enumerate_localized_edge_addition_proposals(
+        adjacency_matrix=np.asarray(
+            [
+                [0, 1, 0],
+                [1, 0, 1],
+                [0, 1, 0],
+            ],
+            dtype=int,
+        ),
+        violating_edge_sets=[frozenset({(0, 1), (1, 2)})],
+        active_node_mask=np.ones(3, dtype=bool),
+        edge_probability_matrix=np.asarray(
+            [
+                [0.0, 0.9, 0.4],
+                [0.9, 0.0, 0.9],
+                [0.4, 0.9, 0.0],
+            ],
+            dtype=float,
+        ),
+        edge_label_classes=["unused-a", "unused-b"],
+        edge_label_probabilities=None,
+        predicted_edge_label_matrix=np.asarray(
+            [
+                [None, "path", "closure"],
+                ["path", None, "path"],
+                ["closure", "path", None],
+            ],
+            dtype=object,
+        ),
+        budget=32,
+    )
+
+    assert [(proposal.edge, proposal.label) for proposal in proposals] == [
+        ((0, 2), "closure"),
+    ]
+
+
+def test_constructive_oracle_adds_only_the_improving_label():
+    estimator = _ConstructiveEdgeEstimator([(0, 3, "good")])
+    generator = ConditionalNodeFieldGraphGenerator(
+        feasibility_estimator=estimator,
+        verbose=False,
+        max_oracle_iterations=3,
+    )
+    generator.edge_label_classes_ = np.asarray(["bad", "good"], dtype=object)
+    generator.edge_label_to_index_ = {"bad": 0, "good": 1}
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.zeros((1, 1), dtype=float),
+        node_counts=np.asarray([4], dtype=int),
+        edge_counts=np.asarray([3], dtype=int),
+    )
+
+    decoded = generator._decode_generated_nodes(
+        _constructive_oracle_generated_batch(),
+        graph_conditioning=conditioning,
+    )
+
+    assert len(decoded) == 1
+    assert decoded[0].edges[0, 3]["label"] == "good"
+    assert estimator.violation_batch_sizes[0] == 1
+    assert 1 < estimator.violation_batch_sizes[1] <= 32
+
+
+def test_constructive_oracle_can_apply_multiple_partial_improvements():
+    estimator = _ConstructiveEdgeEstimator(
+        [
+            (0, 2, "good"),
+            (1, 3, "good"),
+        ]
+    )
+    generator = ConditionalNodeFieldGraphGenerator(
+        feasibility_estimator=estimator,
+        verbose=False,
+        max_oracle_iterations=4,
+    )
+    generator.edge_label_classes_ = np.asarray(["bad", "good"], dtype=object)
+    generator.edge_label_to_index_ = {"bad": 0, "good": 1}
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.zeros((1, 1), dtype=float),
+        node_counts=np.asarray([4], dtype=int),
+        edge_counts=np.asarray([3], dtype=int),
+    )
+
+    decoded = generator._decode_generated_nodes(
+        _constructive_oracle_generated_batch(),
+        graph_conditioning=conditioning,
+    )
+
+    assert decoded[0].edges[0, 2]["label"] == "good"
+    assert decoded[0].edges[1, 3]["label"] == "good"
+    assert decoded[0].number_of_edges() == 5
+
+
+def test_constructive_oracle_rejects_non_improving_additions():
+    class _NeverImproves(_ConstructiveEdgeEstimator):
+        def number_of_violations(self, graphs):
+            self.violation_batch_sizes.append(len(graphs))
+            return [1 for _ in graphs]
+
+    estimator = _NeverImproves([(0, 3, "good")])
+    generator = ConditionalNodeFieldGraphGenerator(
+        feasibility_estimator=estimator,
+        verbose=False,
+        max_oracle_iterations=1,
+    )
+    generator.edge_label_classes_ = np.asarray(["bad", "good"], dtype=object)
+    generator.edge_label_to_index_ = {"bad": 0, "good": 1}
+
+    decoded = generator._decode_generated_nodes(_constructive_oracle_generated_batch())
+
+    assert not decoded[0].has_edge(0, 3)
+
+
+def test_constructive_oracle_respects_exact_conditioned_edge_count():
+    estimator = _ConstructiveEdgeEstimator([(0, 3, "good")])
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        edge_count_slack_penalty=None,
+    )
+    generator = ConditionalNodeFieldGraphGenerator(
+        graph_decoder=decoder,
+        feasibility_estimator=estimator,
+        verbose=False,
+        max_oracle_iterations=1,
+    )
+    generator.edge_label_classes_ = np.asarray(["bad", "good"], dtype=object)
+    generator.edge_label_to_index_ = {"bad": 0, "good": 1}
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.zeros((1, 1), dtype=float),
+        node_counts=np.asarray([4], dtype=int),
+        edge_counts=np.asarray([3], dtype=int),
+    )
+
+    decoded = generator._decode_generated_nodes(
+        _constructive_oracle_generated_batch(),
+        graph_conditioning=conditioning,
+    )
+
+    assert decoded[0].number_of_edges() == 3
+    assert not decoded[0].has_edge(0, 3)
+
+
 def _oracle_generated_batch():
     return GeneratedNodeBatch(
         node_presence_mask=np.asarray([[True, True, True, True]], dtype=bool),
@@ -1963,7 +2220,7 @@ def test_soft_edge_count_allows_nearby_solution_when_exact_count_is_cut_off():
     assert int(np.sum(adjacency) // 2) == 1
 
 
-def test_default_edge_count_slack_is_capped_at_one_edge():
+def test_default_edge_count_slack_allows_deviation_greater_than_one():
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=False,
         enforce_connectivity=False,
@@ -1980,13 +2237,14 @@ def test_default_edge_count_slack_is_capped_at_one_edge():
         ]
     ]
 
-    with pytest.raises(RuntimeError, match="Adjacency ILP did not produce an optimal solution"):
-        decoder.optimize_adjacency_matrix(
-            prob_matrix,
-            target_degrees=[1, 2, 2, 1],
-            target_edge_count=3,
-            forbidden_edge_sets=forbidden_two_edge_sets,
-        )
+    adjacency = decoder.optimize_adjacency_matrix(
+        prob_matrix,
+        target_degrees=[1, 2, 2, 1],
+        target_edge_count=3,
+        forbidden_edge_sets=forbidden_two_edge_sets,
+    )
+
+    assert int(np.sum(adjacency) // 2) == 1
 
 
 @pytest.mark.parametrize("penalty", [-0.1, 0.0])

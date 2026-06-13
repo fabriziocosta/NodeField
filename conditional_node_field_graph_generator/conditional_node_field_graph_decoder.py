@@ -764,13 +764,11 @@ class ConditionalNodeFieldGraphDecoder(object):
                     edge_count_under = pulp.LpVariable(
                         "edge_count_under",
                         lowBound=0,
-                        upBound=1,
                         cat="Integer",
                     )
                     edge_count_over = pulp.LpVariable(
                         "edge_count_over",
                         lowBound=0,
-                        upBound=1,
                         cat="Integer",
                     )
                     prob += (
@@ -1990,7 +1988,10 @@ def decode_generated_nodes_with_oracle(
     graph_conditioning: Optional[GraphConditioningBatch] = None,
 ) -> List[Optional[nx.Graph]]:
     """Decode one generated batch using the feasibility oracle, label repairs, and structural cuts."""
-    from .oracle_utils import update_oracle_edge_memory
+    from .oracle_utils import (
+        enumerate_localized_edge_addition_proposals,
+        update_oracle_edge_memory,
+    )
 
     if owner.graph_decoder is None:
         owner.graph_decoder = ConditionalNodeFieldGraphDecoder(verbose=bool(owner.verbose))
@@ -2045,6 +2046,7 @@ def decode_generated_nodes_with_oracle(
                 else np.asarray([], dtype=object),
             )
         )
+        predicted_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object).copy()
         try:
             single_adj_mtx = owner.graph_decoder.decode_adjacency_matrix(
                 single_generated_nodes,
@@ -2100,6 +2102,10 @@ def decode_generated_nodes_with_oracle(
         current_edge_label_log_score = float("nan")
         use_node_label_cuts = bool(getattr(owner, "oracle_use_node_label_cuts", False))
         use_edge_label_cuts = bool(getattr(owner, "oracle_use_edge_label_cuts", False))
+        add_edge_repair_budget = max(
+            0,
+            int(getattr(owner, "oracle_add_edge_repair_budget", 32)),
+        )
 
         def plot_oracle_phase(
             phase_name: str,
@@ -2230,6 +2236,204 @@ def decode_generated_nodes_with_oracle(
                 node_score,
                 edge_label_score,
             ) = evaluate_oracle_state(current_node_labels, current_edge_label_matrix)
+
+            can_try_edge_additions = (
+                add_edge_repair_budget > 0
+                and bool(current_edge_violation_sets)
+                and owner.feasibility_estimator is not None
+                and hasattr(owner.feasibility_estimator, "number_of_violations")
+                and (
+                    desired_edge_count is None
+                    or owner.graph_decoder.edge_count_slack_penalty is not None
+                )
+            )
+            if can_try_edge_additions:
+                edge_probability_matrix = np.asarray(
+                    edge_existence_probabilities[graph_idx]
+                    if edge_existence_probabilities is not None
+                    else predicted_edge_probability_matrices[graph_idx],
+                    dtype=float,
+                )
+                graph_edge_label_probabilities = (
+                    None
+                    if edge_label_probabilities is None
+                    else np.asarray(edge_label_probabilities[graph_idx], dtype=float)
+                )
+                proposals = enumerate_localized_edge_addition_proposals(
+                    adjacency_matrix=single_adj_mtx,
+                    violating_edge_sets=current_edge_violation_sets,
+                    active_node_mask=existence_mask,
+                    edge_probability_matrix=edge_probability_matrix,
+                    edge_label_classes=owner._get_edge_label_names(),
+                    edge_label_probabilities=graph_edge_label_probabilities,
+                    predicted_edge_label_matrix=predicted_edge_label_matrix,
+                    budget=add_edge_repair_budget,
+                )
+                if proposals:
+                    current_violation_counts = np.asarray(
+                        owner.feasibility_estimator.number_of_violations([graph]),
+                        dtype=int,
+                    ).reshape(-1)
+                    if current_violation_counts.size != 1:
+                        raise ValueError(
+                            "feasibility_estimator.number_of_violations() must return "
+                            "one count per input graph."
+                        )
+                    current_violation_count = int(current_violation_counts[0])
+                    candidate_states = []
+                    candidate_graphs = []
+                    for proposal in proposals:
+                        candidate_adj_mtx = np.asarray(single_adj_mtx, dtype=int).copy()
+                        i, j = proposal.edge
+                        candidate_adj_mtx[i, j] = candidate_adj_mtx[j, i] = 1
+                        candidate_edge_label_matrix = np.asarray(
+                            current_edge_label_matrix,
+                            dtype=object,
+                        ).copy()
+                        candidate_edge_label_matrix[i, j] = proposal.label
+                        candidate_edge_label_matrix[j, i] = proposal.label
+                        candidate_graph = _assemble_graph_job(
+                            existence_mask,
+                            current_node_labels,
+                            np.asarray(
+                                _edge_label_matrix_to_list(
+                                    candidate_adj_mtx,
+                                    candidate_edge_label_matrix,
+                                ),
+                                dtype=object,
+                            ),
+                            candidate_adj_mtx,
+                        )
+                        candidate_states.append(
+                            (
+                                proposal,
+                                candidate_adj_mtx,
+                                candidate_edge_label_matrix,
+                                candidate_graph,
+                            )
+                        )
+                        candidate_graphs.append(candidate_graph)
+
+                    candidate_violation_counts = np.asarray(
+                        owner.feasibility_estimator.number_of_violations(candidate_graphs),
+                        dtype=int,
+                    ).reshape(-1)
+                    if candidate_violation_counts.size != len(candidate_graphs):
+                        raise ValueError(
+                            "feasibility_estimator.number_of_violations() must return "
+                            "one count per input graph."
+                        )
+                    improving_candidates = []
+                    for candidate_state, violation_count in zip(
+                        candidate_states,
+                        candidate_violation_counts,
+                    ):
+                        if int(violation_count) >= current_violation_count:
+                            continue
+                        proposal, candidate_adj_mtx, candidate_edge_label_matrix, candidate_graph = candidate_state
+                        candidate_scores = owner._oracle_candidate_score_components(
+                            existence_mask=existence_mask,
+                            adj_mtx=candidate_adj_mtx,
+                            node_labels=current_node_labels,
+                            edge_label_matrix=candidate_edge_label_matrix,
+                            edge_probability_matrix=edge_probability_matrix,
+                            node_label_probabilities=(
+                                None
+                                if node_label_probabilities is None
+                                else np.asarray(node_label_probabilities[graph_idx], dtype=float)
+                            ),
+                            edge_label_probabilities=graph_edge_label_probabilities,
+                        )
+                        edge_count_deviation = (
+                            0
+                            if desired_edge_count is None
+                            else abs(
+                                int(np.sum(candidate_adj_mtx) // 2)
+                                - int(desired_edge_count)
+                            )
+                        )
+                        edge_count_penalty = (
+                            0.0
+                            if owner.graph_decoder.edge_count_slack_penalty is None
+                            else float(owner.graph_decoder.edge_count_slack_penalty)
+                            * float(edge_count_deviation)
+                        )
+                        improving_candidates.append(
+                            (
+                                (
+                                    int(violation_count),
+                                    -float(candidate_scores[0]),
+                                    edge_count_penalty,
+                                    proposal.edge[0],
+                                    proposal.edge[1],
+                                    repr(proposal.label),
+                                ),
+                                proposal,
+                                candidate_adj_mtx,
+                                candidate_edge_label_matrix,
+                                candidate_graph,
+                                candidate_scores,
+                                int(violation_count),
+                                edge_count_deviation,
+                            )
+                        )
+
+                    if improving_candidates:
+                        (
+                            _,
+                            selected_proposal,
+                            single_adj_mtx,
+                            current_edge_label_matrix,
+                            graph,
+                            selected_scores,
+                            selected_violation_count,
+                            selected_edge_count_deviation,
+                        ) = min(improving_candidates, key=lambda item: item[0])
+                        (
+                            score,
+                            edge_score,
+                            node_score,
+                            edge_label_score,
+                        ) = selected_scores
+                        current_total_log_score = float(score)
+                        current_edge_log_score = float(edge_score)
+                        current_node_log_score = float(node_score)
+                        current_edge_label_log_score = float(edge_label_score)
+                        current_node_violation_sets = (
+                            owner._get_oracle_node_violation_sets(
+                                graph,
+                                n_nodes=single_adj_mtx.shape[0],
+                            )
+                            if use_node_label_cuts
+                            else []
+                        )
+                        current_edge_violation_sets = owner._get_oracle_edge_violation_sets(
+                            graph,
+                            n_nodes=single_adj_mtx.shape[0],
+                        )
+                        if score > best_score:
+                            best_score = float(score)
+                            best_graph = graph
+                        if selected_violation_count == 0 and score > best_feasible_score:
+                            best_feasible_score = float(score)
+                            best_feasible_graph = graph
+                        plot_oracle_phase(
+                            "Constructive Edge Addition",
+                            adj_mtx=single_adj_mtx,
+                            decoded_graph=graph,
+                            node_violation_sets=current_node_violation_sets,
+                            edge_violation_sets=current_edge_violation_sets,
+                            detail=(
+                                f"proposals={len(proposals)} "
+                                f"improving={len(improving_candidates)} "
+                                f"selected={selected_proposal.edge!r}:{selected_proposal.label!r} "
+                                f"violations={current_violation_count}->{selected_violation_count} "
+                                f"edge_count_deviation={selected_edge_count_deviation}"
+                            ),
+                        )
+                        if selected_violation_count == 0:
+                            break
+                        continue
 
             new_node_forbidden = []
             if use_node_label_cuts and node_label_probabilities is not None:

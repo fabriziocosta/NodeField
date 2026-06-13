@@ -30,6 +30,7 @@ class FeasibilityConfig:
 class OracleConfig:
     candidates_per_attempt: int
     max_iterations: int
+    add_edge_repair_budget: int
     use_node_label_cuts: bool
     use_edge_label_cuts: bool
     edge_label_min_changes_per_violation: int
