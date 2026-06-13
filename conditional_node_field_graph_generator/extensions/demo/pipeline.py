@@ -947,6 +947,7 @@ def build_graph_generator(
     decoder_horizon_negative_threshold=0.2,
     decoder_horizon_pair_budget=24,
     decoder_horizon_paths_per_pair=8,
+    decoder_horizon_path_expansion_budget=4096,
     decoder_horizon_max_iterations=4,
     artifact_root=None,
     checkpoint_root=None,
@@ -1134,6 +1135,7 @@ def build_graph_generator(
         horizon_negative_threshold=decoder_horizon_negative_threshold,
         horizon_pair_budget=decoder_horizon_pair_budget,
         horizon_paths_per_pair=decoder_horizon_paths_per_pair,
+        horizon_path_expansion_budget=decoder_horizon_path_expansion_budget,
         horizon_max_iterations=decoder_horizon_max_iterations,
     )
     return ConditionalNodeFieldGraphGenerator(

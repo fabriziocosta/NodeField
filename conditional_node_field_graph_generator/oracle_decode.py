@@ -2,14 +2,124 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import random
+import time
 from typing import Any, FrozenSet, List, Optional, Sequence
 
 import numpy as np
 
+from .decode_preparation import (
+    build_masked_prob_matrix,
+    build_single_generated_node_batch,
+    resolve_predicted_edge_labels,
+    resolve_predicted_node_labels,
+)
+from .decoder_assembly import (
+    assemble_graph,
+    edge_label_list_to_matrix,
+    edge_label_matrix_to_list,
+)
+from .diagnostics import _plot_decoder_diagnostics
 from .runtime_utils import run_with_fork_timeout, verbose_log
 
 Edge = tuple[int, int]
+
+
+@dataclass
+class _OracleGraphState:
+    graph_idx: int
+    generated_nodes: Any
+    desired_node_count: Optional[int]
+    desired_edge_count: Optional[int]
+    existence_mask: np.ndarray
+    degree_predictions: np.ndarray
+    masked_prob_matrix: np.ndarray
+    target_degrees: List[int]
+    current_node_labels: np.ndarray
+    current_edge_label_matrix: np.ndarray
+    predicted_edge_label_matrix: np.ndarray
+
+
+def _prepare_oracle_graph_state(
+    owner,
+    generated_nodes,
+    graph_conditioning,
+    graph_idx: int,
+    predicted_edge_probability_matrices,
+    predicted_node_labels_list,
+    predicted_edge_labels_list,
+    predicted_edge_label_matrices,
+) -> _OracleGraphState:
+    single_generated_nodes = build_single_generated_node_batch(generated_nodes, graph_idx)
+    desired_node_count = (
+        None
+        if graph_conditioning is None
+        else int(np.asarray(graph_conditioning.node_counts)[graph_idx])
+    )
+    desired_edge_count = (
+        None
+        if graph_conditioning is None
+        else int(np.asarray(graph_conditioning.edge_counts)[graph_idx])
+    )
+    existence_mask = owner.graph_decoder.resolve_node_presence_mask(
+        np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool),
+        desired_node_count=desired_node_count,
+        node_existence_scores=(
+            None
+            if single_generated_nodes.node_existence_probabilities is None
+            else np.asarray(
+                single_generated_nodes.node_existence_probabilities[0],
+                dtype=float,
+            )
+        ),
+    )
+    degree_predictions = np.asarray(
+        single_generated_nodes.node_degree_predictions[0],
+        dtype=float,
+    )
+    masked_prob_matrix = build_masked_prob_matrix(
+        existence_mask,
+        degree_predictions,
+        np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float),
+    )
+    target_degrees = owner.graph_decoder.get_degree_targets(
+        degree_predictions,
+        existence_mask,
+        desired_edge_count=desired_edge_count,
+    )
+    current_node_labels = np.asarray(
+        predicted_node_labels_list[graph_idx],
+        dtype=object,
+    ).copy()
+    current_edge_label_matrix = (
+        np.asarray(predicted_edge_label_matrices[graph_idx], dtype=object).copy()
+        if predicted_edge_label_matrices is not None
+        else edge_label_list_to_matrix(
+            np.asarray(predicted_edge_probability_matrices[graph_idx] > 0, dtype=int),
+            (
+                np.asarray(predicted_edge_labels_list[graph_idx], dtype=object)
+                if predicted_edge_labels_list is not None
+                else np.asarray([], dtype=object)
+            ),
+        )
+    )
+    return _OracleGraphState(
+        graph_idx=graph_idx,
+        generated_nodes=single_generated_nodes,
+        desired_node_count=desired_node_count,
+        desired_edge_count=desired_edge_count,
+        existence_mask=existence_mask,
+        degree_predictions=degree_predictions,
+        masked_prob_matrix=masked_prob_matrix,
+        target_degrees=target_degrees,
+        current_node_labels=current_node_labels,
+        current_edge_label_matrix=current_edge_label_matrix,
+        predicted_edge_label_matrix=np.asarray(
+            current_edge_label_matrix,
+            dtype=object,
+        ).copy(),
+    )
 
 
 def sample_oracle_cuts_for_iteration(
@@ -38,6 +148,11 @@ def _optimize_adjacency_matrix_worker(graph_decoder, args, kwargs) -> np.ndarray
 
 
 def oracle_adjacency_timeout_seconds(owner) -> Optional[float]:
+    remaining = getattr(owner, "_remaining_generation_timeout_seconds", None)
+    if callable(remaining):
+        remaining_seconds = remaining()
+        if remaining_seconds is not None:
+            return float(remaining_seconds)
     timeout_seconds = getattr(owner, "max_decode_seconds_per_sample", None)
     if timeout_seconds is None:
         timeout_seconds = getattr(owner, "max_feasibility_seconds_per_sample", None)
@@ -49,11 +164,23 @@ def oracle_adjacency_timeout_seconds(owner) -> Optional[float]:
                 timeout_seconds = getattr(graph_decoder, "adjacency_time_limit_seconds", None)
     if timeout_seconds is None:
         return None
-    return max(1.0, float(timeout_seconds))
+    return float(timeout_seconds)
 
 
-def optimize_oracle_adjacency_matrix(owner, *args, **kwargs) -> np.ndarray:
+def optimize_oracle_adjacency_matrix(
+    owner,
+    *args,
+    deadline_monotonic: Optional[float] = None,
+    **kwargs,
+) -> np.ndarray:
     timeout_seconds = oracle_adjacency_timeout_seconds(owner)
+    if deadline_monotonic is None and timeout_seconds is not None:
+        deadline_monotonic = time.monotonic() + float(timeout_seconds)
+    if deadline_monotonic is not None:
+        timeout_seconds = float(deadline_monotonic) - time.monotonic()
+        if timeout_seconds <= 0.0:
+            raise TimeoutError("Oracle adjacency solve exhausted its shared time budget.")
+        kwargs["_deadline_monotonic"] = deadline_monotonic
     if timeout_seconds is None:
         return owner.graph_decoder.optimize_adjacency_matrix(*args, **kwargs)
     return run_with_fork_timeout(
@@ -86,6 +213,12 @@ def solve_oracle_relaxed_adjacency(
             owner.oracle_edge_memory_penalty,
         )
     last_error: Optional[Exception] = None
+    timeout_seconds = oracle_adjacency_timeout_seconds(owner)
+    deadline_monotonic = (
+        None
+        if timeout_seconds is None
+        else time.monotonic() + float(timeout_seconds)
+    )
     for solve_iteration_idx in range(start_iteration_idx, owner.max_oracle_iterations):
         active_cuts = sample_oracle_cuts_for_iteration(
             owner,
@@ -103,6 +236,7 @@ def solve_oracle_relaxed_adjacency(
                 owner,
                 solve_prob_matrix,
                 target_degrees,
+                deadline_monotonic=deadline_monotonic,
                 **optimize_kwargs,
             )
         except TimeoutError:
@@ -130,24 +264,15 @@ def decode_generated_nodes_with_oracle(
     graph_conditioning: Optional[GraphConditioningBatch] = None,
 ) -> List[Optional[nx.Graph]]:
     """Decode one generated batch using the feasibility oracle, label repairs, and structural cuts."""
-    from .conditional_node_field_graph_decoder import (
-        ConditionalNodeFieldGraphDecoder,
-        _assemble_graph_job,
-        _build_masked_prob_matrix,
-        _edge_label_list_to_matrix,
-        _edge_label_matrix_to_list,
-        _plot_decoder_diagnostics,
-        build_single_generated_node_batch,
-        resolve_predicted_edge_labels,
-        resolve_predicted_node_labels,
-    )
     from .oracle_utils import (
         enumerate_localized_edge_addition_proposals,
         update_oracle_edge_memory,
     )
 
     if owner.graph_decoder is None:
-        owner.graph_decoder = ConditionalNodeFieldGraphDecoder(verbose=bool(owner.verbose))
+        raise RuntimeError(
+            "Oracle-guided decoding requires owner.graph_decoder to be configured."
+        )
     predicted_edge_probability_matrices = generated_nodes.edge_probability_matrices
     if predicted_edge_probability_matrices is None:
         raise RuntimeError(
@@ -165,41 +290,26 @@ def decode_generated_nodes_with_oracle(
 
     decoded_graphs: List[Optional[nx.Graph]] = []
     for graph_idx in range(len(predicted_edge_probability_matrices)):
-        single_generated_nodes = build_single_generated_node_batch(generated_nodes, graph_idx)
-        desired_node_count = None if graph_conditioning is None else int(np.asarray(graph_conditioning.node_counts)[graph_idx])
-        desired_edge_count = None if graph_conditioning is None else int(np.asarray(graph_conditioning.edge_counts)[graph_idx])
-        existence_mask = owner.graph_decoder.resolve_node_presence_mask(
-            np.asarray(single_generated_nodes.node_presence_mask[0], dtype=bool),
-            desired_node_count=desired_node_count,
-            node_existence_scores=None if single_generated_nodes.node_existence_probabilities is None else np.asarray(
-                single_generated_nodes.node_existence_probabilities[0],
-                dtype=float,
-            ),
+        state = _prepare_oracle_graph_state(
+            owner,
+            generated_nodes,
+            graph_conditioning,
+            graph_idx,
+            predicted_edge_probability_matrices,
+            predicted_node_labels_list,
+            predicted_edge_labels_list,
+            predicted_edge_label_matrices,
         )
-        degree_predictions = np.asarray(single_generated_nodes.node_degree_predictions[0], dtype=float)
-        prob_matrix = np.asarray(predicted_edge_probability_matrices[graph_idx], dtype=float)
-        masked_prob_matrix = _build_masked_prob_matrix(
-            existence_mask=existence_mask,
-            degree_prediction=degree_predictions,
-            prob_matrix=prob_matrix,
-        )
-        target_degrees = owner.graph_decoder.get_degree_targets(
-            degree_predictions,
-            existence_mask,
-            desired_edge_count=desired_edge_count,
-        )
-        current_node_labels = np.asarray(predicted_node_labels_list[graph_idx], dtype=object).copy()
-        current_edge_label_matrix = (
-            np.asarray(predicted_edge_label_matrices[graph_idx], dtype=object).copy()
-            if predicted_edge_label_matrices is not None
-            else _edge_label_list_to_matrix(
-                np.asarray(predicted_edge_probability_matrices[graph_idx] > 0, dtype=int),
-                np.asarray(predicted_edge_labels_list[graph_idx], dtype=object)
-                if predicted_edge_labels_list is not None
-                else np.asarray([], dtype=object),
-            )
-        )
-        predicted_edge_label_matrix = np.asarray(current_edge_label_matrix, dtype=object).copy()
+        single_generated_nodes = state.generated_nodes
+        desired_node_count = state.desired_node_count
+        desired_edge_count = state.desired_edge_count
+        existence_mask = state.existence_mask
+        degree_predictions = state.degree_predictions
+        masked_prob_matrix = state.masked_prob_matrix
+        target_degrees = state.target_degrees
+        current_node_labels = state.current_node_labels
+        current_edge_label_matrix = state.current_edge_label_matrix
+        predicted_edge_label_matrix = state.predicted_edge_label_matrix
         try:
             single_adj_mtx = owner.graph_decoder.decode_adjacency_matrix(
                 single_generated_nodes,
@@ -315,10 +425,10 @@ def decode_generated_nodes_with_oracle(
             node_labels: np.ndarray,
             edge_label_matrix: np.ndarray,
         ) -> tuple[nx.Graph, List[Any], List[FrozenSet[Edge]], float, float, float, float]:
-            candidate_graph = _assemble_graph_job(
+            candidate_graph = assemble_graph(
                 existence_mask,
                 np.asarray(node_labels, dtype=object),
-                np.asarray(_edge_label_matrix_to_list(single_adj_mtx, edge_label_matrix), dtype=object),
+                np.asarray(edge_label_matrix_to_list(single_adj_mtx, edge_label_matrix), dtype=object),
                 np.asarray(single_adj_mtx, dtype=float),
             )
             node_violation_sets = (
@@ -380,7 +490,7 @@ def decode_generated_nodes_with_oracle(
                     current_edge_label_matrix
                 ],
             )[0]
-            current_edge_label_matrix = _edge_label_list_to_matrix(single_adj_mtx, edge_labels)
+            current_edge_label_matrix = edge_label_list_to_matrix(single_adj_mtx, edge_labels)
             (
                 graph,
                 current_node_violation_sets,
@@ -446,11 +556,11 @@ def decode_generated_nodes_with_oracle(
                         ).copy()
                         candidate_edge_label_matrix[i, j] = proposal.label
                         candidate_edge_label_matrix[j, i] = proposal.label
-                        candidate_graph = _assemble_graph_job(
+                        candidate_graph = assemble_graph(
                             existence_mask,
                             current_node_labels,
                             np.asarray(
-                                _edge_label_matrix_to_list(
+                                edge_label_matrix_to_list(
                                     candidate_adj_mtx,
                                     candidate_edge_label_matrix,
                                 ),
@@ -818,10 +928,10 @@ def decode_generated_nodes_with_oracle(
                     forbidden_node_assignments=accumulated_node_label_forbidden,
                     forbidden_edge_assignments=accumulated_edge_label_forbidden,
                 )
-            structural_graph = _assemble_graph_job(
+            structural_graph = assemble_graph(
                 existence_mask,
                 current_node_labels,
-                np.asarray(_edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
+                np.asarray(edge_label_matrix_to_list(single_adj_mtx, current_edge_label_matrix), dtype=object),
                 np.asarray(single_adj_mtx, dtype=float),
             )
             structural_node_violation_sets = (

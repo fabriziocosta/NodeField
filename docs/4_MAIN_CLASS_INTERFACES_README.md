@@ -763,6 +763,7 @@ ConditionalNodeFieldGraphDecoder(
     horizon_negative_threshold: float = 0.2,
     horizon_pair_budget: int = 24,
     horizon_paths_per_pair: int = 8,
+    horizon_path_expansion_budget: int = 4096,
     horizon_max_iterations: int = 1,
 )
 ```
@@ -837,6 +838,10 @@ Parameters:
   Maximum number of probability-ranked bounded simple paths retained for each
   positive pair.
 
+- `horizon_path_expansion_budget`
+  Maximum number of best-first path-search states expanded per positive pair.
+  Exhaustion is soft and recorded in the solve report.
+
 - `horizon_max_iterations`
   Maximum number of negative-horizon separation rounds. Each round discovers
   previously unseen violating short paths, adds their soft cuts, and re-solves.
@@ -846,7 +851,8 @@ After an ILP decode, `last_adjacency_solve_report_` contains the latest
 graph in the latest batch. Reports distinguish proven optimal solutions from
 validated integer-feasible time-limit incumbents. They also expose solver and
 horizon termination reasons, objective value, final degree and edge-count
-slack, and the number of unresolved negative-horizon pairs.
+slack, the number of unresolved negative-horizon pairs, and whether bounded
+positive-path search was truncated.
 
 ### Main Public Method
 

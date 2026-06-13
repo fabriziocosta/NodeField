@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
@@ -27,13 +28,19 @@ from .direct_graph_decoder import (
     select_degree_aware as _select_direct_edges_degree_aware_impl,
     select_top_k as _select_direct_edges_top_k_impl,
 )
+from .decode_preparation import (
+    build_masked_prob_matrix as _build_masked_prob_matrix_impl,
+    build_single_generated_node_batch as _build_single_generated_node_batch_impl,
+    resolve_predicted_edge_labels as _resolve_predicted_edge_labels_impl,
+    resolve_predicted_node_labels as _resolve_predicted_node_labels_impl,
+)
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .parallel_utils import _normalize_n_jobs, _parallel_map
-from .runtime_utils import run_with_fork_timeout, verbose_log
+from .runtime_utils import verbose_log
 from .structural_decoder import AdjacencySolveReport, solve_adjacency
 
 Edge = Tuple[int, int]
-_DECODER_ARTIFACT_VERSION = 2
+_DECODER_ARTIFACT_VERSION = 3
 plt = _shared_diagnostics.plt
 
 
@@ -74,14 +81,11 @@ def _build_masked_prob_matrix(
     degree_prediction: np.ndarray,
     prob_matrix: np.ndarray,
 ) -> np.ndarray:
-    n_nodes = min(len(existence_mask), len(degree_prediction))
-    masked_prob_matrix = np.asarray(prob_matrix, dtype=float)[:n_nodes, :n_nodes].copy()
-    existent = np.asarray(existence_mask[:n_nodes], dtype=bool)
-    for i in range(n_nodes):
-        for j in range(n_nodes):
-            if i == j or not (existent[i] and existent[j]):
-                masked_prob_matrix[i, j] = 0.0
-    return (masked_prob_matrix + masked_prob_matrix.T) / 2.0
+    return _build_masked_prob_matrix_impl(
+        existence_mask,
+        degree_prediction,
+        prob_matrix,
+    )
 
 
 def _validate_probability_values(values: np.ndarray, *, name: str) -> np.ndarray:
@@ -179,8 +183,10 @@ def _decode_single_adjacency_job(
     horizon_negative_threshold: float = 0.2,
     horizon_pair_budget: int = 24,
     horizon_paths_per_pair: int = 8,
+    horizon_path_expansion_budget: int = 4096,
     horizon_max_iterations: int = 1,
     solver_threads: Optional[int] = None,
+    deadline_monotonic: Optional[float] = None,
 ) -> Tuple[np.ndarray, AdjacencySolveReport]:
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
@@ -196,6 +202,7 @@ def _decode_single_adjacency_job(
         horizon_negative_threshold=horizon_negative_threshold,
         horizon_pair_budget=horizon_pair_budget,
         horizon_paths_per_pair=horizon_paths_per_pair,
+        horizon_path_expansion_budget=horizon_path_expansion_budget,
         horizon_max_iterations=horizon_max_iterations,
         solver_threads=solver_threads,
     )
@@ -230,6 +237,7 @@ def _decode_single_adjacency_job(
         active_node_mask=existent,
         horizon_probability_matrix=horizon_probability_matrix,
         horizon=horizon,
+        _deadline_monotonic=deadline_monotonic,
     )
     if int(verbose) >= 4 and diagnostic_graph_renderer is None:
         _plot_decoder_diagnostics(
@@ -251,91 +259,14 @@ def build_single_generated_node_batch(
     generated_nodes: GeneratedNodeBatch,
     graph_idx: int,
 ) -> GeneratedNodeBatch:
-    """Slice a multi-graph generated batch down to a single-example batch."""
-    node_embeddings_list = None if generated_nodes.node_embeddings_list is None else [
-        np.asarray(generated_nodes.node_embeddings_list[graph_idx])
-    ]
-    node_presence_mask = None if generated_nodes.node_presence_mask is None else np.asarray(
-        [generated_nodes.node_presence_mask[graph_idx]]
-    )
-    node_existence_probabilities = None if generated_nodes.node_existence_probabilities is None else np.asarray(
-        [generated_nodes.node_existence_probabilities[graph_idx]],
-        dtype=float,
-    )
-    node_degree_predictions = None if generated_nodes.node_degree_predictions is None else np.asarray(
-        [generated_nodes.node_degree_predictions[graph_idx]]
-    )
-    node_labels = None if generated_nodes.node_labels is None else [
-        np.asarray(generated_nodes.node_labels[graph_idx], dtype=object)
-    ]
-    edge_probability_matrices = None if generated_nodes.edge_probability_matrices is None else [
-        np.asarray(generated_nodes.edge_probability_matrices[graph_idx], dtype=float)
-    ]
-    edge_label_matrices = None if generated_nodes.edge_label_matrices is None else [
-        np.asarray(generated_nodes.edge_label_matrices[graph_idx], dtype=object)
-    ]
-    node_label_logits = None if generated_nodes.node_label_logits is None else [
-        np.asarray(generated_nodes.node_label_logits[graph_idx], dtype=float)
-    ]
-    node_label_probabilities = None if generated_nodes.node_label_probabilities is None else [
-        np.asarray(generated_nodes.node_label_probabilities[graph_idx], dtype=float)
-    ]
-    edge_existence_probabilities = None if generated_nodes.edge_existence_probabilities is None else [
-        np.asarray(generated_nodes.edge_existence_probabilities[graph_idx], dtype=float)
-    ]
-    edge_label_logits = None if generated_nodes.edge_label_logits is None else [
-        np.asarray(generated_nodes.edge_label_logits[graph_idx], dtype=float)
-    ]
-    edge_label_probabilities = None if generated_nodes.edge_label_probabilities is None else [
-        np.asarray(generated_nodes.edge_label_probabilities[graph_idx], dtype=float)
-    ]
-    horizon_probability_matrices = None if generated_nodes.horizon_probability_matrices is None else [
-        np.asarray(generated_nodes.horizon_probability_matrices[graph_idx], dtype=float)
-    ]
-    return GeneratedNodeBatch(
-        node_embeddings_list=node_embeddings_list,
-        node_presence_mask=node_presence_mask,
-        node_degree_predictions=node_degree_predictions,
-        node_labels=node_labels,
-        node_existence_probabilities=node_existence_probabilities,
-        edge_probability_matrices=edge_probability_matrices,
-        edge_label_matrices=edge_label_matrices,
-        node_label_logits=node_label_logits,
-        node_label_probabilities=node_label_probabilities,
-        edge_existence_probabilities=edge_existence_probabilities,
-        edge_label_logits=edge_label_logits,
-        edge_label_probabilities=edge_label_probabilities,
-        horizon_probability_matrices=horizon_probability_matrices,
-        horizon=generated_nodes.horizon,
-    )
+    return _build_single_generated_node_batch_impl(generated_nodes, graph_idx)
 
 
 def resolve_predicted_node_labels(
     owner,
     generated_nodes: GeneratedNodeBatch,
 ) -> List[np.ndarray]:
-    """Resolve node labels from explicit predictions or the configured supervision policy."""
-    node_label_plan = owner._plan_channel("node_labels")
-    if generated_nodes.node_labels is not None:
-        return [np.asarray(node_labels, dtype=object) for node_labels in generated_nodes.node_labels]
-    if generated_nodes.node_presence_mask is None:
-        raise RuntimeError("Node-label resolution requires node_presence_mask predictions.")
-    if node_label_plan is None:
-        return [
-            np.asarray([None] * len(node_presence_mask), dtype=object)
-            for node_presence_mask in generated_nodes.node_presence_mask
-        ]
-    if node_label_plan.mode == "constant":
-        return [
-            np.asarray([node_label_plan.constant_value] * len(node_presence_mask), dtype=object)
-            for node_presence_mask in generated_nodes.node_presence_mask
-        ]
-    if node_label_plan.mode == "disabled":
-        return [
-            np.asarray([None] * len(node_presence_mask), dtype=object)
-            for node_presence_mask in generated_nodes.node_presence_mask
-        ]
-    raise RuntimeError("Node-label channel is configured as learned, but the generator returned no node labels.")
+    return _resolve_predicted_node_labels_impl(owner, generated_nodes)
 
 
 def resolve_predicted_edge_labels(
@@ -343,30 +274,11 @@ def resolve_predicted_edge_labels(
     generated_nodes: GeneratedNodeBatch,
     predicted_edge_probability_matrices: Optional[List[np.ndarray]],
 ) -> Tuple[Optional[List[np.ndarray]], Optional[List[np.ndarray]]]:
-    """Resolve edge labels from explicit predictions or the configured supervision policy."""
-    edge_label_plan = owner._plan_channel("edge_labels")
-    if generated_nodes.edge_label_matrices is not None:
-        return None, [np.asarray(edge_label_matrix, dtype=object) for edge_label_matrix in generated_nodes.edge_label_matrices]
-    if predicted_edge_probability_matrices is None:
-        raise RuntimeError("Edge-label resolution requires edge probabilities to determine decoded edge counts.")
-    if edge_label_plan is None:
-        return [np.asarray([], dtype=object) for _ in predicted_edge_probability_matrices], None
-    if edge_label_plan.mode == "constant":
-        predicted_edge_label_matrices = []
-        for prob_matrix in predicted_edge_probability_matrices:
-            prob_matrix = np.asarray(prob_matrix)
-            if prob_matrix.ndim != 2 or prob_matrix.shape[0] != prob_matrix.shape[1]:
-                raise ValueError(
-                    "Constant edge-label resolution expects square edge-probability matrices "
-                    f"(got shape={prob_matrix.shape})."
-                )
-            edge_label_matrix = np.full(prob_matrix.shape, edge_label_plan.constant_value, dtype=object)
-            np.fill_diagonal(edge_label_matrix, None)
-            predicted_edge_label_matrices.append(edge_label_matrix)
-        return None, predicted_edge_label_matrices
-    if edge_label_plan.mode == "disabled":
-        return [np.asarray([], dtype=object) for _ in predicted_edge_probability_matrices], None
-    raise RuntimeError("Edge-label channel is configured as learned, but the generator returned no edge labels.")
+    return _resolve_predicted_edge_labels_impl(
+        owner,
+        generated_nodes,
+        predicted_edge_probability_matrices,
+    )
 
 
 def sample_oracle_cuts_for_iteration(
@@ -450,6 +362,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         horizon_negative_threshold: float = 0.2,
         horizon_pair_budget: int = 24,
         horizon_paths_per_pair: int = 8,
+        horizon_path_expansion_budget: int = 4096,
         horizon_max_iterations: int = 1,
         solver_threads: Optional[int] = None,
     ) -> None:
@@ -513,11 +426,14 @@ class ConditionalNodeFieldGraphDecoder(object):
             )
         self.horizon_pair_budget = int(horizon_pair_budget)
         self.horizon_paths_per_pair = int(horizon_paths_per_pair)
+        self.horizon_path_expansion_budget = int(horizon_path_expansion_budget)
         self.horizon_max_iterations = int(horizon_max_iterations)
         if self.horizon_pair_budget < 0:
             raise ValueError("horizon_pair_budget must be >= 0.")
         if self.horizon_paths_per_pair < 1:
             raise ValueError("horizon_paths_per_pair must be >= 1.")
+        if self.horizon_path_expansion_budget < 1:
+            raise ValueError("horizon_path_expansion_budget must be >= 1.")
         if self.horizon_max_iterations < 0:
             raise ValueError("horizon_max_iterations must be >= 0.")
         if solver_threads is not None and int(solver_threads) < 1:
@@ -541,6 +457,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         horizon_probability_matrix: Optional[np.ndarray] = None,
         horizon: Optional[int] = None,
         horizon_node_mask: Optional[np.ndarray] = None,
+        _deadline_monotonic: Optional[float] = None,
     ) -> np.ndarray:
         if connectivity is None:
             connectivity = self.enforce_connectivity
@@ -572,8 +489,10 @@ class ConditionalNodeFieldGraphDecoder(object):
             horizon_negative_threshold=self.horizon_negative_threshold,
             horizon_pair_budget=self.horizon_pair_budget,
             horizon_paths_per_pair=self.horizon_paths_per_pair,
+            horizon_path_expansion_budget=self.horizon_path_expansion_budget,
             horizon_max_iterations=self.horizon_max_iterations,
             solver_threads=self.solver_threads,
+            deadline_monotonic=_deadline_monotonic,
         )
         self.last_adjacency_solve_report_ = report
         return adjacency
@@ -993,8 +912,20 @@ class ConditionalNodeFieldGraphDecoder(object):
                     )
                 mask = ~np.eye(n_nodes, dtype=bool)
                 predicted_probs_list.append(prob_matrix[mask])
-            else:
+            elif prob_matrix.ndim == 1:
+                expected_probability_count = n_nodes * (n_nodes - 1)
+                if prob_matrix.shape[0] != expected_probability_count:
+                    raise ValueError(
+                        "Flattened edge-probability vectors must contain exactly "
+                        f"n_nodes * (n_nodes - 1)={expected_probability_count} values; "
+                        f"received {prob_matrix.shape[0]} for n_nodes={n_nodes}."
+                    )
                 predicted_probs_list.append(prob_matrix)
+            else:
+                raise ValueError(
+                    "Edge-probability predictions must be square matrices or "
+                    f"one-dimensional flattened vectors; received shape {prob_matrix.shape}."
+                )
         if horizon_probability_matrices is None:
             horizon_probs_list = [None for _ in predicted_probs_list]
         else:
@@ -1032,6 +963,11 @@ class ConditionalNodeFieldGraphDecoder(object):
             configured_solver_timeout,
             timeout_seconds,
         )
+        deadline_monotonic = (
+            None
+            if timeout_seconds is None
+            else time.monotonic() + float(timeout_seconds)
+        )
         jobs = [
             (
                 np.asarray(predicted_probs_list[graph_idx], dtype=float),
@@ -1055,8 +991,10 @@ class ConditionalNodeFieldGraphDecoder(object):
                 float(self.horizon_negative_threshold),
                 int(self.horizon_pair_budget),
                 int(self.horizon_paths_per_pair),
+                int(self.horizon_path_expansion_budget),
                 int(self.horizon_max_iterations),
                 None if self.solver_threads is None else int(self.solver_threads),
+                deadline_monotonic,
             )
             for graph_idx in range(len(predicted_probs_list))
         ]
@@ -1066,18 +1004,19 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "Decoder plots for verbose>=4 are only shown when n_jobs=1; skipping plots during parallel adjacency decode.",
                 level=4,
             )
-        if self.n_jobs == 1 or len(jobs) <= 1:
-            if timeout_seconds is None:
-                results = [_decode_single_adjacency_job(*job) for job in jobs]
-            else:
-                results = [
-                    run_with_fork_timeout(
-                        _decode_single_adjacency_job_star,
-                        job,
-                        timeout_seconds=float(timeout_seconds),
-                    )
-                    for job in jobs
-                ]
+        if timeout_seconds is not None:
+            results = _parallel_map(
+                _decode_single_adjacency_job_star,
+                jobs,
+                self.n_jobs,
+                verbose=bool(self.verbose),
+                timeout_seconds=timeout_seconds,
+                timeout_fallback_label="parallel adjacency decode",
+                fallback_on_timeout=False,
+                deadline_monotonic=deadline_monotonic,
+            )
+        elif self.n_jobs == 1 or len(jobs) <= 1:
+            results = [_decode_single_adjacency_job(*job) for job in jobs]
         else:
             results = _parallel_map(
                 _decode_single_adjacency_job_star,
@@ -1485,6 +1424,7 @@ class ConditionalNodeFieldGraphDecoder(object):
                 "horizon_negative_threshold": self.horizon_negative_threshold,
                 "horizon_pair_budget": self.horizon_pair_budget,
                 "horizon_paths_per_pair": self.horizon_paths_per_pair,
+                "horizon_path_expansion_budget": self.horizon_path_expansion_budget,
                 "horizon_max_iterations": self.horizon_max_iterations,
                 "solver_threads": self.solver_threads,
             },
@@ -1506,6 +1446,8 @@ class ConditionalNodeFieldGraphDecoder(object):
                 )
             if hasattr(restored, "existence_threshold"):
                 delattr(restored, "existence_threshold")
+            if not hasattr(restored, "horizon_path_expansion_budget"):
+                restored.horizon_path_expansion_budget = 4096
             restored.last_adjacency_solve_report_ = None
             restored.last_adjacency_solve_reports_ = []
             return restored
@@ -1514,10 +1456,10 @@ class ConditionalNodeFieldGraphDecoder(object):
                 f"Unsupported decoder artifact type {artifact.get('artifact_type')!r} in {path}."
             )
         artifact_version = int(artifact.get("artifact_version", 0))
-        if artifact_version not in {1, _DECODER_ARTIFACT_VERSION}:
+        if artifact_version not in {1, 2, _DECODER_ARTIFACT_VERSION}:
             raise RuntimeError(
                 "Saved decoder artifact version is incompatible with this NodeField version. "
-                f"Expected v1 or v{_DECODER_ARTIFACT_VERSION}, found "
+                f"Expected v1, v2, or v{_DECODER_ARTIFACT_VERSION}, found "
                 f"v{artifact_version}: {path}"
             )
         config = artifact.get("config", {})
@@ -1541,6 +1483,10 @@ class ConditionalNodeFieldGraphDecoder(object):
             horizon_negative_threshold=config.get("horizon_negative_threshold", 0.2),
             horizon_pair_budget=config.get("horizon_pair_budget", 24),
             horizon_paths_per_pair=config.get("horizon_paths_per_pair", 8),
+            horizon_path_expansion_budget=config.get(
+                "horizon_path_expansion_budget",
+                4096,
+            ),
             horizon_max_iterations=config.get("horizon_max_iterations", 1),
             solver_threads=config.get("solver_threads", None),
         )
@@ -1610,6 +1556,10 @@ def decode_generated_nodes_with_oracle(
 ) -> List[Optional[nx.Graph]]:
     from .oracle_decode import decode_generated_nodes_with_oracle as decode_impl
 
+    if owner.graph_decoder is None:
+        owner.graph_decoder = ConditionalNodeFieldGraphDecoder(
+            verbose=bool(owner.verbose)
+        )
     return decode_impl(
         owner,
         generated_nodes,

@@ -643,8 +643,8 @@ class ConditionalNodeFieldGraphGenerator(object):
         if remaining is None:
             return default_seconds
         if default_seconds is None:
-            return max(1.0, remaining)
-        return max(1.0, min(float(default_seconds), remaining))
+            return remaining
+        return min(float(default_seconds), remaining)
 
     def _resolve_solver_threads(self) -> Optional[int]:
         graph_decoder = getattr(self, "graph_decoder", None)

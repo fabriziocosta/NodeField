@@ -1,6 +1,8 @@
 import io
 import json
 import os
+import multiprocessing as mp
+import time
 import types
 from concurrent.futures.process import BrokenProcessPool
 
@@ -44,6 +46,12 @@ from conditional_node_field_graph_generator.conditional_node_field_graph_decoder
 from conditional_node_field_graph_generator.oracle_utils import (
     enumerate_localized_edge_addition_proposals,
 )
+
+
+def _sleep_and_return(job):
+    delay, value = job
+    time.sleep(delay)
+    return value
 
 
 class _GraphVectorizer:
@@ -2621,7 +2629,8 @@ def test_horizon_positive_constraint_can_add_short_path():
         horizon_paths_per_pair=4,
         horizon_max_iterations=0,
     )
-    horizon_probs = np.zeros((3, 3), dtype=float)
+    horizon_probs = np.full((3, 3), 0.5, dtype=float)
+    np.fill_diagonal(horizon_probs, 0.0)
     horizon_probs[0, 2] = horizon_probs[2, 0] = 0.99
 
     adj = decoder.optimize_adjacency_matrix(
@@ -2642,6 +2651,9 @@ def test_horizon_positive_constraint_can_add_short_path():
 
     graph = nx.from_numpy_array(adj)
     assert nx.shortest_path_length(graph, 0, 2) <= 2
+    assert decoder.last_adjacency_solve_report_.horizon_termination_reason == "positive_only"
+    assert decoder.last_adjacency_solve_report_.horizon_path_expansion_count > 0
+    assert decoder.last_adjacency_solve_report_.horizon_path_search_truncated is False
 
 
 def test_horizon_negative_constraint_can_break_short_path():
@@ -2777,6 +2789,51 @@ def test_positive_horizon_paths_are_ranked_by_path_probability():
     assert [path for path, _score in paths] == [[0, 1, 2], [0, 2]]
 
 
+def test_positive_horizon_path_search_reports_expansion_truncation():
+    logits = np.zeros((5, 5), dtype=float)
+    paths, expansion_count, truncated = structural_decoder.enumerate_horizon_paths(
+        0,
+        4,
+        horizon=4,
+        edge_logit_matrix=logits,
+        paths_per_pair=3,
+        expansion_budget=1,
+        return_stats=True,
+    )
+
+    assert paths == []
+    assert expansion_count == 1
+    assert truncated is True
+
+
+def test_adjacency_report_records_horizon_path_search_truncation():
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        horizon_positive_threshold=0.8,
+        horizon_negative_threshold=0.1,
+        horizon_pair_budget=1,
+        horizon_paths_per_pair=2,
+        horizon_path_expansion_budget=1,
+        horizon_max_iterations=0,
+    )
+    horizon_probs = np.full((4, 4), 0.5, dtype=float)
+    np.fill_diagonal(horizon_probs, 0.0)
+    horizon_probs[0, 3] = horizon_probs[3, 0] = 0.99
+
+    decoder.optimize_adjacency_matrix(
+        np.full((4, 4), 0.5, dtype=float) - np.eye(4) * 0.5,
+        [0, 0, 0, 0],
+        connectivity=False,
+        horizon_probability_matrix=horizon_probs,
+        horizon=3,
+    )
+
+    report = decoder.last_adjacency_solve_report_
+    assert report.horizon_path_search_truncated is True
+    assert report.horizon_path_expansion_count == 1
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -2805,9 +2862,144 @@ def test_optimize_adjacency_matrix_rejects_invalid_probabilities(invalid_value):
         decoder.optimize_adjacency_matrix(probabilities, [1, 1])
 
 
+@pytest.mark.parametrize("invalid_value", [-1.0, 2.0, float("nan")])
+def test_optimize_adjacency_matrix_rejects_non_binary_integer_incumbents(
+    monkeypatch,
+    invalid_value,
+):
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+
+    def _fake_solve(self, solver):
+        del solver
+        self.status = pulp.LpStatusOptimal
+        self.sol_status = pulp.LpSolutionIntegerFeasible
+        for variable in self.variables():
+            if variable.name == "x_0_1":
+                variable.varValue = invalid_value
+            else:
+                variable.varValue = 0.0
+        return self.status
+
+    monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
+    with pytest.raises(RuntimeError):
+        decoder.optimize_adjacency_matrix(
+            np.asarray([[0.0, 0.9], [0.9, 0.0]]),
+            [0, 0],
+            connectivity=False,
+        )
+
+
+def test_optimize_adjacency_matrix_rejects_missing_slack_values(monkeypatch):
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+    )
+
+    def _fake_solve(self, solver):
+        del solver
+        self.status = pulp.LpStatusOptimal
+        self.sol_status = pulp.LpSolutionIntegerFeasible
+        for variable in self.variables():
+            if variable.name == "x_0_1":
+                variable.varValue = 0.0
+        return self.status
+
+    monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
+    with pytest.raises(RuntimeError, match="slack"):
+        decoder.optimize_adjacency_matrix(
+            np.asarray([[0.0, 0.9], [0.9, 0.0]]),
+            [0, 0],
+            connectivity=False,
+        )
+
+
+def test_adjacency_report_omits_non_finite_objective(monkeypatch):
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+    )
+    original_value = pulp.value
+
+    def _fake_solve(self, solver):
+        del solver
+        self.status = pulp.LpStatusOptimal
+        self.sol_status = pulp.LpSolutionOptimal
+        for variable in self.variables():
+            variable.varValue = 0.0
+        return self.status
+
+    def _fake_value(value):
+        if isinstance(value, pulp.LpAffineExpression):
+            return float("nan")
+        return original_value(value)
+
+    monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
+    monkeypatch.setattr(pulp, "value", _fake_value)
+
+    decoder.optimize_adjacency_matrix(
+        np.asarray([[0.0, 0.9], [0.9, 0.0]]),
+        [0, 0],
+        connectivity=False,
+    )
+
+    assert decoder.last_adjacency_solve_report_.objective_value is None
+
+
+@pytest.mark.parametrize("shape", [(1,), (3,), (2, 2, 1)])
+def test_decode_adjacency_matrix_rejects_malformed_flattened_probabilities(shape):
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        parallel_decode_timeout_seconds=None,
+    )
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[1.0, 1.0]], dtype=float),
+    )
+    values = np.full(shape, 0.5, dtype=float)
+    with pytest.raises(ValueError, match="probability"):
+        decoder.decode_adjacency_matrix(
+            generated_nodes,
+            predicted_edge_probability_matrices=[values],
+        )
+
+
 def test_parent_timeout_reserves_solver_shutdown_time():
     solver_budget = decoder_module._solver_budget_with_parent_reserve(60.0, 2.0)
     assert 0.0 < solver_budget < 2.0
+
+
+def test_timed_parallel_map_terminates_running_workers():
+    before = {process.pid for process in mp.active_children()}
+    with pytest.raises(TimeoutError):
+        parallel_utils._parallel_map(
+            _sleep_and_return,
+            [(2.0, 1), (2.0, 2)],
+            max_workers=2,
+            timeout_seconds=0.1,
+            timeout_fallback_label="test work",
+            fallback_on_timeout=False,
+        )
+    time.sleep(0.1)
+    leaked = [
+        process
+        for process in mp.active_children()
+        if process.pid not in before and process.is_alive()
+    ]
+    assert leaked == []
+
+
+def test_timed_serial_map_uses_one_batch_deadline():
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        parallel_utils._parallel_map(
+            _sleep_and_return,
+            [(0.08, 1), (0.08, 2)],
+            max_workers=1,
+            timeout_seconds=0.12,
+            timeout_fallback_label="serial test work",
+            fallback_on_timeout=False,
+        )
+    assert time.monotonic() - started < 0.5
 
 
 def test_decoder_direct_mode_attaches_labels_and_bypasses_optimizer(monkeypatch):
@@ -3327,6 +3519,7 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
         horizon_negative_threshold=0.15,
         horizon_pair_budget=12,
         horizon_paths_per_pair=5,
+        horizon_path_expansion_budget=123,
         horizon_max_iterations=2,
     )
     path = tmp_path / "decoder.json"
@@ -3348,7 +3541,11 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
     assert restored.horizon_negative_threshold == pytest.approx(0.15)
     assert restored.horizon_pair_budget == 12
     assert restored.horizon_paths_per_pair == 5
+    assert restored.horizon_path_expansion_budget == 123
     assert restored.horizon_max_iterations == 2
+
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    assert artifact["artifact_version"] == 3
 
 
 def test_decoder_load_migrates_v1_threshold_name(tmp_path):
@@ -3371,6 +3568,25 @@ def test_decoder_load_migrates_v1_threshold_name(tmp_path):
 
     assert restored.direct_edge_probability_threshold == pytest.approx(0.73)
     assert not hasattr(restored, "existence_threshold")
+    assert restored.horizon_path_expansion_budget == 4096
+
+
+def test_decoder_load_migrates_v2_path_expansion_budget(tmp_path):
+    path = tmp_path / "decoder-v2.json"
+    path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "ConditionalNodeFieldGraphDecoder",
+                "artifact_version": 2,
+                "config": {"verbose": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored = ConditionalNodeFieldGraphDecoder().load(str(path))
+
+    assert restored.horizon_path_expansion_budget == 4096
 
 
 def test_decoder_load_supports_legacy_dill_artifact(tmp_path):

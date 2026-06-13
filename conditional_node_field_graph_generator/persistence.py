@@ -154,6 +154,7 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
             ("horizon_negative_threshold", 0.2),
             ("horizon_pair_budget", 24),
             ("horizon_paths_per_pair", 8),
+            ("horizon_path_expansion_budget", 4096),
             ("horizon_max_iterations", 1),
             ("last_adjacency_solve_report_", None),
             ("last_adjacency_solve_reports_", []),

@@ -351,7 +351,8 @@ to the adjacency MILP.
 
 For positive horizon pairs, the decoder uses deterministic best-first
 enumeration of simple paths of length at most `K`, ranked by the product of
-their direct-edge probabilities. It then adds binary
+their direct-edge probabilities. Enumeration is bounded by
+`horizon_path_expansion_budget`; truncation is soft and reported. It then adds binary
 path activation variables and a pair slack variable so the ILP is rewarded for
 realizing at least one short path without making the problem infeasible.
 

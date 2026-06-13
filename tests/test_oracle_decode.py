@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from pathlib import Path
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
 import conditional_node_field_graph_generator.oracle_decode as oracle_decode_module
@@ -87,3 +88,8 @@ def test_graph_generator_oracle_adapter_dispatches_to_extracted_helper(monkeypat
 
     assert result == ["decoded"]
     assert calls == [(generator, "generated", "conditioning")]
+
+
+def test_oracle_module_does_not_import_decoder_facade():
+    source = Path(oracle_decode_module.__file__).read_text(encoding="utf-8")
+    assert "conditional_node_field_graph_decoder import" not in source

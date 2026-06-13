@@ -36,6 +36,8 @@ class AdjacencySolveReport:
     degree_slack_total: float = 0.0
     edge_count_slack: float = 0.0
     unresolved_horizon_pair_count: int = 0
+    horizon_path_search_truncated: bool = False
+    horizon_path_expansion_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -114,12 +116,15 @@ def enumerate_horizon_paths(
     horizon: int,
     edge_logit_matrix: np.ndarray,
     paths_per_pair: int,
-) -> list[tuple[list[int], float]]:
+    expansion_budget: int = 4096,
+    deadline_monotonic: Optional[float] = None,
+    return_stats: bool = False,
+):
     max_paths = max(1, int(paths_per_pair))
     n_nodes = int(edge_logit_matrix.shape[0])
     source, target = int(source), int(target)
     if source == target or not (0 <= source < n_nodes and 0 <= target < n_nodes):
-        return []
+        return ([], 0, False) if return_stats else []
 
     def edge_cost(i: int, j: int) -> float:
         logit = float(edge_logit_matrix[i, j])
@@ -127,8 +132,17 @@ def enumerate_horizon_paths(
 
     queue: list[tuple[float, tuple[int, ...]]] = [(0.0, (source,))]
     paths: list[tuple[list[int], float]] = []
+    expansion_count = 0
+    truncated = False
     while queue and len(paths) < max_paths:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            truncated = True
+            break
+        if expansion_count >= int(expansion_budget):
+            truncated = True
+            break
         cost, path = heapq.heappop(queue)
+        expansion_count += 1
         current = path[-1]
         if current == target:
             score = sum(
@@ -147,6 +161,8 @@ def enumerate_horizon_paths(
                 queue,
                 (cost + edge_cost(current, neighbor), next_path),
             )
+    if return_stats:
+        return paths, expansion_count, truncated
     return paths
 
 
@@ -157,6 +173,17 @@ def _validate_probability_matrix(matrix: np.ndarray, name: str) -> np.ndarray:
     if np.any(values < 0.0) or np.any(values > 1.0):
         raise ValueError(f"{name} values must be within [0, 1].")
     return values
+
+
+def _validated_slack_total(values, label: str) -> float:
+    if any(
+        value is None or not np.isfinite(value) or float(value) < -_BINARY_TOLERANCE
+        for value in values
+    ):
+        raise RuntimeError(
+            f"Adjacency incumbent contains invalid {label} slack values."
+        )
+    return float(sum(float(value) for value in values))
 
 
 def find_negative_horizon_cuts(
@@ -276,6 +303,10 @@ def _validate_adjacency(
     rounded = np.rint(adjacency)
     if not np.allclose(adjacency, rounded, atol=_BINARY_TOLERANCE):
         raise RuntimeError("Adjacency incumbent contains fractional edge values.")
+    if not np.all(np.isfinite(adjacency)):
+        raise RuntimeError("Adjacency incumbent contains non-finite edge values.")
+    if np.any(rounded < 0.0) or np.any(rounded > 1.0):
+        raise RuntimeError("Adjacency incumbent contains edge values outside {0, 1}.")
     adjacency = rounded.astype(int)
     n_nodes = adjacency.shape[0]
     if connectivity and n_nodes >= 2 and not nx.is_connected(nx.from_numpy_array(adjacency)):
@@ -309,10 +340,29 @@ def solve_adjacency(
     horizon_negative_threshold: float = 0.2,
     horizon_pair_budget: int = 24,
     horizon_paths_per_pair: int = 8,
+    horizon_path_expansion_budget: int = 4096,
     horizon_max_iterations: int = 1,
     solver_threads: Optional[int] = None,
+    deadline_monotonic: Optional[float] = None,
 ) -> tuple[np.ndarray, AdjacencySolveReport]:
     started_at = time.monotonic()
+    if deadline_monotonic is None and time_limit_seconds is not None:
+        deadline_monotonic = started_at + float(time_limit_seconds)
+    elif deadline_monotonic is not None and time_limit_seconds is not None:
+        deadline_monotonic = min(
+            float(deadline_monotonic),
+            started_at + float(time_limit_seconds),
+        )
+
+    def check_deadline(stage: str) -> Optional[float]:
+        if deadline_monotonic is None:
+            return None
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError(
+                f"Adjacency solve exhausted its shared time budget during {stage}."
+            )
+        return remaining
     if not np.isfinite(alpha) or float(alpha) <= 0.0:
         raise ValueError("alpha must be finite and > 0.")
     if not np.isfinite(degree_slack_penalty) or float(degree_slack_penalty) <= 0.0:
@@ -352,10 +402,13 @@ def solve_adjacency(
         raise ValueError("horizon_pair_budget must be >= 0.")
     if int(horizon_paths_per_pair) < 1:
         raise ValueError("horizon_paths_per_pair must be >= 1.")
+    if int(horizon_path_expansion_budget) < 1:
+        raise ValueError("horizon_path_expansion_budget must be >= 1.")
     if int(horizon_max_iterations) < 0:
         raise ValueError("horizon_max_iterations must be >= 0.")
     if solver_threads is not None and int(solver_threads) < 1:
         raise ValueError("solver_threads must be >= 1 when provided.")
+    check_deadline("active-node projection")
     (
         active_indices,
         local_prob_matrix,
@@ -397,6 +450,7 @@ def solve_adjacency(
 
     if alpha != 1.0:
         local_prob_matrix = np.power(local_prob_matrix, alpha)
+    check_deadline("probability preprocessing")
     edge_logit_matrix = np.zeros((n_active, n_active), dtype=float)
     for i in range(n_active):
         for j in range(i + 1, n_active):
@@ -420,6 +474,25 @@ def solve_adjacency(
     else:
         positive_pairs, negative_pairs = [], []
 
+    positive_path_sets = []
+    horizon_path_expansion_count = 0
+    horizon_path_search_truncated = False
+    for pair in positive_pairs:
+        check_deadline("horizon path enumeration")
+        paths, expansion_count, truncated = enumerate_horizon_paths(
+            pair[0],
+            pair[1],
+            horizon=int(horizon),
+            edge_logit_matrix=edge_logit_matrix,
+            paths_per_pair=horizon_paths_per_pair,
+            expansion_budget=horizon_path_expansion_budget,
+            deadline_monotonic=deadline_monotonic,
+            return_stats=True,
+        )
+        horizon_path_expansion_count += expansion_count
+        horizon_path_search_truncated = horizon_path_search_truncated or truncated
+        positive_path_sets.append((pair, paths))
+
     solve_count = 0
     last_status_code = pulp.LpStatusNotSolved
     last_solution_status_code = pulp.LpSolutionNoSolutionFound
@@ -430,11 +503,7 @@ def solve_adjacency(
     def solve_once(negative_cuts, solve_name: str) -> np.ndarray:
         nonlocal solve_count, last_status_code, last_solution_status_code
         nonlocal last_objective_value, last_degree_slack_total, last_edge_count_slack
-        remaining = None
-        if time_limit_seconds is not None:
-            remaining = float(time_limit_seconds) - (time.monotonic() - started_at)
-            if remaining <= 0.0:
-                raise TimeoutError("Adjacency solve exhausted its shared time budget.")
+        check_deadline("MILP construction")
 
         problem = pulp.LpProblem(solve_name, pulp.LpMaximize)
         x = {
@@ -507,14 +576,9 @@ def solve_adjacency(
                 pulp.lpSum(x[edge] for edge in edge_set) <= len(edge_set) - 1
             ), f"ForbiddenMotif_{cut_idx}"
 
-        for pair_idx, (i, j, _probability, confidence) in enumerate(positive_pairs):
-            paths = enumerate_horizon_paths(
-                i,
-                j,
-                horizon=int(horizon),
-                edge_logit_matrix=edge_logit_matrix,
-                paths_per_pair=horizon_paths_per_pair,
-            )
+        for pair_idx, ((i, j, _probability, confidence), paths) in enumerate(
+            positive_path_sets
+        ):
             if not paths:
                 continue
             slack = pulp.LpVariable(
@@ -565,8 +629,9 @@ def solve_adjacency(
                 variable.start = 1 if tree.has_edge(i, j) else 0
 
         solver_kwargs: dict[str, Any] = {"msg": verbose}
+        remaining = check_deadline("CBC solve")
         if remaining is not None:
-            solver_kwargs["timeLimit"] = max(0.01, remaining)
+            solver_kwargs["timeLimit"] = remaining
         if solver_threads is not None:
             solver_kwargs["threads"] = max(1, int(solver_threads))
         solve_count += 1
@@ -616,20 +681,28 @@ def solve_adjacency(
         )
         objective_value = pulp.value(problem.objective)
         last_objective_value = (
-            None if objective_value is None else float(objective_value)
+            None
+            if objective_value is None or not np.isfinite(objective_value)
+            else float(objective_value)
         )
-        last_degree_slack_total = float(
-            sum(
-                float(pulp.value(degree_under[i]) or 0.0)
-                + float(pulp.value(degree_over[i]) or 0.0)
-                for i in range(n_active)
-            )
-        )
+        degree_slack_values = [
+            pulp.value(variable)
+            for i in range(n_active)
+            for variable in (degree_under[i], degree_over[i])
+        ]
+        if any(
+            value is None or not np.isfinite(value) or float(value) < -_BINARY_TOLERANCE
+            for value in degree_slack_values
+        ):
+            raise RuntimeError("Adjacency incumbent contains invalid degree slack values.")
+        last_degree_slack_total = float(sum(float(value) for value in degree_slack_values))
         last_edge_count_slack = (
             0.0
             if count_under is None or count_over is None
-            else float(pulp.value(count_under) or 0.0)
-            + float(pulp.value(count_over) or 0.0)
+            else _validated_slack_total(
+                (pulp.value(count_under), pulp.value(count_over)),
+                "edge-count",
+            )
         )
         return np.rint(adjacency).astype(int)
 
@@ -637,7 +710,12 @@ def solve_adjacency(
     adjacency = solve_once(negative_cuts, "AdjacencyMatrixOptimization")
     horizon_iterations = 0
     seen_negative_cuts: set[frozenset[Edge]] = set()
-    horizon_termination_reason = "not_enabled" if not negative_pairs else "iteration_limit"
+    if negative_pairs:
+        horizon_termination_reason = "iteration_limit"
+    elif positive_pairs:
+        horizon_termination_reason = "positive_only"
+    else:
+        horizon_termination_reason = "not_enabled"
     for iteration in range(max(0, int(horizon_max_iterations))):
         discovered = find_negative_horizon_cuts(
             adjacency,
@@ -701,5 +779,7 @@ def solve_adjacency(
         degree_slack_total=last_degree_slack_total,
         edge_count_slack=last_edge_count_slack,
         unresolved_horizon_pair_count=unresolved_horizon_pair_count,
+        horizon_path_search_truncated=horizon_path_search_truncated,
+        horizon_path_expansion_count=horizon_path_expansion_count,
     )
     return full_adjacency, report
