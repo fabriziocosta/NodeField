@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, Optional, Sequence
@@ -29,6 +30,12 @@ class AdjacencySolveReport:
     active_node_count: int
     solve_count: int
     horizon_iterations: int
+    solver_termination_reason: str = "unknown"
+    horizon_termination_reason: str = "not_enabled"
+    objective_value: Optional[float] = None
+    degree_slack_total: float = 0.0
+    edge_count_slack: float = 0.0
+    unresolved_horizon_pair_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -109,40 +116,47 @@ def enumerate_horizon_paths(
     paths_per_pair: int,
 ) -> list[tuple[list[int], float]]:
     max_paths = max(1, int(paths_per_pair))
-    max_candidates = max_paths * 16
-    nodes = set(range(edge_logit_matrix.shape[0]))
-    ordered_neighbors = {
-        node: sorted(
-            (candidate for candidate in nodes if candidate != node),
-            key=lambda candidate: (-float(edge_logit_matrix[node, candidate]), candidate),
-        )
-        for node in nodes
-    }
-    candidates: list[tuple[list[int], float]] = []
+    n_nodes = int(edge_logit_matrix.shape[0])
+    source, target = int(source), int(target)
+    if source == target or not (0 <= source < n_nodes and 0 <= target < n_nodes):
+        return []
 
-    def walk(path: list[int], visited: set[int]) -> None:
-        if len(candidates) >= max_candidates:
-            return
+    def edge_cost(i: int, j: int) -> float:
+        logit = float(edge_logit_matrix[i, j])
+        return float(np.logaddexp(0.0, -logit))
+
+    queue: list[tuple[float, tuple[int, ...]]] = [(0.0, (source,))]
+    paths: list[tuple[list[int], float]] = []
+    while queue and len(paths) < max_paths:
+        cost, path = heapq.heappop(queue)
         current = path[-1]
         if current == target:
             score = sum(
                 float(edge_logit_matrix[path[idx], path[idx + 1]])
                 for idx in range(len(path) - 1)
             )
-            candidates.append((list(path), score))
-            return
+            paths.append((list(path), score))
+            continue
         if len(path) - 1 >= int(horizon):
-            return
-        for neighbor in ordered_neighbors[current]:
-            if neighbor in visited:
+            continue
+        for neighbor in range(n_nodes):
+            if neighbor == current or neighbor in path:
                 continue
-            walk(path + [neighbor], visited | {neighbor})
-            if len(candidates) >= max_candidates:
-                return
+            next_path = path + (neighbor,)
+            heapq.heappush(
+                queue,
+                (cost + edge_cost(current, neighbor), next_path),
+            )
+    return paths
 
-    walk([int(source)], {int(source)})
-    candidates.sort(key=lambda item: (-item[1], len(item[0]), item[0]))
-    return candidates[:max_paths]
+
+def _validate_probability_matrix(matrix: np.ndarray, name: str) -> np.ndarray:
+    values = np.asarray(matrix, dtype=float)
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must contain only finite values.")
+    if np.any(values < 0.0) or np.any(values > 1.0):
+        raise ValueError(f"{name} values must be within [0, 1].")
+    return values
 
 
 def find_negative_horizon_cuts(
@@ -169,6 +183,23 @@ def find_negative_horizon_cuts(
     return cuts
 
 
+def count_negative_horizon_violations(
+    adjacency: np.ndarray,
+    negative_pairs: Sequence[tuple[int, int, float, float]],
+    *,
+    horizon: int,
+) -> int:
+    graph = nx.from_numpy_array(np.asarray(adjacency, dtype=int))
+    violation_count = 0
+    for i, j, _probability, _confidence in negative_pairs:
+        try:
+            if nx.shortest_path_length(graph, int(i), int(j)) <= int(horizon):
+                violation_count += 1
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            continue
+    return violation_count
+
+
 def _project_problem_to_active_nodes(
     prob_matrix: np.ndarray,
     target_degrees: Sequence[int],
@@ -176,7 +207,7 @@ def _project_problem_to_active_nodes(
     forbidden_edge_sets: Optional[Iterable[Iterable[Sequence[Any]]]],
     horizon_probability_matrix: Optional[np.ndarray],
 ):
-    full_prob_matrix = np.asarray(prob_matrix, dtype=float)
+    full_prob_matrix = _validate_probability_matrix(prob_matrix, "prob_matrix")
     n_slots = full_prob_matrix.shape[0]
     if full_prob_matrix.shape != (n_slots, n_slots):
         raise ValueError("prob_matrix must be square.")
@@ -211,7 +242,10 @@ def _project_problem_to_active_nodes(
 
     local_horizon = None
     if horizon_probability_matrix is not None:
-        horizon_matrix = np.asarray(horizon_probability_matrix, dtype=float)
+        horizon_matrix = _validate_probability_matrix(
+            horizon_probability_matrix,
+            "horizon_probability_matrix",
+        )
         if horizon_matrix.shape != (n_slots, n_slots):
             raise ValueError(
                 "horizon_probability_matrix must align with prob_matrix; "
@@ -279,6 +313,49 @@ def solve_adjacency(
     solver_threads: Optional[int] = None,
 ) -> tuple[np.ndarray, AdjacencySolveReport]:
     started_at = time.monotonic()
+    if not np.isfinite(alpha) or float(alpha) <= 0.0:
+        raise ValueError("alpha must be finite and > 0.")
+    if not np.isfinite(degree_slack_penalty) or float(degree_slack_penalty) <= 0.0:
+        raise ValueError("degree_slack_penalty must be finite and > 0.")
+    if edge_count_slack_penalty is not None and (
+        not np.isfinite(edge_count_slack_penalty)
+        or float(edge_count_slack_penalty) <= 0.0
+    ):
+        raise ValueError("edge_count_slack_penalty must be finite and > 0 when provided.")
+    if time_limit_seconds is not None and (
+        not np.isfinite(time_limit_seconds) or float(time_limit_seconds) <= 0.0
+    ):
+        raise ValueError("time_limit_seconds must be finite and > 0 when provided.")
+    target_degree_values = np.asarray(target_degrees, dtype=float)
+    if not np.all(np.isfinite(target_degree_values)) or np.any(target_degree_values < 0.0):
+        raise ValueError("target_degrees must contain finite nonnegative values.")
+    if target_edge_count is not None and int(target_edge_count) < 0:
+        raise ValueError("target_edge_count must be >= 0 when provided.")
+    if horizon is not None and int(horizon) < 1:
+        raise ValueError("horizon must be >= 1 when provided.")
+    if (
+        not np.isfinite(horizon_constraint_weight)
+        or float(horizon_constraint_weight) < 0.0
+    ):
+        raise ValueError("horizon_constraint_weight must be finite and >= 0.")
+    for value, name in (
+        (horizon_positive_threshold, "horizon_positive_threshold"),
+        (horizon_negative_threshold, "horizon_negative_threshold"),
+    ):
+        if not np.isfinite(value) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{name} must be within [0, 1].")
+    if float(horizon_negative_threshold) > float(horizon_positive_threshold):
+        raise ValueError(
+            "horizon_negative_threshold must be <= horizon_positive_threshold."
+        )
+    if int(horizon_pair_budget) < 0:
+        raise ValueError("horizon_pair_budget must be >= 0.")
+    if int(horizon_paths_per_pair) < 1:
+        raise ValueError("horizon_paths_per_pair must be >= 1.")
+    if int(horizon_max_iterations) < 0:
+        raise ValueError("horizon_max_iterations must be >= 0.")
+    if solver_threads is not None and int(solver_threads) < 1:
+        raise ValueError("solver_threads must be >= 1 when provided.")
     (
         active_indices,
         local_prob_matrix,
@@ -313,6 +390,8 @@ def solve_adjacency(
             active_node_count=n_active,
             solve_count=0,
             horizon_iterations=0,
+            solver_termination_reason="trivial",
+            horizon_termination_reason="not_enabled",
         )
         return adjacency, report
 
@@ -344,9 +423,13 @@ def solve_adjacency(
     solve_count = 0
     last_status_code = pulp.LpStatusNotSolved
     last_solution_status_code = pulp.LpSolutionNoSolutionFound
+    last_objective_value: Optional[float] = None
+    last_degree_slack_total = 0.0
+    last_edge_count_slack = 0.0
 
     def solve_once(negative_cuts, solve_name: str) -> np.ndarray:
         nonlocal solve_count, last_status_code, last_solution_status_code
+        nonlocal last_objective_value, last_degree_slack_total, last_edge_count_slack
         remaining = None
         if time_limit_seconds is not None:
             remaining = float(time_limit_seconds) - (time.monotonic() - started_at)
@@ -381,6 +464,8 @@ def solve_adjacency(
                 == local_target_degrees[i]
             ), f"Degree_{i}"
 
+        count_under = None
+        count_over = None
         if resolved_edge_count is not None:
             if edge_count_slack_penalty is None:
                 problem += pulp.lpSum(x.values()) == resolved_edge_count, "EdgeCount"
@@ -529,12 +614,30 @@ def solve_adjacency(
             ),
             forbidden_edge_sets=local_forbidden_sets,
         )
+        objective_value = pulp.value(problem.objective)
+        last_objective_value = (
+            None if objective_value is None else float(objective_value)
+        )
+        last_degree_slack_total = float(
+            sum(
+                float(pulp.value(degree_under[i]) or 0.0)
+                + float(pulp.value(degree_over[i]) or 0.0)
+                for i in range(n_active)
+            )
+        )
+        last_edge_count_slack = (
+            0.0
+            if count_under is None or count_over is None
+            else float(pulp.value(count_under) or 0.0)
+            + float(pulp.value(count_over) or 0.0)
+        )
         return np.rint(adjacency).astype(int)
 
     negative_cuts: list[tuple[list[Edge], float]] = []
     adjacency = solve_once(negative_cuts, "AdjacencyMatrixOptimization")
     horizon_iterations = 0
     seen_negative_cuts: set[frozenset[Edge]] = set()
+    horizon_termination_reason = "not_enabled" if not negative_pairs else "iteration_limit"
     for iteration in range(max(0, int(horizon_max_iterations))):
         discovered = find_negative_horizon_cuts(
             adjacency,
@@ -548,13 +651,30 @@ def solve_adjacency(
                 seen_negative_cuts.add(frozen)
                 new_cuts.append((edges, confidence))
         if not new_cuts:
+            horizon_termination_reason = (
+                "satisfied" if not discovered else "no_new_cuts"
+            )
             break
         negative_cuts.extend(new_cuts)
         horizon_iterations = iteration + 1
-        adjacency = solve_once(
-            negative_cuts,
-            f"AdjacencyMatrixOptimizationHorizonRepair{horizon_iterations}",
-        )
+        try:
+            adjacency = solve_once(
+                negative_cuts,
+                f"AdjacencyMatrixOptimizationHorizonRepair{horizon_iterations}",
+            )
+        except TimeoutError:
+            horizon_termination_reason = "time_budget_exhausted"
+            break
+
+    unresolved_horizon_pair_count = count_negative_horizon_violations(
+        adjacency,
+        negative_pairs,
+        horizon=int(horizon) if horizon is not None else 0,
+    )
+    if negative_pairs and unresolved_horizon_pair_count == 0:
+        horizon_termination_reason = "satisfied"
+    elif negative_pairs and horizon_termination_reason == "satisfied":
+        horizon_termination_reason = "no_new_cuts"
 
     full_adjacency = np.zeros((n_slots, n_slots), dtype=int)
     full_adjacency[np.ix_(active_indices, active_indices)] = adjacency
@@ -573,5 +693,13 @@ def solve_adjacency(
         active_node_count=n_active,
         solve_count=solve_count,
         horizon_iterations=horizon_iterations,
+        solver_termination_reason=(
+            "optimal" if optimal else "integer_feasible"
+        ),
+        horizon_termination_reason=horizon_termination_reason,
+        objective_value=last_objective_value,
+        degree_slack_total=last_degree_slack_total,
+        edge_count_slack=last_edge_count_slack,
+        unresolved_horizon_pair_count=unresolved_horizon_pair_count,
     )
     return full_adjacency, report

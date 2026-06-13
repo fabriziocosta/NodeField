@@ -74,24 +74,24 @@ def select_degree_aware(
         selected_degrees[j] += 1
 
     while len(selected_edges) > target_edge_count:
-        removable_idx = None
-        for edge_idx in sorted(
-            range(len(selected_edges)),
-            key=lambda idx: (
-                selected_edges[idx][0],
-                -selected_edges[idx][1],
-                -selected_edges[idx][2],
-            ),
-        ):
-            _probability, i, j = selected_edges[edge_idx]
-            if (
-                selected_degrees[i] - 1 >= target_degrees[i]
-                and selected_degrees[j] - 1 >= target_degrees[j]
-            ):
-                removable_idx = edge_idx
-                break
-        if removable_idx is None:
-            break
+        def removal_key(edge_idx):
+            probability, i, j = selected_edges[edge_idx]
+            current_error = (
+                abs(int(selected_degrees[i]) - int(target_degrees[i]))
+                + abs(int(selected_degrees[j]) - int(target_degrees[j]))
+            )
+            removed_error = (
+                abs(int(selected_degrees[i]) - 1 - int(target_degrees[i]))
+                + abs(int(selected_degrees[j]) - 1 - int(target_degrees[j]))
+            )
+            return (
+                removed_error - current_error,
+                probability,
+                -i,
+                -j,
+            )
+
+        removable_idx = min(range(len(selected_edges)), key=removal_key)
         _probability, i, j = selected_edges.pop(removable_idx)
         selected_degrees[i] -= 1
         selected_degrees[j] -= 1
@@ -101,14 +101,39 @@ def select_degree_aware(
         return selected_edges
 
     selected_keys = {(i, j) for _, i, j in selected_edges}
-    for edge in sorted(edge_by_key.values(), key=lambda item: (-item[0], item[1], item[2])):
+    while len(selected_edges) < target_edge_count:
+        remaining_edges = [
+            edge
+            for key, edge in edge_by_key.items()
+            if key not in selected_keys
+        ]
+        if not remaining_edges:
+            break
+
+        def addition_key(edge):
+            probability, i, j = edge
+            current_error = (
+                abs(int(selected_degrees[i]) - int(target_degrees[i]))
+                + abs(int(selected_degrees[j]) - int(target_degrees[j]))
+            )
+            added_error = (
+                abs(int(selected_degrees[i]) + 1 - int(target_degrees[i]))
+                + abs(int(selected_degrees[j]) + 1 - int(target_degrees[j]))
+            )
+            return (
+                added_error - current_error,
+                -probability,
+                i,
+                j,
+            )
+
+        edge = min(remaining_edges, key=addition_key)
         key = (edge[1], edge[2])
-        if key in selected_keys:
-            continue
         selected_edges.append(edge)
         selected_keys.add(key)
-        if len(selected_edges) >= target_edge_count:
-            break
+        selected_degrees[edge[1]] += 1
+        selected_degrees[edge[2]] += 1
+    selected_edges.sort(key=lambda item: (-item[0], item[1], item[2]))
     return selected_edges
 
 

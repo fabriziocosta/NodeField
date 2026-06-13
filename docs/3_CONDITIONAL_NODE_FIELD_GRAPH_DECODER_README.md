@@ -22,7 +22,7 @@ The public class is a façade over focused implementation modules:
   incumbent validation, and solve reports,
 - `direct_graph_decoder.py` owns non-MILP edge selection,
 - `decoder_assembly.py` owns label validation and final graph assembly,
-- `oracle_decode.py` exposes oracle-guided decode entry points.
+- `oracle_decode.py` owns oracle-guided decode orchestration.
 
 The graph generator orchestrates around that decoder in
 [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py),
@@ -83,7 +83,9 @@ that mode, the final fallback or rejection behavior is controlled by
 Direct structural decoding is intentionally factored as its own strategy: it
 selects top-k edges when desired edge counts are available and thresholded edges
 otherwise. It still uses the same node-presence resolution, edge-label assembly,
-and graph construction path as ILP decoding.
+and graph construction path as ILP decoding. Degree-aware direct selection
+always reconciles its candidates to the requested feasible edge count; degree
+matching is secondary when the two disagree.
 
 ```mermaid
 flowchart LR
@@ -347,15 +349,17 @@ When auxiliary locality supervision is active, the node generator predicts
 scores, keeps only high-confidence active-node pairs, and adds soft constraints
 to the adjacency MILP.
 
-For positive horizon pairs, the decoder enumerates a small set of candidate
-paths of length at most `K`, ranked by direct-edge logits. It then adds binary
+For positive horizon pairs, the decoder uses deterministic best-first
+enumeration of simple paths of length at most `K`, ranked by the product of
+their direct-edge probabilities. It then adds binary
 path activation variables and a pair slack variable so the ILP is rewarded for
 realizing at least one short path without making the problem infeasible.
 
 For negative horizon pairs, the decoder first solves the ordinary/positive
 augmented MILP, detects realized short paths that contradict low horizon
-probabilities, adds soft path-breaking cuts, and re-solves within the configured
-iteration budget.
+probabilities, adds soft path-breaking cuts, and re-solves until convergence,
+iteration exhaustion, or expiration of the shared time budget. Unresolved pairs
+remain soft and are returned with an explicit solve-report count.
 
 This is enabled by default on the decoder, but it only activates when
 `GeneratedNodeBatch.horizon_probability_matrices` is present and

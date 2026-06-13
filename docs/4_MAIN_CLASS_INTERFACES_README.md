@@ -802,6 +802,14 @@ Parameters:
   Increase: higher throughput on CPU-bound decode workloads.
   Decrease: lower CPU usage and simpler debugging.
 
+- `adjacency_time_limit_seconds`
+  CBC solver budget for one adjacency problem. With a parent decode timeout,
+  CBC receives the smaller budget after reserving worker-shutdown time.
+
+- `parallel_decode_timeout_seconds`
+  Authoritative wall-clock deadline for adjacency decode. Parallel batches use
+  one shared deadline rather than granting the full timeout to every future.
+
 - `diagnostic_graph_renderer`
   Optional callable used by high-verbosity notebook workflows to render decoded
   graphs alongside decoder diagnostics.
@@ -826,7 +834,8 @@ Parameters:
   Maximum number of high-confidence horizon pairs considered per graph.
 
 - `horizon_paths_per_pair`
-  Maximum number of candidate short paths enumerated for each positive pair.
+  Maximum number of probability-ranked bounded simple paths retained for each
+  positive pair.
 
 - `horizon_max_iterations`
   Maximum number of negative-horizon separation rounds. Each round discovers
@@ -835,9 +844,9 @@ Parameters:
 After an ILP decode, `last_adjacency_solve_report_` contains the latest
 `AdjacencySolveReport`; `last_adjacency_solve_reports_` contains one report per
 graph in the latest batch. Reports distinguish proven optimal solutions from
-validated integer-feasible time-limit incumbents.
-  Maximum number of negative horizon-cut repair re-solves after the first ILP
-  solution.
+validated integer-feasible time-limit incumbents. They also expose solver and
+horizon termination reasons, objective value, final degree and edge-count
+slack, and the number of unresolved negative-horizon pairs.
 
 ### Main Public Method
 

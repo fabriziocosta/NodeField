@@ -2563,6 +2563,53 @@ def test_decode_adjacency_matrix_direct_respects_desired_node_count():
     assert sorted(nx.from_numpy_array(adj_mtx).edges()) == [(1, 3)]
 
 
+def test_degree_aware_direct_decode_honors_exact_edge_budget():
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    candidates = [
+        (0.99, 0, 1),
+        (0.98, 0, 2),
+        (0.97, 0, 3),
+        (0.96, 0, 4),
+        (0.95, 1, 2),
+        (0.94, 3, 4),
+    ]
+
+    selected = decoder._select_direct_edges_degree_aware(
+        candidates,
+        np.arange(5),
+        [0, 1, 1, 1, 1],
+        desired_edge_count=2,
+    )
+
+    assert len(selected) == 2
+    assert selected == decoder._select_direct_edges_degree_aware(
+        candidates,
+        np.arange(5),
+        [0, 1, 1, 1, 1],
+        desired_edge_count=2,
+    )
+
+
+@pytest.mark.parametrize("edge_budget", range(7))
+def test_degree_aware_direct_decode_honors_all_feasible_small_budgets(edge_budget):
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False, enforce_connectivity=False)
+    candidates = [
+        (1.0 - 0.05 * idx, i, j)
+        for idx, (i, j) in enumerate(
+            (pair for i in range(4) for pair in ((i, j) for j in range(i + 1, 4)))
+        )
+    ]
+
+    selected = decoder._select_direct_edges_degree_aware(
+        candidates,
+        np.arange(4),
+        [1, 2, 2, 1],
+        desired_edge_count=edge_budget,
+    )
+
+    assert len(selected) == min(edge_budget, len(candidates))
+
+
 def test_horizon_positive_constraint_can_add_short_path():
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=False,
@@ -2667,6 +2714,100 @@ def test_horizon_negative_separation_runs_until_no_new_cuts(monkeypatch):
     assert len(calls) == 3
     assert decoder.last_adjacency_solve_report_.solve_count == 3
     assert decoder.last_adjacency_solve_report_.horizon_iterations == 2
+
+
+def test_horizon_report_exposes_unresolved_soft_violation(monkeypatch):
+    monkeypatch.setattr(
+        structural_decoder,
+        "find_negative_horizon_cuts",
+        lambda adjacency, negative_pairs, *, horizon: [([(0, 1), (1, 2)], 1.0)],
+    )
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        degree_slack_penalty=0.1,
+        horizon_constraint_weight=0.0,
+        horizon_negative_threshold=0.2,
+        horizon_pair_budget=2,
+        horizon_max_iterations=2,
+    )
+    decoder.horizon_constraint_weight = 1.0
+    horizon_probs = np.ones((3, 3), dtype=float)
+    horizon_probs[0, 2] = horizon_probs[2, 0] = 0.01
+
+    decoder.optimize_adjacency_matrix(
+        np.ones((3, 3), dtype=float) - np.eye(3),
+        [1, 2, 1],
+        connectivity=False,
+        horizon_probability_matrix=horizon_probs,
+        horizon=2,
+    )
+
+    report = decoder.last_adjacency_solve_report_
+    assert report.horizon_termination_reason == "no_new_cuts"
+    assert report.unresolved_horizon_pair_count == 1
+    assert report.objective_value is not None
+    assert report.degree_slack_total >= 0.0
+    assert report.edge_count_slack >= 0.0
+
+
+def test_positive_horizon_paths_are_ranked_by_path_probability():
+    probabilities = np.asarray(
+        [
+            [0.0, 0.9, 0.6],
+            [0.9, 0.0, 0.9],
+            [0.6, 0.9, 0.0],
+        ]
+    )
+    logits = np.zeros_like(probabilities)
+    for i in range(3):
+        for j in range(i + 1, 3):
+            logits[i, j] = logits[j, i] = structural_decoder.edge_logit(
+                probabilities[i, j]
+            )
+
+    paths = structural_decoder.enumerate_horizon_paths(
+        0,
+        2,
+        horizon=2,
+        edge_logit_matrix=logits,
+        paths_per_pair=2,
+    )
+
+    assert [path for path, _score in paths] == [[0, 1, 2], [0, 2]]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"direct_edge_probability_threshold": -0.1}, "direct_edge_probability_threshold"),
+        ({"degree_slack_penalty": 0.0}, "degree_slack_penalty"),
+        ({"adjacency_time_limit_seconds": 0.0}, "adjacency_time_limit_seconds"),
+        ({"parallel_decode_timeout_seconds": float("nan")}, "parallel_decode_timeout_seconds"),
+        ({"horizon_constraint_weight": -1.0}, "horizon_constraint_weight"),
+        ({"horizon_negative_threshold": 0.9, "horizon_positive_threshold": 0.8}, "threshold"),
+        ({"horizon_pair_budget": -1}, "horizon_pair_budget"),
+        ({"horizon_paths_per_pair": 0}, "horizon_paths_per_pair"),
+        ({"horizon_max_iterations": -1}, "horizon_max_iterations"),
+        ({"solver_threads": 0}, "solver_threads"),
+    ],
+)
+def test_decoder_rejects_invalid_configuration(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        ConditionalNodeFieldGraphDecoder(**kwargs)
+
+
+@pytest.mark.parametrize("invalid_value", [float("nan"), float("inf"), -0.1, 1.1])
+def test_optimize_adjacency_matrix_rejects_invalid_probabilities(invalid_value):
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+    probabilities = np.asarray([[0.0, invalid_value], [invalid_value, 0.0]])
+    with pytest.raises(ValueError, match="prob_matrix"):
+        decoder.optimize_adjacency_matrix(probabilities, [1, 1])
+
+
+def test_parent_timeout_reserves_solver_shutdown_time():
+    solver_budget = decoder_module._solver_budget_with_parent_reserve(60.0, 2.0)
+    assert 0.0 < solver_budget < 2.0
 
 
 def test_decoder_direct_mode_attaches_labels_and_bypasses_optimizer(monkeypatch):

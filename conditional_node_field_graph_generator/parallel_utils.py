@@ -3,6 +3,7 @@
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 import os
+import time
 from typing import Optional
 
 from .runtime_utils import get_runtime_logger
@@ -36,10 +37,17 @@ def _parallel_map(
     try:
         executor = ProcessPoolExecutor(max_workers=min(max_workers, len(jobs)))
         try:
-            futures = [executor.submit(func, job) for job in jobs]
             if timeout_seconds is None:
-                return [future.result() for future in futures]
-            return [future.result(timeout=float(timeout_seconds)) for future in futures]
+                return list(executor.map(func, jobs))
+            futures = [executor.submit(func, job) for job in jobs]
+            deadline = time.monotonic() + float(timeout_seconds)
+            results = []
+            for future in futures:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise FuturesTimeoutError()
+                results.append(future.result(timeout=remaining))
+            return results
         except FuturesTimeoutError:
             executor.shutdown(wait=False, cancel_futures=True)
             if not fallback_on_timeout:
