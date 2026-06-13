@@ -115,6 +115,16 @@ Key paths:
 - `conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py`
   Decoder implementation responsible for structural reconstruction, adjacency ILP solves, node and edge label attachment, and edge-supervision helpers.
 
+- `conditional_node_field_graph_generator/structural_decoder.py`
+  Active-node adjacency MILP, horizon separation, incumbent validation, and
+  structured solve reporting.
+
+- `conditional_node_field_graph_generator/direct_graph_decoder.py`
+  Direct probability-based edge selection used when ILP decoding is disabled.
+
+- `conditional_node_field_graph_generator/decoder_assembly.py`
+  Node/edge label validation and final `networkx` graph assembly.
+
 - `conditional_node_field_graph_generator/interpolation_utils.py`
   Shared interpolation helpers used by graph-conditioning sampling and notebook-facing interpolation workflows.
 

@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import types
 from concurrent.futures.process import BrokenProcessPool
@@ -14,7 +15,9 @@ from sklearn.preprocessing import MinMaxScaler
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
 import conditional_node_field_graph_generator.conditional_node_field_graph_decoder as decoder_module
+import conditional_node_field_graph_generator.oracle_decode as oracle_decode_module
 import conditional_node_field_graph_generator.parallel_utils as parallel_utils
+import conditional_node_field_graph_generator.structural_decoder as structural_decoder
 from conditional_node_field_graph_generator.persistence import (
     load_graph_generator,
     save_graph_generator,
@@ -1571,6 +1574,23 @@ def test_constructive_oracle_rejects_non_improving_additions():
     assert not decoded[0].has_edge(0, 3)
 
 
+def test_constructive_oracle_budget_zero_disables_additions():
+    estimator = _ConstructiveEdgeEstimator([(0, 3, "good")])
+    generator = ConditionalNodeFieldGraphGenerator(
+        feasibility_estimator=estimator,
+        oracle_add_edge_repair_budget=0,
+        verbose=False,
+        max_oracle_iterations=1,
+    )
+    generator.edge_label_classes_ = np.asarray(["bad", "good"], dtype=object)
+    generator.edge_label_to_index_ = {"bad": 0, "good": 1}
+
+    decoded = generator._decode_generated_nodes(_constructive_oracle_generated_batch())
+
+    assert not decoded[0].has_edge(0, 3)
+    assert estimator.violation_batch_sizes == []
+
+
 def test_constructive_oracle_respects_exact_conditioned_edge_count():
     estimator = _ConstructiveEdgeEstimator([(0, 3, "good")])
     decoder = ConditionalNodeFieldGraphDecoder(
@@ -2176,6 +2196,113 @@ def test_decode_adjacency_matrix_enforces_desired_edge_count():
     assert int(np.sum(adj_mtx) // 2) == 1
 
 
+def test_decode_adjacency_matrix_excludes_inactive_padded_slots_from_constraints():
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=True,
+        degree_slack_penalty=1.0,
+        edge_count_slack_penalty=None,
+        n_jobs=1,
+        parallel_decode_timeout_seconds=None,
+    )
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, True, False, False]], dtype=bool),
+        node_degree_predictions=np.asarray([[1.0, 1.0, 0.0, 0.0]], dtype=float),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.99, 0.0, 0.0],
+                    [0.99, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adjacency = decoder.decode_adjacency_matrix(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_edge_counts=[1],
+    )[0]
+
+    assert int(adjacency.sum() // 2) == 1
+    assert adjacency[0, 1] == 1
+    assert not adjacency[2:, :].any()
+    assert not adjacency[:, 2:].any()
+    assert decoder.last_adjacency_solve_report_.active_node_count == 2
+
+
+@pytest.mark.parametrize(
+    ("presence_mask", "expected_edges", "expected_active_count"),
+    [
+        ([False, False, False], [], 0),
+        ([False, True, False], [], 1),
+        ([True, False, True], [(0, 2)], 2),
+    ],
+)
+def test_decode_adjacency_matrix_handles_sparse_active_slot_layouts(
+    presence_mask,
+    expected_edges,
+    expected_active_count,
+):
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=True,
+        n_jobs=1,
+        parallel_decode_timeout_seconds=None,
+    )
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([presence_mask], dtype=bool),
+        node_degree_predictions=np.asarray([[1.0, 0.0, 1.0]], dtype=float),
+        edge_probability_matrices=[
+            np.asarray(
+                [
+                    [0.0, 0.1, 0.9],
+                    [0.1, 0.0, 0.1],
+                    [0.9, 0.1, 0.0],
+                ],
+                dtype=float,
+            )
+        ],
+    )
+
+    adjacency = decoder.decode_adjacency_matrix(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_edge_counts=[0],
+    )[0]
+
+    assert sorted(nx.from_numpy_array(adjacency).edges()) == expected_edges
+    assert decoder.last_adjacency_solve_report_.active_node_count == expected_active_count
+
+
+def test_connected_edge_count_is_resolved_against_active_node_count():
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=True,
+        edge_count_slack_penalty=None,
+        n_jobs=1,
+        parallel_decode_timeout_seconds=None,
+    )
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray([[True, False, True, False, True]], dtype=bool),
+        node_degree_predictions=np.asarray([[2.0, 0.0, 2.0, 0.0, 2.0]], dtype=float),
+        edge_probability_matrices=[np.ones((5, 5), dtype=float) - np.eye(5)],
+    )
+
+    adjacency = decoder.decode_adjacency_matrix(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+        desired_edge_counts=[0],
+    )[0]
+
+    assert int(adjacency.sum() // 2) == 2
+    assert nx.is_connected(nx.from_numpy_array(adjacency).subgraph([0, 2, 4]))
+    assert not adjacency[[1, 3], :].any()
+
+
 def test_soft_edge_count_allows_nearby_solution_when_exact_count_is_cut_off():
     prob_matrix = np.asarray(
         [
@@ -2196,7 +2323,7 @@ def test_soft_edge_count_allows_nearby_solution_when_exact_count_is_cut_off():
         degree_slack_penalty=1.0,
         edge_count_slack_penalty=None,
     )
-    with pytest.raises(RuntimeError, match="Adjacency ILP did not produce an optimal solution"):
+    with pytest.raises(RuntimeError, match="Adjacency ILP did not produce a feasible solution"):
         hard_decoder.optimize_adjacency_matrix(
             prob_matrix,
             target_degrees=[1, 2, 1],
@@ -2261,7 +2388,11 @@ def test_oracle_relaxed_adjacency_forwards_target_edge_count(monkeypatch):
         captured.update(kwargs)
         return np.zeros_like(prob_matrix, dtype=int)
 
-    monkeypatch.setattr(decoder_module, "optimize_oracle_adjacency_matrix", _fake_optimize)
+    monkeypatch.setattr(
+        oracle_decode_module,
+        "optimize_oracle_adjacency_matrix",
+        _fake_optimize,
+    )
     owner = types.SimpleNamespace(
         max_oracle_iterations=2,
         oracle_edge_memory_penalty=0.0,
@@ -2498,6 +2629,44 @@ def test_horizon_negative_constraint_can_break_short_path():
 
     graph = nx.from_numpy_array(adj)
     assert not nx.has_path(graph, 0, 2) or nx.shortest_path_length(graph, 0, 2) > 2
+
+
+def test_horizon_negative_separation_runs_until_no_new_cuts(monkeypatch):
+    calls = []
+
+    def fake_find(adjacency, negative_pairs, *, horizon):
+        del adjacency, negative_pairs, horizon
+        calls.append(len(calls))
+        if len(calls) == 1:
+            return [([(0, 1)], 0.0)]
+        if len(calls) == 2:
+            return [([(1, 2)], 0.0)]
+        return []
+
+    monkeypatch.setattr(structural_decoder, "find_negative_horizon_cuts", fake_find)
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        enforce_connectivity=False,
+        horizon_negative_threshold=0.2,
+        horizon_pair_budget=2,
+        horizon_max_iterations=5,
+        n_jobs=1,
+        parallel_decode_timeout_seconds=None,
+    )
+    horizon_probs = np.ones((3, 3), dtype=float)
+    horizon_probs[0, 2] = horizon_probs[2, 0] = 0.01
+
+    decoder.optimize_adjacency_matrix(
+        np.ones((3, 3), dtype=float) - np.eye(3),
+        [1, 2, 1],
+        connectivity=False,
+        horizon_probability_matrix=horizon_probs,
+        horizon=2,
+    )
+
+    assert len(calls) == 3
+    assert decoder.last_adjacency_solve_report_.solve_count == 3
+    assert decoder.last_adjacency_solve_report_.horizon_iterations == 2
 
 
 def test_decoder_direct_mode_attaches_labels_and_bypasses_optimizer(monkeypatch):
@@ -2997,12 +3166,15 @@ def test_parallel_decode_matches_serial_decode():
     for serial_graph, parallel_graph in zip(serial_graphs, parallel_graphs):
         assert sorted(serial_graph.nodes(data=True)) == sorted(parallel_graph.nodes(data=True))
         assert sorted(serial_graph.edges(data=True)) == sorted(parallel_graph.edges(data=True))
+    assert len(serial_decoder.last_adjacency_solve_reports_) == 2
+    assert len(parallel_decoder.last_adjacency_solve_reports_) == 2
+    assert all(report.active_node_count == 2 for report in parallel_decoder.last_adjacency_solve_reports_)
 
 
 def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=False,
-        existence_threshold=0.7,
+        direct_edge_probability_threshold=0.7,
         enforce_connectivity=False,
         degree_slack_penalty=123.0,
         edge_count_slack_penalty=4.0,
@@ -3023,7 +3195,7 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
     restored = ConditionalNodeFieldGraphDecoder().load(str(path))
 
     assert restored.verbose is False
-    assert restored.existence_threshold == pytest.approx(0.7)
+    assert restored.direct_edge_probability_threshold == pytest.approx(0.7)
     assert restored.enforce_connectivity is False
     assert restored.degree_slack_penalty == pytest.approx(123.0)
     assert restored.edge_count_slack_penalty == pytest.approx(4.0)
@@ -3038,12 +3210,36 @@ def test_decoder_save_and_load_round_trip_json_artifact(tmp_path):
     assert restored.horizon_max_iterations == 2
 
 
+def test_decoder_load_migrates_v1_threshold_name(tmp_path):
+    path = tmp_path / "decoder-v1.json"
+    path.write_text(
+        json.dumps(
+            {
+                "artifact_type": "ConditionalNodeFieldGraphDecoder",
+                "artifact_version": 1,
+                "config": {
+                    "verbose": False,
+                    "existence_threshold": 0.73,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored = ConditionalNodeFieldGraphDecoder().load(str(path))
+
+    assert restored.direct_edge_probability_threshold == pytest.approx(0.73)
+    assert not hasattr(restored, "existence_threshold")
+
+
 def test_decoder_load_supports_legacy_dill_artifact(tmp_path):
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=False,
         enforce_connectivity=False,
         degree_slack_penalty=321.0,
     )
+    decoder.existence_threshold = 0.61
+    delattr(decoder, "direct_edge_probability_threshold")
     path = tmp_path / "decoder_legacy.pkl"
     import dill as pickle
 
@@ -3055,6 +3251,8 @@ def test_decoder_load_supports_legacy_dill_artifact(tmp_path):
     assert isinstance(restored, ConditionalNodeFieldGraphDecoder)
     assert restored.enforce_connectivity is False
     assert restored.degree_slack_penalty == pytest.approx(321.0)
+    assert restored.direct_edge_probability_threshold == pytest.approx(0.61)
+    assert not hasattr(restored, "existence_threshold")
 
 
 def test_load_graph_generator_accepts_unsanitized_model_name(tmp_path):
@@ -3101,6 +3299,10 @@ def test_load_graph_generator_restores_legacy_sample_oracle_runtime_defaults(tmp
     delattr(generator, "feasibility_oracle_candidates_per_attempt")
     delattr(generator, "max_decode_seconds_per_sample")
     delattr(generator, "max_decode_attempts_per_sample")
+    generator.graph_decoder.adjacency_time_limit_seconds = 60.0
+    generator.graph_decoder.parallel_decode_timeout_seconds = 30.0
+    generator.graph_decoder.active_time_limit_seconds = None
+    generator.graph_decoder.solver_threads = None
     delattr(generator.graph_decoder, "adjacency_time_limit_seconds")
     delattr(generator.graph_decoder, "parallel_decode_timeout_seconds")
     delattr(generator.graph_decoder, "active_time_limit_seconds")
@@ -3237,6 +3439,11 @@ def test_decode_generated_nodes_relaxes_oracle_cuts_to_zero_on_last_attempt(monk
         )
 
     monkeypatch.setattr(decoder, "optimize_adjacency_matrix", wrapped_optimize)
+    monkeypatch.setattr(
+        oracle_decode_module,
+        "oracle_adjacency_timeout_seconds",
+        lambda owner: None,
+    )
 
     decoded = generator._decode_generated_nodes(_oracle_generated_batch())
 
@@ -3588,8 +3795,18 @@ def test_decode_generated_nodes_with_oracle_falls_back_when_initial_seed_decode_
         alpha=0.7,
         connectivity=None,
         forbidden_edge_sets=None,
+        active_node_mask=None,
     ):
-        del self, target_degrees, target_edge_count, timeLimit, verbose, alpha, forbidden_edge_sets
+        del (
+            self,
+            target_degrees,
+            target_edge_count,
+            timeLimit,
+            verbose,
+            alpha,
+            forbidden_edge_sets,
+            active_node_mask,
+        )
         optimize_calls.append(connectivity)
         n = prob_matrix.shape[0]
         adj = np.zeros((n, n), dtype=int)
@@ -3601,6 +3818,11 @@ def test_decode_generated_nodes_with_oracle_falls_back_when_initial_seed_decode_
 
     monkeypatch.setattr(decoder, "decode_adjacency_matrix", _fail_initial_decode)
     monkeypatch.setattr(ConditionalNodeFieldGraphDecoder, "optimize_adjacency_matrix", _fake_optimize)
+    monkeypatch.setattr(
+        oracle_decode_module,
+        "oracle_adjacency_timeout_seconds",
+        lambda owner: None,
+    )
 
     decoded = generator._decode_generated_nodes(_oracle_generated_batch())
 
@@ -4185,7 +4407,7 @@ def test_graph_generator_rejects_invalid_feasibility_rejection_mode():
         ConditionalNodeFieldGraphGenerator(feasibility_rejection_mode="drop")
 
 
-def test_optimize_adjacency_matrix_raises_when_solver_status_is_not_optimal(monkeypatch):
+def test_optimize_adjacency_matrix_raises_when_solver_has_no_feasible_solution(monkeypatch):
     decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
 
     def _fake_solve(self, solver):
@@ -4195,7 +4417,7 @@ def test_optimize_adjacency_matrix_raises_when_solver_status_is_not_optimal(monk
 
     monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
 
-    with pytest.raises(RuntimeError, match="did not produce an optimal solution"):
+    with pytest.raises(RuntimeError, match="did not produce a feasible solution"):
         decoder.optimize_adjacency_matrix(
             prob_matrix=np.array([[0.0, 0.9], [0.9, 0.0]], dtype=float),
             target_degrees=[1, 1],
@@ -4213,6 +4435,72 @@ def test_optimize_adjacency_matrix_raises_when_variable_value_is_missing(monkeyp
     monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
 
     with pytest.raises(RuntimeError, match="without assigning all decision variables"):
+        decoder.optimize_adjacency_matrix(
+            prob_matrix=np.array([[0.0, 0.9], [0.9, 0.0]], dtype=float),
+            target_degrees=[1, 1],
+        )
+
+
+def test_optimize_adjacency_matrix_accepts_valid_integer_feasible_incumbent(monkeypatch):
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+
+    def _fake_solve(self, solver):
+        del solver
+        self.status = pulp.LpStatusOptimal
+        self.sol_status = pulp.LpSolutionIntegerFeasible
+        for variable in self.variables():
+            if variable.name == "x_0_1":
+                variable.varValue = 1.0
+            elif variable.name.startswith("flow_"):
+                variable.varValue = 1.0
+            else:
+                variable.varValue = 0.0
+        return self.status
+
+    monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
+
+    adjacency = decoder.optimize_adjacency_matrix(
+        prob_matrix=np.array([[0.0, 0.9], [0.9, 0.0]], dtype=float),
+        target_degrees=[1, 1],
+    )
+
+    assert adjacency.tolist() == [[0, 1], [1, 0]]
+    assert decoder.last_adjacency_solve_report_.used_incumbent is True
+    assert decoder.last_adjacency_solve_report_.optimal is False
+
+
+def test_optimize_adjacency_matrix_rejects_fractional_incumbent(monkeypatch):
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+
+    def _fake_solve(self, solver):
+        del solver
+        self.status = pulp.LpStatusOptimal
+        self.sol_status = pulp.LpSolutionIntegerFeasible
+        for variable in self.variables():
+            variable.varValue = 0.5 if variable.name == "x_0_1" else 0.0
+        return self.status
+
+    monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
+
+    with pytest.raises(RuntimeError, match="fractional"):
+        decoder.optimize_adjacency_matrix(
+            prob_matrix=np.array([[0.0, 0.9], [0.9, 0.0]], dtype=float),
+            target_degrees=[1, 1],
+        )
+
+
+def test_optimize_adjacency_matrix_rejects_timeout_without_incumbent(monkeypatch):
+    decoder = ConditionalNodeFieldGraphDecoder(verbose=False)
+
+    def _fake_solve(self, solver):
+        del solver
+        self.status = pulp.LpStatusNotSolved
+        self.sol_status = pulp.LpSolutionNoSolutionFound
+        return self.status
+
+    monkeypatch.setattr(pulp.LpProblem, "solve", _fake_solve)
+
+    with pytest.raises(RuntimeError, match="did not produce a feasible solution"):
         decoder.optimize_adjacency_matrix(
             prob_matrix=np.array([[0.0, 0.9], [0.9, 0.0]], dtype=float),
             target_degrees=[1, 1],

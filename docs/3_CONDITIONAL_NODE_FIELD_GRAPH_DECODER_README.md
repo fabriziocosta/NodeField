@@ -16,6 +16,14 @@ The key idea is:
 The canonical decoder implementation lives in
 [`../conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_decoder.py).
 
+The public class is a façade over focused implementation modules:
+
+- `structural_decoder.py` owns active-node MILP projection, horizon separation,
+  incumbent validation, and solve reports,
+- `direct_graph_decoder.py` owns non-MILP edge selection,
+- `decoder_assembly.py` owns label validation and final graph assembly,
+- `oracle_decode.py` exposes oracle-guided decode entry points.
+
 The graph generator orchestrates around that decoder in
 [`../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py`](../conditional_node_field_graph_generator/conditional_node_field_graph_generator.py),
 mainly through:
@@ -216,9 +224,13 @@ The structural pipeline is:
 5. zero out edges touching non-existent nodes,
 6. symmetrize the matrix,
 7. convert predicted degrees plus node existence into integer degree targets,
-8. solve the adjacency MILP,
+8. project the problem to active node slots and solve the adjacency MILP,
 9. optionally run the oracle loop, which may relabel, add feasibility cuts, and
    re-solve.
+
+Inactive padded slots never participate in degree, edge-count, connectivity,
+forbidden-motif, warm-start, or horizon constraints. The active adjacency is
+expanded back to the original padded shape only after solving.
 
 ```mermaid
 flowchart TD

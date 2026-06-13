@@ -1,7 +1,6 @@
 """Decoder helpers for rebuilding labeled graphs from node-field predictions."""
 
 import json
-import random
 import sys
 from pathlib import Path
 from typing import Any, Callable, FrozenSet, Iterable, List, Optional, Sequence, Tuple
@@ -9,17 +8,33 @@ from typing import Any, Callable, FrozenSet, Iterable, List, Optional, Sequence,
 import dill as pickle
 import networkx as nx
 import numpy as np
-import pulp
 
 from .conditional_node_field_generator import GeneratedNodeBatch, GraphConditioningBatch
 from . import diagnostics as _shared_diagnostics
+from .decoder_assembly import (
+    assemble_edge_labels_from_matrix as _assemble_edge_labels_from_matrix_impl,
+    assemble_graph as _assemble_graph_impl,
+    assemble_graph_star as _assemble_graph_star_impl,
+    edge_label_list_to_matrix as _edge_label_list_to_matrix_impl,
+    edge_label_matrix_to_list as _edge_label_matrix_to_list_impl,
+    validate_edge_label_array as _validate_edge_label_array_impl,
+    validate_node_label_array as _validate_node_label_array_impl,
+)
+from .direct_graph_decoder import (
+    adjacency_from_edges as _adjacency_from_selected_edges_impl,
+    edge_candidates as _direct_edge_candidates_impl,
+    select_by_threshold as _select_direct_edges_by_threshold_impl,
+    select_degree_aware as _select_direct_edges_degree_aware_impl,
+    select_top_k as _select_direct_edges_top_k_impl,
+)
 from .graph_decode_utils import _canonicalize_edge, _normalize_violating_edge_sets
 from .parallel_utils import _normalize_n_jobs, _parallel_map
 from .runtime_utils import run_with_fork_timeout, verbose_log
+from .structural_decoder import AdjacencySolveReport, solve_adjacency
 
 Edge = Tuple[int, int]
 _DECODER_PROBABILITY_EPS = 1e-6
-_DECODER_ARTIFACT_VERSION = 1
+_DECODER_ARTIFACT_VERSION = 2
 plt = _shared_diagnostics.plt
 
 
@@ -71,28 +86,14 @@ def _build_masked_prob_matrix(
 
 
 def _edge_label_matrix_to_list(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
-    edge_labels = []
-    for i in range(adj_mtx.shape[0]):
-        for j in range(i + 1, adj_mtx.shape[1]):
-            if adj_mtx[i, j] != 0:
-                edge_labels.append(edge_label_matrix[i, j])
-    return np.asarray(edge_labels, dtype=object)
+    return _edge_label_matrix_to_list_impl(adj_mtx, edge_label_matrix)
 
 
 def _edge_label_list_to_matrix(
     adj_mtx: np.ndarray,
     edge_labels: Sequence[Any],
 ) -> np.ndarray:
-    edge_label_matrix = np.full(adj_mtx.shape, None, dtype=object)
-    edge_idx = 0
-    for i in range(adj_mtx.shape[0]):
-        for j in range(i + 1, adj_mtx.shape[1]):
-            if adj_mtx[i, j] != 0:
-                edge_label = edge_labels[edge_idx] if edge_idx < len(edge_labels) else None
-                edge_label_matrix[i, j] = edge_label
-                edge_label_matrix[j, i] = edge_label
-                edge_idx += 1
-    return edge_label_matrix
+    return _edge_label_list_to_matrix_impl(adj_mtx, edge_labels)
 
 
 def _assemble_graph_job(
@@ -101,29 +102,11 @@ def _assemble_graph_job(
     edge_labels: np.ndarray,
     adj_mtx: np.ndarray,
 ) -> nx.Graph:
-    graph = nx.from_numpy_array(adj_mtx)
-
-    if len(node_labels) > 0 and not all(label is None for label in node_labels):
-        node_label_map = {i: label for i, label in enumerate(node_labels)}
-        nx.set_node_attributes(graph, node_label_map, "label")
-
-    if np.sum(adj_mtx) > 0 and len(edge_labels) > 0:
-        n_nodes = graph.number_of_nodes()
-        edge_idx = 0
-        edge_attr = {}
-        for i in range(n_nodes):
-            for j in range(i + 1, n_nodes):
-                if adj_mtx[i, j] != 0:
-                    edge_attr[(i, j)] = edge_labels[edge_idx]
-                    edge_idx += 1
-        nx.set_edge_attributes(graph, edge_attr, "label")
-
-    existent_indices = np.where(np.asarray(node_presence_mask[: adj_mtx.shape[0]], dtype=bool))[0]
-    return graph.subgraph(existent_indices).copy()
+    return _assemble_graph_impl(node_presence_mask, node_labels, edge_labels, adj_mtx)
 
 
 def _assemble_graph_job_star(args) -> nx.Graph:
-    return _assemble_graph_job(*args)
+    return _assemble_graph_star_impl(args)
 
 
 def _validate_node_label_array(
@@ -132,18 +115,11 @@ def _validate_node_label_array(
     graph_idx: int,
     n_slots: int,
 ) -> np.ndarray:
-    node_labels = np.asarray(node_labels, dtype=object)
-    if node_labels.ndim != 1:
-        raise ValueError(
-            "Each predicted node-label array must be one-dimensional; "
-            f"graph {graph_idx} received shape {node_labels.shape}."
-        )
-    if node_labels.shape[0] != n_slots:
-        raise ValueError(
-            "Each predicted node-label array must align with the decoder node slots; "
-            f"graph {graph_idx} received {node_labels.shape[0]} labels for {n_slots} slots."
-        )
-    return node_labels
+    return _validate_node_label_array_impl(
+        node_labels,
+        graph_idx=graph_idx,
+        n_slots=n_slots,
+    )
 
 
 def _validate_edge_label_array(
@@ -152,18 +128,11 @@ def _validate_edge_label_array(
     graph_idx: int,
     expected_edge_count: int,
 ) -> np.ndarray:
-    edge_labels = np.asarray(edge_labels, dtype=object)
-    if edge_labels.ndim != 1:
-        raise ValueError(
-            "Each predicted edge-label array must be one-dimensional; "
-            f"graph {graph_idx} received shape {edge_labels.shape}."
-        )
-    if edge_labels.shape[0] != expected_edge_count:
-        raise ValueError(
-            "Each predicted edge-label array must align with the decoded adjacency edge count; "
-            f"graph {graph_idx} received {edge_labels.shape[0]} labels for {expected_edge_count} edges."
-        )
-    return edge_labels
+    return _validate_edge_label_array_impl(
+        edge_labels,
+        graph_idx=graph_idx,
+        expected_edge_count=expected_edge_count,
+    )
 
 
 def _decode_single_adjacency_job(
@@ -190,7 +159,7 @@ def _decode_single_adjacency_job(
     horizon_paths_per_pair: int = 8,
     horizon_max_iterations: int = 1,
     solver_threads: Optional[int] = None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, AdjacencySolveReport]:
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
         degree_slack_penalty=degree_slack_penalty,
@@ -236,9 +205,9 @@ def _decode_single_adjacency_job(
         target_degrees,
         target_edge_count=desired_edge_count,
         timeLimit=adjacency_time_limit_seconds,
+        active_node_mask=existent,
         horizon_probability_matrix=horizon_probability_matrix,
         horizon=horizon,
-        horizon_node_mask=existent,
     )
     if int(verbose) >= 4 and diagnostic_graph_renderer is None:
         _plot_decoder_diagnostics(
@@ -249,10 +218,10 @@ def _decode_single_adjacency_job(
             graph_renderer=decoder.diagnostic_graph_renderer,
             existence_mask=existent,
         )
-    return adj_mtx
+    return adj_mtx, decoder.last_adjacency_solve_report_
 
 
-def _decode_single_adjacency_job_star(args) -> np.ndarray:
+def _decode_single_adjacency_job_star(args) -> Tuple[np.ndarray, AdjacencySolveReport]:
     return _decode_single_adjacency_job(*args)
 
 
@@ -383,54 +352,27 @@ def sample_oracle_cuts_for_iteration(
     accumulated_cuts: Sequence[FrozenSet[Edge]],
     solve_iteration_idx: int,
 ) -> List[FrozenSet[Edge]]:
-    """Subsample accumulated structural cuts so later retries relax more aggressively."""
-    if not accumulated_cuts:
-        return []
-    if owner.max_oracle_iterations <= 1:
-        return []
-    if solve_iteration_idx >= owner.max_oracle_iterations - 1:
-        return []
-    keep_fraction = 1.0 - (float(solve_iteration_idx) / float(owner.max_oracle_iterations - 1))
-    keep_count = int(np.ceil(len(accumulated_cuts) * keep_fraction))
-    keep_count = max(0, min(len(accumulated_cuts), keep_count))
-    if keep_count <= 0:
-        return []
-    if keep_count >= len(accumulated_cuts):
-        return list(accumulated_cuts)
-    selected_indices = sorted(random.sample(range(len(accumulated_cuts)), keep_count))
-    return [accumulated_cuts[idx] for idx in selected_indices]
+    from .oracle_decode import sample_oracle_cuts_for_iteration as sample_impl
+
+    return sample_impl(owner, accumulated_cuts, solve_iteration_idx)
 
 
 def _optimize_adjacency_matrix_worker(graph_decoder, args, kwargs) -> np.ndarray:
-    return graph_decoder.optimize_adjacency_matrix(*args, **kwargs)
+    from .oracle_decode import _optimize_adjacency_matrix_worker as worker_impl
+
+    return worker_impl(graph_decoder, args, kwargs)
 
 
 def _oracle_adjacency_timeout_seconds(owner) -> Optional[float]:
-    timeout_seconds = getattr(owner, "max_decode_seconds_per_sample", None)
-    if timeout_seconds is None:
-        timeout_seconds = getattr(owner, "max_feasibility_seconds_per_sample", None)
-    if timeout_seconds is None:
-        graph_decoder = getattr(owner, "graph_decoder", None)
-        if graph_decoder is not None:
-            timeout_seconds = getattr(graph_decoder, "active_time_limit_seconds", None)
-            if timeout_seconds is None:
-                timeout_seconds = getattr(graph_decoder, "adjacency_time_limit_seconds", None)
-    if timeout_seconds is None:
-        return None
-    return max(1.0, float(timeout_seconds))
+    from .oracle_decode import oracle_adjacency_timeout_seconds
+
+    return oracle_adjacency_timeout_seconds(owner)
 
 
 def optimize_oracle_adjacency_matrix(owner, *args, **kwargs) -> np.ndarray:
-    timeout_seconds = _oracle_adjacency_timeout_seconds(owner)
-    if timeout_seconds is None:
-        return owner.graph_decoder.optimize_adjacency_matrix(*args, **kwargs)
-    return run_with_fork_timeout(
-        _optimize_adjacency_matrix_worker,
-        owner.graph_decoder,
-        args,
-        kwargs,
-        timeout_seconds=timeout_seconds,
-    )
+    from .oracle_decode import optimize_oracle_adjacency_matrix as optimize_impl
+
+    return optimize_impl(owner, *args, **kwargs)
 
 
 def solve_oracle_relaxed_adjacency(
@@ -442,42 +384,20 @@ def solve_oracle_relaxed_adjacency(
     start_iteration_idx: int,
     target_edge_count: Optional[int] = None,
     edge_violation_prior: Optional[np.ndarray] = None,
+    active_node_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Retry adjacency optimization while progressively relaxing accumulated oracle cuts."""
-    from .oracle_utils import apply_oracle_edge_memory_penalty
+    from .oracle_decode import solve_oracle_relaxed_adjacency as solve_impl
 
-    solve_prob_matrix = np.asarray(masked_prob_matrix, dtype=float)
-    if edge_violation_prior is not None and owner.oracle_edge_memory_penalty > 0.0:
-        solve_prob_matrix = apply_oracle_edge_memory_penalty(
-            solve_prob_matrix,
-            edge_violation_prior,
-            owner.oracle_edge_memory_penalty,
-        )
-    last_error: Optional[Exception] = None
-    for solve_iteration_idx in range(start_iteration_idx, owner.max_oracle_iterations):
-        active_cuts = sample_oracle_cuts_for_iteration(owner, accumulated_cuts, solve_iteration_idx)
-        try:
-            return optimize_oracle_adjacency_matrix(
-                owner,
-                solve_prob_matrix,
-                target_degrees,
-                target_edge_count=target_edge_count,
-                forbidden_edge_sets=active_cuts,
-            )
-        except TimeoutError:
-            raise
-        except Exception as exc:
-            last_error = exc
-            if int(owner.verbose) >= 1:
-                verbose_log(
-                    owner,
-                    "Oracle-guided adjacency solve failed with "
-                    f"{len(active_cuts)} active cuts at iteration {solve_iteration_idx + 1}/"
-                    f"{owner.max_oracle_iterations}; retrying with fewer cuts.",
-                )
-    if last_error is not None:
-        raise RuntimeError("Oracle-guided adjacency solve failed even after relaxing all oracle cuts.") from last_error
-    raise RuntimeError("Oracle-guided adjacency solve could not be attempted.")
+    return solve_impl(
+        owner,
+        masked_prob_matrix=masked_prob_matrix,
+        target_degrees=target_degrees,
+        accumulated_cuts=accumulated_cuts,
+        start_iteration_idx=start_iteration_idx,
+        target_edge_count=target_edge_count,
+        edge_violation_prior=edge_violation_prior,
+        active_node_mask=active_node_mask,
+    )
 
 
 class ConditionalNodeFieldGraphDecoder(object):
@@ -493,7 +413,7 @@ class ConditionalNodeFieldGraphDecoder(object):
     def __init__(
         self,
         verbose: bool = True,
-        existence_threshold: float = 0.5,
+        direct_edge_probability_threshold: float = 0.5,
         enforce_connectivity: bool = True,
         degree_slack_penalty: float = 1e6,
         edge_count_slack_penalty: Optional[float] = 2.0,
@@ -512,7 +432,7 @@ class ConditionalNodeFieldGraphDecoder(object):
         solver_threads: Optional[int] = None,
     ) -> None:
         self.verbose = verbose
-        self.existence_threshold = existence_threshold
+        self.direct_edge_probability_threshold = float(direct_edge_probability_threshold)
         self.enforce_connectivity = enforce_connectivity
         self.degree_slack_penalty = degree_slack_penalty
         self.edge_count_slack_penalty = (
@@ -538,6 +458,8 @@ class ConditionalNodeFieldGraphDecoder(object):
         self.horizon_max_iterations = int(horizon_max_iterations)
         self.solver_threads = None if solver_threads is None else max(1, int(solver_threads))
         self.active_time_limit_seconds: Optional[float] = None
+        self.last_adjacency_solve_report_: Optional[AdjacencySolveReport] = None
+        self.last_adjacency_solve_reports_: List[AdjacencySolveReport] = []
 
     @staticmethod
     def _edge_key(i: int, j: int) -> Edge:
@@ -669,223 +591,46 @@ class ConditionalNodeFieldGraphDecoder(object):
         alpha: float = 0.7,
         connectivity: Optional[bool] = None,
         forbidden_edge_sets: Optional[Iterable[Iterable[Sequence[Any]]]] = None,
+        active_node_mask: Optional[np.ndarray] = None,
         horizon_probability_matrix: Optional[np.ndarray] = None,
         horizon: Optional[int] = None,
         horizon_node_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        n = prob_matrix.shape[0]
-        if alpha != 1.0:
-            prob_matrix = np.power(prob_matrix, alpha)
         if connectivity is None:
             connectivity = self.enforce_connectivity
-
-        edge_logit_matrix = np.zeros((n, n), dtype=float)
-        for i in range(n):
-            for j in range(i + 1, n):
-                edge_logit = self._edge_logit(float(prob_matrix[i, j]))
-                edge_logit_matrix[i, j] = edge_logit_matrix[j, i] = edge_logit
-
-        normalized_forbidden_edge_sets = _normalize_violating_edge_sets(
-            [] if forbidden_edge_sets is None else forbidden_edge_sets,
-            n_nodes=n,
-        )
-
-        horizon_enabled = (
-            bool(self.use_horizon_ilp_constraints)
-            and horizon_probability_matrix is not None
-            and horizon is not None
-            and int(horizon) > 1
-            and float(self.horizon_constraint_weight) > 0.0
-        )
-        positive_pairs: List[Tuple[int, int, float, float]] = []
-        negative_pairs: List[Tuple[int, int, float, float]] = []
-        if horizon_enabled:
-            horizon_probs = np.asarray(horizon_probability_matrix, dtype=float)
-            if horizon_probs.shape != (n, n):
-                raise ValueError(
-                    "horizon_probability_matrix must align with prob_matrix; "
-                    f"received {horizon_probs.shape} for n={n}."
-                )
-            active_mask = (
-                np.ones(n, dtype=bool)
-                if horizon_node_mask is None
-                else np.asarray(horizon_node_mask, dtype=bool)[:n]
-            )
-            if active_mask.shape != (n,):
-                raise ValueError("horizon_node_mask must align with prob_matrix.")
-            positive_pairs, negative_pairs = self._select_horizon_pairs(
-                horizon_probs,
-                active_mask=active_mask,
-            )
-        else:
-            horizon_probs = None
-            active_mask = np.ones(n, dtype=bool)
-
         effective_time_limit = timeLimit
         if effective_time_limit is None:
             effective_time_limit = self.active_time_limit_seconds
         if effective_time_limit is None:
             effective_time_limit = self.adjacency_time_limit_seconds
-
-        def _solve(negative_cuts: Sequence[Tuple[List[Edge], float]], *, solve_name: str) -> np.ndarray:
-            prob = pulp.LpProblem(solve_name, pulp.LpMaximize)
-            x = {
-                (i, j): pulp.LpVariable(f"x_{i}_{j}", cat="Binary")
-                for i in range(n)
-                for j in range(i + 1, n)
-            }
-            u = {i: pulp.LpVariable(f"u_{i}", lowBound=0, cat="Integer") for i in range(n)}
-            v = {i: pulp.LpVariable(f"v_{i}", lowBound=0, cat="Integer") for i in range(n)}
-
-            objective_terms = [
-                edge_logit_matrix[i, j] * x[(i, j)]
-                for i in range(n)
-                for j in range(i + 1, n)
-            ]
-            objective_terms.extend(
-                -self.degree_slack_penalty * (u[i] + v[i])
-                for i in range(n)
-            )
-
-            for i in range(n):
-                incident = [x[(i, j)] for j in range(i + 1, n)] + [
-                    x[(j, i)] for j in range(i) if (j, i) in x
-                ]
-                prob += (pulp.lpSum(incident) + u[i] - v[i] == target_degrees[i]), f"Degree_{i}"
-            if target_edge_count is not None:
-                resolved_edge_count = self._resolve_target_edge_count(
-                    n,
-                    target_edge_count,
-                    connectivity=connectivity,
-                )
-                if self.edge_count_slack_penalty is None:
-                    prob += (pulp.lpSum(var for var in x.values()) == resolved_edge_count), "EdgeCount"
-                else:
-                    edge_count_under = pulp.LpVariable(
-                        "edge_count_under",
-                        lowBound=0,
-                        cat="Integer",
-                    )
-                    edge_count_over = pulp.LpVariable(
-                        "edge_count_over",
-                        lowBound=0,
-                        cat="Integer",
-                    )
-                    prob += (
-                        pulp.lpSum(var for var in x.values())
-                        + edge_count_under
-                        - edge_count_over
-                        == resolved_edge_count
-                    ), "EdgeCountSoft"
-                    objective_terms.append(
-                        -float(self.edge_count_slack_penalty)
-                        * (edge_count_under + edge_count_over)
-                    )
-
-            if connectivity:
-                directed_edges = [(i, j) for (i, j) in x] + [(j, i) for (i, j) in x]
-                f_vars = {
-                    (u_, v_): pulp.LpVariable(f"f_{u_}_{v_}", lowBound=0, cat="Continuous")
-                    for u_, v_ in directed_edges
-                }
-                M = n - 1
-                root = 0
-                for v_idx in range(n):
-                    inflow = pulp.lpSum(f_vars[(u_, v2)] for (u_, v2) in directed_edges if v2 == v_idx)
-                    outflow = pulp.lpSum(f_vars[(v2, w)] for (v2, w) in directed_edges if v2 == v_idx)
-                    prob += ((outflow - inflow) == M if v_idx == root else (inflow - outflow) == 1), f"Flow_{v_idx}"
-                for u_, v_ in directed_edges:
-                    i, j = min(u_, v_), max(u_, v_)
-                    prob += (f_vars[(u_, v_)] <= M * x[(i, j)]), f"FlowCouple_{u_}_{v_}"
-
-            for cut_idx, edge_set in enumerate(normalized_forbidden_edge_sets):
-                prob += (pulp.lpSum(x[edge] for edge in edge_set) <= len(edge_set) - 1), f"ForbiddenMotif_{cut_idx}"
-
-            if positive_pairs:
-                for pair_idx, (i, j, _probability, confidence) in enumerate(positive_pairs):
-                    paths = self._enumerate_horizon_paths(
-                        i,
-                        j,
-                        horizon=int(horizon),
-                        active_mask=active_mask,
-                        edge_logit_matrix=edge_logit_matrix,
-                    )
-                    if not paths:
-                        continue
-                    slack = pulp.LpVariable(f"hpos_slack_{pair_idx}_{i}_{j}", lowBound=0, upBound=1, cat="Continuous")
-                    objective_terms.append(
-                        -float(self.horizon_constraint_weight) * float(confidence) * slack
-                    )
-                    path_vars = []
-                    for path_idx, (path, _path_score) in enumerate(paths):
-                        path_edges = self._path_edges(path)
-                        z_path = pulp.LpVariable(f"hpos_path_{pair_idx}_{path_idx}_{i}_{j}", cat="Binary")
-                        path_vars.append(z_path)
-                        for edge in path_edges:
-                            prob += z_path <= x[edge], f"HPosPathUpper_{pair_idx}_{path_idx}_{edge[0]}_{edge[1]}"
-                        prob += (
-                            z_path >= pulp.lpSum(x[edge] for edge in path_edges) - len(path_edges) + 1
-                        ), f"HPosPathLower_{pair_idx}_{path_idx}"
-                    prob += (pulp.lpSum(path_vars) + slack >= 1), f"HPosPair_{pair_idx}_{i}_{j}"
-
-            for cut_idx, (edge_set, confidence) in enumerate(negative_cuts):
-                slack = pulp.LpVariable(f"hneg_slack_{cut_idx}", lowBound=0, upBound=1, cat="Continuous")
-                objective_terms.append(
-                    -float(self.horizon_constraint_weight) * float(confidence) * slack
-                )
-                prob += (
-                    pulp.lpSum(x[edge] for edge in edge_set) <= len(edge_set) - 1 + slack
-                ), f"HNegPathCut_{cut_idx}"
-
-            prob += pulp.lpSum(objective_terms)
-
-            if self.warm_start_mst:
-                graph = nx.Graph()
-                graph.add_nodes_from(range(n))
-                for i in range(n):
-                    for j in range(i + 1, n):
-                        graph.add_edge(i, j, weight=prob_matrix[i, j])
-                tree = nx.maximum_spanning_tree(graph)
-                for (i, j), var in x.items():
-                    var.start = 1 if tree.has_edge(i, j) else 0
-
-            solver_kwargs = {"msg": verbose}
-            if effective_time_limit is not None:
-                solver_kwargs["timeLimit"] = max(1.0, float(effective_time_limit))
-            if self.solver_threads is not None:
-                solver_kwargs["threads"] = int(self.solver_threads)
-            solver = pulp.PULP_CBC_CMD(**solver_kwargs)
-            prob.solve(solver)
-            status_code = int(getattr(prob, "status", 0))
-            status_label = pulp.LpStatus.get(status_code, f"Unknown({status_code})")
-            if status_code != pulp.LpStatusOptimal:
-                raise RuntimeError(
-                    "Adjacency ILP did not produce an optimal solution "
-                    f"(status={status_label}, code={status_code}, n={n}, "
-                    f"target_degree_sum={int(sum(target_degrees))}, connectivity={bool(connectivity)})."
-                )
-
-            adj = np.zeros((n, n), dtype=int)
-            for (i, j), var in x.items():
-                value = pulp.value(var)
-                if value is None:
-                    raise RuntimeError(
-                        "Adjacency ILP finished without assigning all decision variables "
-                        f"(status={status_label}, missing_edge=({i}, {j}))."
-                    )
-                adj[i, j] = adj[j, i] = int(round(float(value)))
-            return adj
-
-        adj = _solve([], solve_name="AdjacencyMatrixOptimization")
-        if negative_pairs and int(self.horizon_max_iterations) > 0:
-            negative_cuts = self._find_negative_horizon_cuts(
-                adj,
-                negative_pairs,
-                horizon=int(horizon),
-            )
-            if negative_cuts:
-                adj = _solve(negative_cuts, solve_name="AdjacencyMatrixOptimizationHorizonRepair")
-        return adj
+        if active_node_mask is None and horizon_node_mask is not None:
+            active_node_mask = horizon_node_mask
+        adjacency, report = solve_adjacency(
+            prob_matrix,
+            target_degrees,
+            target_edge_count=target_edge_count,
+            time_limit_seconds=effective_time_limit,
+            verbose=verbose,
+            alpha=alpha,
+            connectivity=bool(connectivity),
+            forbidden_edge_sets=forbidden_edge_sets,
+            active_node_mask=active_node_mask,
+            degree_slack_penalty=self.degree_slack_penalty,
+            edge_count_slack_penalty=self.edge_count_slack_penalty,
+            warm_start_mst=self.warm_start_mst,
+            horizon_probability_matrix=horizon_probability_matrix,
+            horizon=horizon,
+            use_horizon_constraints=self.use_horizon_ilp_constraints,
+            horizon_constraint_weight=self.horizon_constraint_weight,
+            horizon_positive_threshold=self.horizon_positive_threshold,
+            horizon_negative_threshold=self.horizon_negative_threshold,
+            horizon_pair_budget=self.horizon_pair_budget,
+            horizon_paths_per_pair=self.horizon_paths_per_pair,
+            horizon_max_iterations=self.horizon_max_iterations,
+            solver_threads=self.solver_threads,
+        )
+        self.last_adjacency_solve_report_ = report
+        return adjacency
 
     def graphs_to_adjacency_matrices(self, graphs: List[nx.Graph]) -> List[np.ndarray]:
         return [nx.to_numpy_array(graph, dtype=int) for graph in graphs]
@@ -1366,24 +1111,33 @@ class ConditionalNodeFieldGraphDecoder(object):
             )
         if self.n_jobs == 1 or len(jobs) <= 1:
             if timeout_seconds is None:
-                return [_decode_single_adjacency_job(*job) for job in jobs]
-            return [
-                run_with_fork_timeout(
-                    _decode_single_adjacency_job_star,
-                    job,
-                    timeout_seconds=float(timeout_seconds),
-                )
-                for job in jobs
-            ]
-        return _parallel_map(
-            _decode_single_adjacency_job_star,
-            jobs,
-            self.n_jobs,
-            verbose=bool(self.verbose),
-            timeout_seconds=timeout_seconds,
-            timeout_fallback_label="parallel adjacency decode",
-            fallback_on_timeout=False,
+                results = [_decode_single_adjacency_job(*job) for job in jobs]
+            else:
+                results = [
+                    run_with_fork_timeout(
+                        _decode_single_adjacency_job_star,
+                        job,
+                        timeout_seconds=float(timeout_seconds),
+                    )
+                    for job in jobs
+                ]
+        else:
+            results = _parallel_map(
+                _decode_single_adjacency_job_star,
+                jobs,
+                self.n_jobs,
+                verbose=bool(self.verbose),
+                timeout_seconds=timeout_seconds,
+                timeout_fallback_label="parallel adjacency decode",
+                fallback_on_timeout=False,
+            )
+        self.last_adjacency_solve_reports_ = [report for _, report in results]
+        self.last_adjacency_solve_report_ = (
+            self.last_adjacency_solve_reports_[-1]
+            if self.last_adjacency_solve_reports_
+            else None
         )
+        return [adjacency for adjacency, _ in results]
 
     def decode_adjacency_matrix_direct(
         self,
@@ -1427,7 +1181,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             )
 
         threshold = (
-            float(self.existence_threshold)
+            float(self.direct_edge_probability_threshold)
             if edge_probability_threshold is None
             else float(edge_probability_threshold)
         )
@@ -1454,18 +1208,11 @@ class ConditionalNodeFieldGraphDecoder(object):
 
     @staticmethod
     def _direct_edge_candidates(active_indices: np.ndarray, prob_matrix: np.ndarray):
-        edge_candidates = []
-        for local_i, i in enumerate(active_indices):
-            for j in active_indices[local_i + 1:]:
-                probability = float((prob_matrix[i, j] + prob_matrix[j, i]) / 2.0)
-                edge_candidates.append((probability, int(i), int(j)))
-        return edge_candidates
+        return _direct_edge_candidates_impl(active_indices, prob_matrix)
 
     @staticmethod
     def _select_direct_edges_top_k(edge_candidates, desired_edge_count: int):
-        target_edge_count = max(0, int(desired_edge_count))
-        target_edge_count = min(target_edge_count, len(edge_candidates))
-        return sorted(edge_candidates, key=lambda item: (-item[0], item[1], item[2]))[:target_edge_count]
+        return _select_direct_edges_top_k_impl(edge_candidates, desired_edge_count)
 
     @staticmethod
     def _select_direct_edges_degree_aware(
@@ -1474,111 +1221,20 @@ class ConditionalNodeFieldGraphDecoder(object):
         target_degrees: Sequence[int],
         desired_edge_count: int,
     ):
-        target_edge_count = max(0, int(desired_edge_count))
-        target_edge_count = min(target_edge_count, len(edge_candidates))
-        if target_edge_count == 0:
-            return []
-
-        target_degrees = np.asarray(target_degrees, dtype=int)
-        edge_by_key = {}
-        candidates_by_node = {int(node): [] for node in active_indices}
-        for probability, i, j in edge_candidates:
-            i = int(i)
-            j = int(j)
-            edge = (float(probability), min(i, j), max(i, j))
-            edge_by_key[(edge[1], edge[2])] = edge
-            if i in candidates_by_node:
-                candidates_by_node[i].append(edge)
-            if j in candidates_by_node:
-                candidates_by_node[j].append(edge)
-
-        selected_by_key = {}
-        positive_target_nodes = {
-            int(node)
-            for node in active_indices
-            if int(node) < target_degrees.shape[0] and int(target_degrees[int(node)]) > 0
-        }
-        for node in active_indices:
-            node = int(node)
-            if node >= target_degrees.shape[0]:
-                continue
-            quota = max(0, int(target_degrees[node]))
-            if quota == 0:
-                continue
-            ranked_edges = sorted(
-                (
-                    edge
-                    for edge in candidates_by_node.get(node, [])
-                    if (edge[1] if edge[2] == node else edge[2]) in positive_target_nodes
-                ),
-                key=lambda item: (-item[0], item[1], item[2]),
-            )
-            for edge in ranked_edges[:quota]:
-                selected_by_key[(edge[1], edge[2])] = edge
-
-        selected_edges = list(selected_by_key.values())
-        selected_degrees = np.zeros(target_degrees.shape[0], dtype=int)
-        for _probability, i, j in selected_edges:
-            if i < selected_degrees.shape[0]:
-                selected_degrees[i] += 1
-            if j < selected_degrees.shape[0]:
-                selected_degrees[j] += 1
-
-        while len(selected_edges) > target_edge_count:
-            removable_idx = None
-            for edge_idx in sorted(
-                range(len(selected_edges)),
-                key=lambda idx: (selected_edges[idx][0], -selected_edges[idx][1], -selected_edges[idx][2]),
-            ):
-                _probability, i, j = selected_edges[edge_idx]
-                if (
-                    i < selected_degrees.shape[0]
-                    and j < selected_degrees.shape[0]
-                    and selected_degrees[i] - 1 >= target_degrees[i]
-                    and selected_degrees[j] - 1 >= target_degrees[j]
-                ):
-                    removable_idx = edge_idx
-                    break
-            if removable_idx is None:
-                break
-            _probability, i, j = selected_edges.pop(removable_idx)
-            selected_degrees[i] -= 1
-            selected_degrees[j] -= 1
-
-        selected_edges = sorted(
-            selected_edges,
-            key=lambda item: (-item[0], item[1], item[2]),
+        return _select_direct_edges_degree_aware_impl(
+            edge_candidates,
+            active_indices,
+            target_degrees,
+            desired_edge_count,
         )
-        if len(selected_edges) >= target_edge_count:
-            return selected_edges
-
-        selected_keys = {(i, j) for _, i, j in selected_edges}
-        for edge in sorted(edge_by_key.values(), key=lambda item: (-item[0], item[1], item[2])):
-            key = (edge[1], edge[2])
-            if key in selected_keys:
-                continue
-            selected_edges.append(edge)
-            selected_keys.add(key)
-            if len(selected_edges) >= target_edge_count:
-                break
-        return selected_edges
 
     @staticmethod
     def _select_direct_edges_by_threshold(edge_candidates, threshold: float):
-        threshold = float(threshold)
-        return [
-            (probability, i, j)
-            for probability, i, j in edge_candidates
-            if probability >= threshold
-        ]
+        return _select_direct_edges_by_threshold_impl(edge_candidates, threshold)
 
     @staticmethod
     def _adjacency_from_selected_edges(n_nodes: int, selected_edges) -> np.ndarray:
-        adj_mtx = np.zeros((int(n_nodes), int(n_nodes)), dtype=float)
-        for _, i, j in selected_edges:
-            adj_mtx[i, j] = 1.0
-            adj_mtx[j, i] = 1.0
-        return adj_mtx
+        return _adjacency_from_selected_edges_impl(n_nodes, selected_edges)
 
     def _decode_single_adjacency_matrix_direct(
         self,
@@ -1853,7 +1509,7 @@ class ConditionalNodeFieldGraphDecoder(object):
             "artifact_version": _DECODER_ARTIFACT_VERSION,
             "config": {
                 "verbose": self.verbose,
-                "existence_threshold": self.existence_threshold,
+                "direct_edge_probability_threshold": self.direct_edge_probability_threshold,
                 "enforce_connectivity": self.enforce_connectivity,
                 "degree_slack_penalty": self.degree_slack_penalty,
                 "edge_count_slack_penalty": self.edge_count_slack_penalty,
@@ -1881,21 +1537,35 @@ class ConditionalNodeFieldGraphDecoder(object):
                 artifact = json.load(handle)
         except (UnicodeDecodeError, json.JSONDecodeError):
             with open(path, "rb") as handle:
-                return pickle.load(handle)
+                restored = pickle.load(handle)
+            if not hasattr(restored, "direct_edge_probability_threshold"):
+                restored.direct_edge_probability_threshold = float(
+                    getattr(restored, "existence_threshold", 0.5)
+                )
+            if hasattr(restored, "existence_threshold"):
+                delattr(restored, "existence_threshold")
+            restored.last_adjacency_solve_report_ = None
+            restored.last_adjacency_solve_reports_ = []
+            return restored
         if artifact.get("artifact_type") != "ConditionalNodeFieldGraphDecoder":
             raise RuntimeError(
                 f"Unsupported decoder artifact type {artifact.get('artifact_type')!r} in {path}."
             )
         artifact_version = int(artifact.get("artifact_version", 0))
-        if artifact_version != _DECODER_ARTIFACT_VERSION:
+        if artifact_version not in {1, _DECODER_ARTIFACT_VERSION}:
             raise RuntimeError(
                 "Saved decoder artifact version is incompatible with this NodeField version. "
-                f"Expected v{_DECODER_ARTIFACT_VERSION}, found v{artifact_version}: {path}"
+                f"Expected v1 or v{_DECODER_ARTIFACT_VERSION}, found "
+                f"v{artifact_version}: {path}"
             )
         config = artifact.get("config", {})
+        direct_edge_probability_threshold = config.get(
+            "direct_edge_probability_threshold",
+            config.get("existence_threshold", 0.5),
+        )
         return self.__class__(
             verbose=config.get("verbose", True),
-            existence_threshold=config.get("existence_threshold", 0.5),
+            direct_edge_probability_threshold=direct_edge_probability_threshold,
             enforce_connectivity=config.get("enforce_connectivity", True),
             degree_slack_penalty=config.get("degree_slack_penalty", 1e6),
             edge_count_slack_penalty=config.get("edge_count_slack_penalty", 2.0),
@@ -1915,18 +1585,7 @@ class ConditionalNodeFieldGraphDecoder(object):
 
 
 def _assemble_edge_labels_from_matrix(adj_mtx: np.ndarray, edge_label_matrix: np.ndarray) -> np.ndarray:
-    if edge_label_matrix.shape != adj_mtx.shape:
-        raise ValueError(
-            "Each predicted edge-label matrix must have the same shape as its adjacency matrix; "
-            f"received {edge_label_matrix.shape} and {adj_mtx.shape}."
-        )
-    edge_labels = []
-    n_nodes = adj_mtx.shape[0]
-    for i in range(n_nodes):
-        for j in range(i + 1, n_nodes):
-            if adj_mtx[i, j] != 0:
-                edge_labels.append(edge_label_matrix[i, j])
-    return np.asarray(edge_labels, dtype=object)
+    return _assemble_edge_labels_from_matrix_impl(adj_mtx, edge_label_matrix)
 
 
 def decode_generated_nodes(
@@ -2075,6 +1734,7 @@ def decode_generated_nodes_with_oracle(
                     target_degrees,
                     target_edge_count=desired_edge_count,
                     connectivity=False,
+                    active_node_mask=existence_mask,
                 )
             except TimeoutError:
                 verbose_log(
@@ -2616,6 +2276,7 @@ def decode_generated_nodes_with_oracle(
                     start_iteration_idx=_iteration_idx + 1,
                     target_edge_count=desired_edge_count,
                     edge_violation_prior=local_edge_violation_prior,
+                    active_node_mask=existence_mask,
                 )
             except TimeoutError:
                 verbose_log(

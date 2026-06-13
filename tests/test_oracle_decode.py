@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import conditional_node_field_graph_generator.conditional_node_field_graph_generator as cngg_module
+import conditional_node_field_graph_generator.oracle_decode as oracle_decode_module
 from conditional_node_field_graph_generator.conditional_node_field_generator import (
     ConditionalNodeFieldGraphGenerator,
 )
@@ -19,7 +20,11 @@ def test_sample_oracle_cuts_for_iteration_relaxes_to_zero_on_final_attempt(monke
         frozenset({(2, 3)}),
     ]
 
-    monkeypatch.setattr(cngg_module.random, "sample", lambda population, k: list(population)[:k])
+    monkeypatch.setattr(
+        oracle_decode_module.random,
+        "sample",
+        lambda population, k: list(population)[:k],
+    )
 
     assert sample_oracle_cuts_for_iteration(owner, accumulated, 0) == accumulated
     assert len(sample_oracle_cuts_for_iteration(owner, accumulated, 1)) == 2

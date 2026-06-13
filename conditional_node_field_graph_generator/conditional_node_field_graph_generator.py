@@ -34,6 +34,8 @@ from .conditional_node_field_graph_decoder import (
     decode_generated_nodes_with_oracle as _decode_generated_nodes_with_oracle,
     resolve_predicted_edge_labels as _resolve_predicted_edge_labels,
     resolve_predicted_node_labels as _resolve_predicted_node_labels,
+)
+from .oracle_decode import (
     sample_oracle_cuts_for_iteration as _sample_oracle_cuts_for_iteration,
     solve_oracle_relaxed_adjacency as _solve_oracle_relaxed_adjacency,
 )

@@ -935,7 +935,7 @@ def build_graph_generator(
     feasibility_failure_mode="return_partial",
     max_decode_seconds_per_sample=None,
     max_decode_attempts_per_sample=1,
-    decoder_existence_threshold=0.5,
+    decoder_direct_edge_probability_threshold=0.5,
     decoder_enforce_connectivity=True,
     decoder_degree_slack_penalty=1e6,
     decoder_warm_start_mst=True,
@@ -1122,7 +1122,7 @@ def build_graph_generator(
     )
     graph_decoder = ConditionalNodeFieldGraphDecoder(
         verbose=verbose,
-        existence_threshold=decoder_existence_threshold,
+        direct_edge_probability_threshold=decoder_direct_edge_probability_threshold,
         enforce_connectivity=decoder_enforce_connectivity,
         degree_slack_penalty=decoder_degree_slack_penalty,
         warm_start_mst=decoder_warm_start_mst,

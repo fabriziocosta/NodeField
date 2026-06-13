@@ -136,6 +136,12 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
         graph_generator.decode_service_ = DecodeService(graph_generator)
     graph_decoder = getattr(graph_generator, "graph_decoder", None)
     if graph_decoder is not None:
+        if not hasattr(graph_decoder, "direct_edge_probability_threshold"):
+            graph_decoder.direct_edge_probability_threshold = float(
+                getattr(graph_decoder, "existence_threshold", 0.5)
+            )
+        if hasattr(graph_decoder, "existence_threshold"):
+            delattr(graph_decoder, "existence_threshold")
         for attr_name, default_value in (
             ("adjacency_time_limit_seconds", 60.0),
             ("parallel_decode_timeout_seconds", 30.0),
@@ -149,6 +155,8 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
             ("horizon_pair_budget", 24),
             ("horizon_paths_per_pair", 8),
             ("horizon_max_iterations", 1),
+            ("last_adjacency_solve_report_", None),
+            ("last_adjacency_solve_reports_", []),
         ):
             if not hasattr(graph_decoder, attr_name):
                 setattr(graph_decoder, attr_name, default_value)

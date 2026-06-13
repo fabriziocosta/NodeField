@@ -750,7 +750,7 @@ from conditional_node_field_graph_generator import ConditionalNodeFieldGraphDeco
 ```python
 ConditionalNodeFieldGraphDecoder(
     verbose: bool = True,
-    existence_threshold: float = 0.5,
+    direct_edge_probability_threshold: float = 0.5,
     enforce_connectivity: bool = True,
     degree_slack_penalty: float = 1e6,
     edge_count_slack_penalty: Optional[float] = 2.0,
@@ -772,10 +772,9 @@ Parameters:
 - `verbose`
   Enable or disable decoder logging.
 
-- `existence_threshold`
-  Threshold used when deciding whether a node slot exists.
-  Increase: fewer nodes survive, which usually yields smaller graphs.
-  Decrease: more nodes survive, which usually yields larger graphs.
+- `direct_edge_probability_threshold`
+  Edge-probability threshold used by direct decoding when no desired edge count
+  is supplied. It does not control node presence.
 
 - `enforce_connectivity`
   Whether the adjacency solver forces connected graphs.
@@ -830,6 +829,13 @@ Parameters:
   Maximum number of candidate short paths enumerated for each positive pair.
 
 - `horizon_max_iterations`
+  Maximum number of negative-horizon separation rounds. Each round discovers
+  previously unseen violating short paths, adds their soft cuts, and re-solves.
+
+After an ILP decode, `last_adjacency_solve_report_` contains the latest
+`AdjacencySolveReport`; `last_adjacency_solve_reports_` contains one report per
+graph in the latest batch. Reports distinguish proven optimal solutions from
+validated integer-feasible time-limit incumbents.
   Maximum number of negative horizon-cut repair re-solves after the first ILP
   solution.
 
@@ -1731,7 +1737,7 @@ Use these three levels:
 
 If outputs are too small:
 
-- decrease `existence_threshold`,
+- adjust the node generator's existence threshold or condition on a larger node count,
 - decrease `negative_sample_factor`,
 - increase `lambda_node_exist_importance`,
 - increase `lambda_node_count_importance`.
