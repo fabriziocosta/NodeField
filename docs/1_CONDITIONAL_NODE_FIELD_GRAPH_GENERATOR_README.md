@@ -598,7 +598,32 @@ Sample graph-level conditions from cached training conditioning, then decode the
 
 By default, this samples stored graph-conditioning rows directly. When `interpolate_between_n_samples` is provided, each requested output first draws a small subset of cached training conditioning rows, scores candidate pairs by cosine similarity on the cached graph-vectorizer embeddings, samples a pair, and linearly interpolates graph embedding, node count, and edge count to form a new conditioning vector.
 
-Pass `use_feasibility_oracle=False` to `sample(...)` to skip oracle-guided cuts for that call while leaving feasibility filtering and the fitted estimator available.
+Use `feasibility_effort=0..5` as the simple generation-time feasibility control:
+
+- `0` disables feasibility filtering,
+- `1` uses structural ILP filtering without the oracle,
+- `2..5` enable the oracle with increasing budgets,
+- omitted effort uses the generator defaults, which match effort `5`.
+
+Inspect the exact map with `graph_generator.feasibility_effort_map()`. The older direct knobs such as `apply_feasibility_filtering` and `use_feasibility_oracle` remain available for compatibility and advanced experiments, but are deprecated and cannot be combined with `feasibility_effort`.
+
+Use `feasibility_filter` to choose the generate-and-test acceptance policy:
+
+- `"none"`: do not filter,
+- `"fallback"`: generate and test candidates up to the effort/profile budgets, then return a generated candidate for any unresolved slot,
+- `"strict"`: generate and test candidates up to the budgets, then skip unresolved slots.
+
+For a cheap generate-and-test baseline:
+
+```python
+samples = graph_generator.sample(
+    n_samples=N,
+    feasibility_effort=1,
+    feasibility_filter="strict",
+)
+```
+
+When `return_decode_stages=True`, `sample(...)` returns a dictionary keyed by `effort_0`, `effort_1`, and so on. If `feasibility_effort` is omitted, the dictionary includes all six levels through `effort_5`; if `feasibility_effort=3`, it includes only `effort_0` through `effort_3`.
 
 When feasibility filtering is active, the final log line reports:
 

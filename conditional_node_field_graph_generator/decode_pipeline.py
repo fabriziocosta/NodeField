@@ -130,9 +130,11 @@ def decode_with_feasibility_slots_core(
     *,
     decode_attempt_fn: Callable[[Sequence[Any], int], list[nx.Graph]],
     return_stats: bool = False,
+    return_fallbacks: bool = False,
 ) -> Any:
     """Retry decoding until each slot has a feasible graph or attempts are exhausted."""
     accepted_graphs_by_slot: list[Optional[nx.Graph]] = [None] * len(graph_conditioning)
+    fallback_graphs_by_slot: list[Optional[nx.Graph]] = [None] * len(graph_conditioning)
     pending_conditioning = graph_conditioning
     pending_slot_indices = list(range(len(graph_conditioning)))
     attempt = 0
@@ -155,6 +157,9 @@ def decode_with_feasibility_slots_core(
         total_generated += len(decoded_graphs)
         feasibility_mask = np.asarray(owner.feasibility_estimator.predict(decoded_graphs), dtype=bool)
         _validate_feasibility_mask(decoded_graphs, feasibility_mask)
+        for graph, slot_idx in zip(decoded_graphs, candidate_slot_indices):
+            if fallback_graphs_by_slot[slot_idx] is None:
+                fallback_graphs_by_slot[slot_idx] = graph
         feasible_now, filled_now = accept_feasible_candidates_by_slot(
             decoded_graphs=decoded_graphs,
             feasibility_mask=feasibility_mask.tolist(),
@@ -192,7 +197,11 @@ def decode_with_feasibility_slots_core(
         total_feasible=total_feasible,
     )
     if return_stats:
+        if return_fallbacks:
+            return accepted_graphs_by_slot, total_generated, total_feasible, fallback_graphs_by_slot
         return accepted_graphs_by_slot, total_generated, total_feasible
+    if return_fallbacks:
+        return accepted_graphs_by_slot, fallback_graphs_by_slot
     return accepted_graphs_by_slot
 
 

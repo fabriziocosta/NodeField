@@ -464,10 +464,11 @@ def test_load_graph_generator_restores_legacy_oracle_runtime_defaults(tmp_path):
     assert restored.oracle_use_node_label_cuts is False
     assert restored.oracle_use_edge_label_cuts is False
     assert restored.oracle_edge_label_min_changes_per_violation == 1
-    assert restored.oracle_add_edge_repair_budget == 32
+    assert restored.oracle_add_edge_repair_budget == 64
     assert restored.max_oracle_iterations == 10
     assert restored.max_decode_seconds_per_sample is None
-    assert restored.max_decode_attempts_per_sample == 1
+    assert restored.max_decode_attempts_per_sample == 4
+    assert restored.max_feasibility_seconds_per_sample == pytest.approx(200.0)
     assert restored.graph_decoder.adjacency_time_limit_seconds == 60.0
     assert restored.graph_decoder.parallel_decode_timeout_seconds == 30.0
     assert restored.graph_decoder.active_time_limit_seconds is None
@@ -926,6 +927,8 @@ def test_package_exports_only_new_primary_names():
         "ConditionalNodeFieldGenerator",
         "ConditionalNodeFieldGraphDecoder",
         "ConditionalNodeFieldGraphGenerator",
+        "feasibility_effort_map",
+        "resolve_feasibility_effort",
     ]
 
 

@@ -1390,6 +1390,7 @@ decode(
     guidance_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
     use_feasibility_oracle: Optional[bool] = None,
+    feasibility_effort: Optional[int] = None,
     use_ilp_decoder: bool = True,
     edge_probability_threshold: Optional[float] = None,
 ) -> List[nx.Graph]
@@ -1408,13 +1409,21 @@ Parameters:
   Increase: stronger target steering, less diversity, more artifact risk.
   Decrease: weaker target steering.
 
+- `feasibility_effort`
+  Preferred simple feasibility control. Use an integer `0..5`:
+  `0` disables feasibility filtering, `1` uses structural ILP filtering without
+  oracle cuts, and `2..5` enable the oracle with increasing candidates,
+  iterations, repair budget, retry count, decode attempts, and per-sample time.
+  Omit it to use the generator's object defaults, which match effort `5`.
+  Inspect the exact profiles with `graph_generator.feasibility_effort_map()`.
+
 - `apply_feasibility_filtering`
-  Overrides the object-level default for this call only.
+  Deprecated advanced override for this call only.
   Enable: safer outputs, slower runtime.
   Disable: faster generation, no rejection filtering.
 
 - `use_feasibility_oracle`
-  Overrides the object-level oracle default for this call only.
+  Deprecated advanced override for this call only.
   Enable: use `violating_edge_sets(...)` when available.
   Disable: skip oracle-guided cuts even if the estimator supports them.
 
@@ -1511,8 +1520,11 @@ sample(
     guidance_scale: float = 1.0,
     apply_feasibility_filtering: Optional[bool] = None,
     use_feasibility_oracle: Optional[bool] = None,
+    feasibility_effort: Optional[int] = None,
+    feasibility_filter: Optional[str] = None,
     use_ilp_decoder: bool = True,
     edge_probability_threshold: Optional[float] = None,
+    return_decode_stages: bool = False,
 ) -> List[nx.Graph]
 ```
 
@@ -1533,11 +1545,27 @@ Parameters:
 - `guidance_scale`
   Same CFG tradeoff as above.
 
+- `feasibility_effort`
+  Preferred feasibility interface. `sample(n_samples=N, feasibility_effort=5)`
+  uses the maximum/default profile. With `return_decode_stages=True`, omitted
+  effort returns `effort_0` through `effort_5`; an explicit
+  `feasibility_effort=3` returns only `effort_0` through `effort_3` for the same
+  generated instance.
+
+- `feasibility_filter`
+  Preferred generate-and-test acceptance policy for `sample(...)`.
+  `"none"` disables filtering, `"fallback"` retries up to the effort/profile
+  budgets and returns a generated candidate if no feasible graph was found for a
+  slot, and `"strict"` retries up to the budgets but skips unresolved slots.
+  This can be combined with `feasibility_effort`; effort controls how hard and
+  how broadly to generate candidates, while filter controls what to return.
+
 - `apply_feasibility_filtering`
-  Same filtering tradeoff as above.
+  Deprecated compatibility override. Do not combine with `feasibility_effort`
+  or `feasibility_filter`.
 
 - `use_feasibility_oracle`
-  Same oracle tradeoff as in `decode(...)`.
+  Deprecated compatibility override. Do not combine with `feasibility_effort`.
 
 - `use_ilp_decoder`
   Same adjacency decoding tradeoff as in `decode(...)`.

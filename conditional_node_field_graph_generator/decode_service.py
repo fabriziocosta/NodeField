@@ -68,6 +68,9 @@ class DecodeService:
     def _should_fallback_to_unfiltered(self) -> bool:
         return getattr(self.owner, "feasibility_rejection_mode", "fallback_unfiltered") == "fallback_unfiltered"
 
+    def _should_use_candidate_fallback(self) -> bool:
+        return getattr(self.owner, "feasibility_fallback_strategy", None) == "best_candidate"
+
     def _decode_single_conditioning_with_timeout(
         self,
         graph_conditioning: GraphConditioningBatch,
@@ -95,7 +98,7 @@ class DecodeService:
                 getattr(owner.graph_decoder, "adjacency_time_limit_seconds", None)
         )
         try:
-            accepted, total_generated, total_feasible = decode_with_feasibility_slots_core(
+            core_result = decode_with_feasibility_slots_core(
                 owner,
                 graph_conditioning,
                 decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self.decode_conditioning_batch(
@@ -112,9 +115,16 @@ class DecodeService:
                     attempt_idx=attempt_idx,
                 ),
                 return_stats=True,
+                return_fallbacks=self._should_use_candidate_fallback(),
             )
+            if self._should_use_candidate_fallback():
+                accepted, total_generated, total_feasible, fallback_graphs = core_result
+            else:
+                accepted, total_generated, total_feasible = core_result
+                fallback_graphs = [None]
         except RuntimeError:
             accepted = [None]
+            fallback_graphs = [None]
             total_generated = 0
             total_feasible = 0
         finally:
@@ -126,6 +136,8 @@ class DecodeService:
             return accepted[0], "feasible", int(total_generated), int(total_feasible)
         if not self._should_fallback_to_unfiltered():
             return None, "rejected", int(total_generated), int(total_feasible)
+        if self._should_use_candidate_fallback() and fallback_graphs and fallback_graphs[0] is not None:
+            return fallback_graphs[0], "unfiltered", int(total_generated), int(total_feasible)
         fallback_attempt_idx = max(
             0,
             int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0)),
@@ -438,7 +450,7 @@ class DecodeService:
                 rejected_count=rejected_count,
             )
             return accepted_graphs
-        accepted_graphs, total_generated, total_candidate_feasible = decode_with_feasibility_slots_core(
+        core_result = decode_with_feasibility_slots_core(
             owner,
             graph_conditioning,
             decode_attempt_fn=lambda candidate_conditioning, attempt_idx: self.decode_conditioning_batch(
@@ -455,7 +467,13 @@ class DecodeService:
                 attempt_idx=attempt_idx,
             ),
             return_stats=True,
+            return_fallbacks=self._should_use_candidate_fallback(),
         )
+        if self._should_use_candidate_fallback():
+            accepted_graphs, total_generated, total_candidate_feasible, fallback_graphs = core_result
+        else:
+            accepted_graphs, total_generated, total_candidate_feasible = core_result
+            fallback_graphs = [None] * len(graph_conditioning)
         feasible_count = sum(graph is not None for graph in accepted_graphs)
         unfiltered_count = 0
         if self._should_fallback_to_unfiltered():
@@ -463,22 +481,28 @@ class DecodeService:
                 slot_idx for slot_idx, graph in enumerate(accepted_graphs) if graph is None
             ]
             if missing_slot_indices:
-                fallback_graphs = list(
-                    self.decode_conditioning_batch(
-                        owner._slice_graph_conditioning(graph_conditioning, missing_slot_indices),
-                        sampling_mode=sampling_mode,
-                        desired_target=desired_target,
-                        guidance_scale=guidance_scale,
-                        predictor_scale=predictor_scale,
-                        desired_class=desired_class,
-                        classifier_scale=classifier_scale,
-                        feasibility_oracle_candidates_per_attempt=0,
-                        use_ilp_decoder=use_ilp_decoder,
-                        edge_probability_threshold=edge_probability_threshold,
-                        attempt_idx=max(0, int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0))),
+                if self._should_use_candidate_fallback():
+                    fallback_graphs_for_missing = [
+                        fallback_graphs[slot_idx]
+                        for slot_idx in missing_slot_indices
+                    ]
+                else:
+                    fallback_graphs_for_missing = list(
+                        self.decode_conditioning_batch(
+                            owner._slice_graph_conditioning(graph_conditioning, missing_slot_indices),
+                            sampling_mode=sampling_mode,
+                            desired_target=desired_target,
+                            guidance_scale=guidance_scale,
+                            predictor_scale=predictor_scale,
+                            desired_class=desired_class,
+                            classifier_scale=classifier_scale,
+                            feasibility_oracle_candidates_per_attempt=0,
+                            use_ilp_decoder=use_ilp_decoder,
+                            edge_probability_threshold=edge_probability_threshold,
+                            attempt_idx=max(0, int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0))),
+                        )
                     )
-                )
-                for slot_idx, graph in zip(missing_slot_indices, fallback_graphs):
+                for slot_idx, graph in zip(missing_slot_indices, fallback_graphs_for_missing):
                     accepted_graphs[slot_idx] = graph
                     if graph is not None:
                         unfiltered_count += 1

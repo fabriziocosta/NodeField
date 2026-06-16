@@ -43,6 +43,10 @@ from conditional_node_field_graph_generator.conditional_node_field_generator imp
 from conditional_node_field_graph_generator.conditional_node_field_graph_decoder import (
     build_single_generated_node_batch,
 )
+from conditional_node_field_graph_generator.feasibility_effort import (
+    feasibility_effort_map,
+    resolve_feasibility_effort,
+)
 from conditional_node_field_graph_generator.oracle_utils import (
     enumerate_localized_edge_addition_proposals,
 )
@@ -453,11 +457,99 @@ def test_graph_generator_init_validates_inputs():
         ConditionalNodeFieldGraphGenerator(feasibility_failure_mode="drop")
 
 
-def test_graph_generator_defaults_to_ten_oracle_iterations():
+def test_feasibility_effort_map_matches_public_profiles():
+    assert feasibility_effort_map() == {
+        0: {
+            "effort": 0,
+            "apply_feasibility_filtering": False,
+            "use_feasibility_oracle": False,
+            "feasibility_oracle_candidates_per_attempt": 0,
+            "max_oracle_iterations": 1,
+            "oracle_add_edge_repair_budget": 0,
+            "max_feasibility_attempts": 1,
+            "feasibility_candidates_per_attempt": 1,
+            "max_decode_attempts_per_sample": 1,
+            "max_feasibility_seconds_per_sample": None,
+        },
+        1: {
+            "effort": 1,
+            "apply_feasibility_filtering": True,
+            "use_feasibility_oracle": False,
+            "feasibility_oracle_candidates_per_attempt": 0,
+            "max_oracle_iterations": 1,
+            "oracle_add_edge_repair_budget": 0,
+            "max_feasibility_attempts": 1,
+            "feasibility_candidates_per_attempt": 1,
+            "max_decode_attempts_per_sample": 1,
+            "max_feasibility_seconds_per_sample": 2.0,
+        },
+        2: {
+            "effort": 2,
+            "apply_feasibility_filtering": True,
+            "use_feasibility_oracle": True,
+            "feasibility_oracle_candidates_per_attempt": 1,
+            "max_oracle_iterations": 2,
+            "oracle_add_edge_repair_budget": 8,
+            "max_feasibility_attempts": 2,
+            "feasibility_candidates_per_attempt": 1,
+            "max_decode_attempts_per_sample": 1,
+            "max_feasibility_seconds_per_sample": 2.0,
+        },
+        3: {
+            "effort": 3,
+            "apply_feasibility_filtering": True,
+            "use_feasibility_oracle": True,
+            "feasibility_oracle_candidates_per_attempt": 2,
+            "max_oracle_iterations": 5,
+            "oracle_add_edge_repair_budget": 16,
+            "max_feasibility_attempts": 8,
+            "feasibility_candidates_per_attempt": 3,
+            "max_decode_attempts_per_sample": 2,
+            "max_feasibility_seconds_per_sample": 9.0,
+        },
+        4: {
+            "effort": 4,
+            "apply_feasibility_filtering": True,
+            "use_feasibility_oracle": True,
+            "feasibility_oracle_candidates_per_attempt": 4,
+            "max_oracle_iterations": 7,
+            "oracle_add_edge_repair_budget": 32,
+            "max_feasibility_attempts": 14,
+            "feasibility_candidates_per_attempt": 6,
+            "max_decode_attempts_per_sample": 3,
+            "max_feasibility_seconds_per_sample": 43.0,
+        },
+        5: {
+            "effort": 5,
+            "apply_feasibility_filtering": True,
+            "use_feasibility_oracle": True,
+            "feasibility_oracle_candidates_per_attempt": 8,
+            "max_oracle_iterations": 10,
+            "oracle_add_edge_repair_budget": 64,
+            "max_feasibility_attempts": 20,
+            "feasibility_candidates_per_attempt": 8,
+            "max_decode_attempts_per_sample": 4,
+            "max_feasibility_seconds_per_sample": 200.0,
+        },
+    }
+
+
+@pytest.mark.parametrize("bad_effort", [-1, 6, True, 2.5, "3"])
+def test_resolve_feasibility_effort_rejects_invalid_values(bad_effort):
+    with pytest.raises(ValueError, match="feasibility_effort"):
+        resolve_feasibility_effort(bad_effort)
+
+
+def test_graph_generator_defaults_match_effort_five_profile():
     generator = ConditionalNodeFieldGraphGenerator()
 
     assert generator.max_oracle_iterations == 10
-    assert generator.oracle_add_edge_repair_budget == 32
+    assert generator.oracle_add_edge_repair_budget == 64
+    assert generator.feasibility_oracle_candidates_per_attempt == 8
+    assert generator.max_feasibility_attempts == 20
+    assert generator.feasibility_candidates_per_attempt == 8
+    assert generator.max_decode_attempts_per_sample == 4
+    assert generator.max_feasibility_seconds_per_sample == pytest.approx(200.0)
 
 
 def test_fit_from_stream_reuses_cached_warmup_batches_during_training():
@@ -997,17 +1089,12 @@ def test_sample_return_decode_stages_reuses_single_generated_batch():
         return generated
 
     def _decode_generated_nodes(generated_nodes, **kwargs):
-        decode_calls.append(("decode", generated_nodes, kwargs))
-        label = "raw" if kwargs["use_ilp_decoder"] is False else "ilp"
-        return [_graph(label), _graph(label)]
-
-    def _decode_generated_nodes_with_oracle(generated_nodes, **kwargs):
-        decode_calls.append(("oracle", generated_nodes, kwargs))
-        return [_graph("oracle"), _graph("oracle")]
+        effort_call_index = len(decode_calls)
+        decode_calls.append((effort_call_index, generated_nodes, kwargs))
+        return [_graph(f"effort_{effort_call_index}")]
 
     generator._predict_generated_nodes = _predict_generated_nodes
     generator._decode_generated_nodes = _decode_generated_nodes
-    generator._decode_generated_nodes_with_oracle = _decode_generated_nodes_with_oracle
 
     variants = generator.sample(2, return_decode_stages=True)
 
@@ -1021,22 +1108,21 @@ def test_sample_return_decode_stages_reuses_single_generated_batch():
             },
         )
     ]
-    assert sorted(variants) == ["ilp", "oracle", "raw"]
-    assert [graph.nodes[0]["label"] for graph in variants["raw"]] == ["raw", "raw"]
-    assert [graph.nodes[0]["label"] for graph in variants["ilp"]] == ["ilp", "ilp"]
-    assert [graph.nodes[0]["label"] for graph in variants["oracle"]] == ["oracle", "oracle"]
-    assert len(decode_calls) == 6
-    assert decode_calls[0][2]["use_ilp_decoder"] is False
-    assert decode_calls[1][2]["use_ilp_decoder"] is True
+    assert sorted(variants) == [f"effort_{effort}" for effort in range(6)]
+    assert [graph.nodes[0]["label"] for graph in variants["effort_0"]] == ["effort_0", "effort_6"]
+    assert [graph.nodes[0]["label"] for graph in variants["effort_5"]] == ["effort_5", "effort_11"]
+    assert len(decode_calls) == 12
+    assert decode_calls[0][2]["use_ilp_decoder"] is True
+    assert decode_calls[0][2]["feasibility_oracle_candidates_per_attempt"] == 0
     assert decode_calls[1][2]["feasibility_oracle_candidates_per_attempt"] == 0
-    assert decode_calls[2][0] == "oracle"
-    assert decode_calls[3][2]["use_ilp_decoder"] is False
-    assert decode_calls[4][2]["use_ilp_decoder"] is True
-    assert decode_calls[5][0] == "oracle"
+    assert decode_calls[2][2]["feasibility_oracle_candidates_per_attempt"] == 1
+    assert decode_calls[3][2]["feasibility_oracle_candidates_per_attempt"] == 2
+    assert decode_calls[4][2]["feasibility_oracle_candidates_per_attempt"] == 4
+    assert decode_calls[5][2]["feasibility_oracle_candidates_per_attempt"] == 8
     assert all(len(call[2]["graph_conditioning"]) == 1 for call in decode_calls)
 
 
-def test_sample_return_decode_stages_marks_oracle_missing_without_estimator():
+def test_sample_return_decode_stages_respects_explicit_max_effort():
     generator = ConditionalNodeFieldGraphGenerator(verbose=False)
     generator.is_fitted_ = True
     generator.conditional_node_generator_model = object()
@@ -1052,13 +1138,10 @@ def test_sample_return_decode_stages_marks_oracle_missing_without_estimator():
         node_presence_mask=np.ones((len(graph_conditioning), 1), dtype=bool),
     )
     generator._decode_generated_nodes = lambda generated_nodes, **kwargs: [nx.Graph(), nx.Graph()]
-    generator._decode_generated_nodes_with_oracle = lambda *args, **kwargs: pytest.fail(
-        "oracle decode should not be called without a feasibility estimator"
-    )
 
-    variants = generator.sample(2, return_decode_stages=True)
+    variants = generator.sample(2, feasibility_effort=3, return_decode_stages=True)
 
-    assert variants["oracle"] == [None, None]
+    assert sorted(variants) == ["effort_0", "effort_1", "effort_2", "effort_3"]
 
 
 def test_sample_return_decode_stages_retries_after_timeout():
@@ -1075,17 +1158,13 @@ def test_sample_return_decode_stages_retries_after_timeout():
         node_counts=np.array([2], dtype=np.int64),
         edge_counts=np.array([1], dtype=np.int64),
     )
-    generated_batches = [
-        GeneratedNodeBatch(node_presence_mask=np.ones((1, 1), dtype=bool)),
-        GeneratedNodeBatch(node_presence_mask=np.ones((1, 1), dtype=bool)),
-    ]
+    generated = GeneratedNodeBatch(node_presence_mask=np.ones((1, 1), dtype=bool))
     prediction_calls = []
     ilp_calls = []
     generator._sample_conditions = lambda n_samples, **kwargs: conditioning
 
     def _predict_generated_nodes(graph_conditioning, **kwargs):
         del graph_conditioning, kwargs
-        generated = generated_batches[len(prediction_calls)]
         prediction_calls.append(generated)
         return generated
 
@@ -1101,11 +1180,11 @@ def test_sample_return_decode_stages_retries_after_timeout():
 
     variants = generator.sample(1, return_decode_stages=True)
 
-    assert prediction_calls == generated_batches
-    assert ilp_calls == generated_batches
-    assert len(variants["raw"]) == 1
-    assert len(variants["ilp"]) == 1
-    assert variants["oracle"] == [None]
+    assert prediction_calls == [generated]
+    assert ilp_calls == [generated] * 6
+    assert variants["effort_0"] == [None]
+    assert variants["effort_1"][0] is not None
+    assert variants["effort_5"][0] is not None
 
 
 def test_sample_return_decode_stages_skips_only_slot_after_retries_exhausted():
@@ -1138,12 +1217,12 @@ def test_sample_return_decode_stages_skips_only_slot_after_retries_exhausted():
 
     variants = generator.sample(2, return_decode_stages=True)
 
-    assert variants["raw"][0] is None
-    assert variants["ilp"][0] is None
-    assert variants["oracle"][0] is None
-    assert variants["raw"][1] is not None
-    assert variants["ilp"][1] is not None
-    assert variants["oracle"][1] is None
+    assert variants["effort_0"][0] is None
+    assert variants["effort_1"][0] is None
+    assert variants["effort_5"][0] is None
+    assert variants["effort_0"][1] is not None
+    assert variants["effort_1"][1] is not None
+    assert variants["effort_5"][1] is not None
 
 
 def test_toggle_verbose_updates_nested_components():
@@ -3675,7 +3754,7 @@ def test_load_graph_generator_restores_legacy_sample_oracle_runtime_defaults(tmp
         == ConditionalNodeFieldGraphGenerator._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
     )
     assert restored.max_decode_seconds_per_sample is None
-    assert restored.max_decode_attempts_per_sample == 1
+    assert restored.max_decode_attempts_per_sample == 4
     assert restored.graph_decoder.adjacency_time_limit_seconds == pytest.approx(60.0)
     assert restored.graph_decoder.parallel_decode_timeout_seconds == pytest.approx(30.0)
     assert restored.graph_decoder.active_time_limit_seconds is None
@@ -4757,6 +4836,202 @@ def test_sample_can_enable_feasibility_oracle_when_configured_budget_is_zero(mon
         captured["feasibility_oracle_candidates_per_attempt"]
         == ConditionalNodeFieldGraphGenerator._DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT
     )
+
+
+def test_sample_feasibility_effort_applies_profile_temporarily(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    generator.feasibility_oracle_candidates_per_attempt = 8
+    generator.max_oracle_iterations = 10
+    generator.oracle_add_edge_repair_budget = 64
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        assert generator.feasibility_oracle_candidates_per_attempt == 2
+        assert generator.max_oracle_iterations == 5
+        assert generator.oracle_add_edge_repair_budget == 16
+        assert generator.max_feasibility_attempts == 8
+        assert generator.feasibility_candidates_per_attempt == 3
+        assert generator.max_decode_attempts_per_sample == 2
+        assert generator.max_feasibility_seconds_per_sample == pytest.approx(9.0)
+        return ["decoded"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, feasibility_effort=3)
+
+    assert result == ["decoded"]
+    assert captured["apply_feasibility_filtering"] is True
+    assert captured["feasibility_oracle_candidates_per_attempt"] == 2
+    assert generator.feasibility_oracle_candidates_per_attempt == 8
+    assert generator.max_oracle_iterations == 10
+    assert generator.oracle_add_edge_repair_budget == 64
+
+
+def test_sample_feasibility_effort_zero_disables_filtering_and_oracle(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        return ["decoded"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, feasibility_effort=0)
+
+    assert result == ["decoded"]
+    assert captured["apply_feasibility_filtering"] is False
+    assert captured["feasibility_oracle_candidates_per_attempt"] == 0
+
+
+def test_sample_feasibility_filter_none_disables_filtering_with_effort(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        return ["decoded"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, feasibility_effort=5, feasibility_filter="none")
+
+    assert result == ["decoded"]
+    assert captured["apply_feasibility_filtering"] is False
+    assert captured["feasibility_oracle_candidates_per_attempt"] == 8
+
+
+def test_sample_feasibility_filter_fallback_applies_candidate_fallback_temporarily(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    original_rejection_mode = generator.feasibility_rejection_mode
+    original_failure_mode = generator.feasibility_failure_mode
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        assert generator.feasibility_rejection_mode == "fallback_unfiltered"
+        assert generator.feasibility_failure_mode == "return_partial"
+        assert generator.feasibility_fallback_strategy == "best_candidate"
+        return ["decoded"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, feasibility_filter="fallback")
+
+    assert result == ["decoded"]
+    assert captured["apply_feasibility_filtering"] is True
+    assert generator.feasibility_rejection_mode == original_rejection_mode
+    assert generator.feasibility_failure_mode == original_failure_mode
+    assert not hasattr(generator, "feasibility_fallback_strategy")
+
+
+def test_sample_feasibility_filter_strict_applies_skip_policy_temporarily(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    captured = {}
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        captured.update(kwargs)
+        assert generator.feasibility_rejection_mode == "strict"
+        assert generator.feasibility_failure_mode == "return_partial"
+        return []
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, feasibility_filter="strict")
+
+    assert result == []
+    assert captured["apply_feasibility_filtering"] is True
+    assert generator.feasibility_rejection_mode == "fallback_unfiltered"
+
+
+def test_sample_feasibility_filter_rejects_apply_filtering_override():
+    generator = _make_fitted_sampling_generator()
+
+    with pytest.raises(ValueError, match="feasibility_filter cannot be combined"):
+        generator.sample(1, feasibility_filter="strict", apply_feasibility_filtering=True)
+
+
+def test_sample_feasibility_effort_rejects_legacy_kwargs():
+    generator = _make_fitted_sampling_generator()
+
+    with pytest.raises(ValueError, match="feasibility_effort cannot be combined"):
+        generator.sample(1, feasibility_effort=3, use_feasibility_oracle=False)
+
+
+def test_sample_legacy_feasibility_kwargs_warn(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+    monkeypatch.setattr(generator.decode_service_, "decode", lambda graph_conditioning, **kwargs: ["decoded"])
+
+    with pytest.warns(DeprecationWarning, match="use feasibility_effort=0..5"):
+        result = generator.sample(1, use_feasibility_oracle=False)
+
+    assert result == ["decoded"]
 
 
 def test_graph_generator_rejects_invalid_feasibility_rejection_mode():

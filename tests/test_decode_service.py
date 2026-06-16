@@ -201,6 +201,37 @@ def test_decode_service_timeout_mode_records_final_summary_with_fallback(monkeyp
     }
 
 
+def test_decode_service_candidate_fallback_returns_generated_candidate():
+    owner = _Owner()
+    owner.feasibility_fallback_strategy = "best_candidate"
+    owner.max_feasibility_attempts = 1
+    owner.feasibility_candidates_per_attempt = 2
+    service = DecodeService(owner)
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.asarray([[0.0]], dtype=float),
+        node_counts=np.asarray([2], dtype=int),
+        edge_counts=np.asarray([1], dtype=int),
+    )
+    decode_calls = {"count": 0}
+
+    def _fake_decode(candidate_conditioning, sampling_mode, **kwargs):
+        del candidate_conditioning, sampling_mode, kwargs
+        decode_calls["count"] += 1
+        return [
+            {"slot": 0, "candidate": 0, "feasible": False},
+            {"slot": 0, "candidate": 1, "feasible": False},
+        ]
+
+    service.decode_conditioning_batch = _fake_decode
+
+    decoded = service.decode_with_feasibility_slots(conditioning, sampling_mode="unguided")
+
+    assert decoded == [{"slot": 0, "candidate": 0, "feasible": False}]
+    assert decode_calls["count"] == 1
+    assert owner.last_decode_summary_["unfiltered"] == 1
+    assert owner.last_decode_summary_["rejected"] == 0
+
+
 def test_decode_service_strict_mode_skips_unfiltered_fallback(monkeypatch):
     owner = _Owner()
     owner.max_feasibility_seconds_per_sample = 5.0

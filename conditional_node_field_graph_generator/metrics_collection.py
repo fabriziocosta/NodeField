@@ -598,6 +598,35 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
             os.fsync(handle.fileno())
         os.replace(merged_path, self.output_path)
 
+    @staticmethod
+    def _training_variants_to_legacy_rows(variants, n_samples):
+        if not variants:
+            return [], [], [None] * int(n_samples)
+        if "raw" in variants or "ilp" in variants or "oracle" in variants:
+            return (
+                variants.get("raw", []),
+                variants.get("ilp", []),
+                variants.get("oracle", [None] * int(n_samples)),
+            )
+        effort_keys = sorted(
+            (
+                key
+                for key in variants
+                if isinstance(key, str) and key.startswith("effort_")
+            ),
+            key=lambda key: int(key.split("_", 1)[1]),
+        )
+        if not effort_keys:
+            return [], [], [None] * int(n_samples)
+        raw_key = "effort_0" if "effort_0" in variants else effort_keys[0]
+        ilp_key = "effort_1" if "effort_1" in variants else effort_keys[min(1, len(effort_keys) - 1)]
+        oracle_key = effort_keys[-1]
+        return (
+            variants.get(raw_key, []),
+            variants.get(ilp_key, []),
+            variants.get(oracle_key, [None] * int(n_samples)),
+        )
+
     def _write_pdf_page(self, epoch_record):
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         page_path = None
@@ -674,9 +703,10 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                 if variants is None and callable(variant_sampler):
                     variants = variant_sampler(self.n_samples)
                 if variants is not None:
-                    raw_graphs = variants.get("raw", [])
-                    ilp_graphs = variants.get("ilp", [])
-                    oracle_graphs = variants.get("oracle", [None] * self.n_samples)
+                    raw_graphs, ilp_graphs, oracle_graphs = self._training_variants_to_legacy_rows(
+                        variants,
+                        self.n_samples,
+                    )
                 else:
                     raw_graphs = owner.sample(
                         n_samples=self.n_samples,

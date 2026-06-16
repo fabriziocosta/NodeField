@@ -17,6 +17,7 @@ from .conditioning_sampler import ConditioningSampler
 from .decode_service import DecodeService
 from .naming_utils import sanitize_model_token
 from .node_batch_builder import NodeBatchBuilder
+from .feasibility_effort import DEFAULT_FEASIBILITY_EFFORT_PROFILE
 from .runtime_paths import resolve_saved_generator_dir as _resolve_saved_generator_dir
 from .runtime_utils import get_runtime_logger, run_with_fork_timeout
 from .stream_fit import StreamFitService
@@ -61,14 +62,17 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
     if node_generator is not None and not hasattr(node_generator, "locality_horizon_"):
         node_generator.locality_horizon_ = int(getattr(graph_generator, "locality_horizon", 1))
     if not hasattr(graph_generator, "feasibility_oracle_candidates_per_attempt"):
-        default_oracle_candidates = int(
-            getattr(graph_generator, "_DEFAULT_FEASIBILITY_ORACLE_CANDIDATES_PER_ATTEMPT", 2)
+        graph_generator.feasibility_oracle_candidates_per_attempt = int(
+            DEFAULT_FEASIBILITY_EFFORT_PROFILE.feasibility_oracle_candidates_per_attempt
         )
-        graph_generator.feasibility_oracle_candidates_per_attempt = default_oracle_candidates
     if not hasattr(graph_generator, "max_oracle_iterations"):
-        graph_generator.max_oracle_iterations = 10
+        graph_generator.max_oracle_iterations = int(
+            DEFAULT_FEASIBILITY_EFFORT_PROFILE.max_oracle_iterations
+        )
     if not hasattr(graph_generator, "oracle_add_edge_repair_budget"):
-        graph_generator.oracle_add_edge_repair_budget = 32
+        graph_generator.oracle_add_edge_repair_budget = int(
+            DEFAULT_FEASIBILITY_EFFORT_PROFILE.oracle_add_edge_repair_budget
+        )
     if not hasattr(graph_generator, "oracle_use_node_label_cuts"):
         graph_generator.oracle_use_node_label_cuts = False
     if not hasattr(graph_generator, "oracle_use_edge_label_cuts"):
@@ -90,7 +94,21 @@ def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
     if not hasattr(graph_generator, "max_decode_seconds_per_sample"):
         graph_generator.max_decode_seconds_per_sample = None
     if not hasattr(graph_generator, "max_decode_attempts_per_sample"):
-        graph_generator.max_decode_attempts_per_sample = 1
+        graph_generator.max_decode_attempts_per_sample = int(
+            DEFAULT_FEASIBILITY_EFFORT_PROFILE.max_decode_attempts_per_sample
+        )
+    if not hasattr(graph_generator, "max_feasibility_attempts"):
+        graph_generator.max_feasibility_attempts = int(
+            DEFAULT_FEASIBILITY_EFFORT_PROFILE.max_feasibility_attempts
+        )
+    if not hasattr(graph_generator, "feasibility_candidates_per_attempt"):
+        graph_generator.feasibility_candidates_per_attempt = int(
+            DEFAULT_FEASIBILITY_EFFORT_PROFILE.feasibility_candidates_per_attempt
+        )
+    if not hasattr(graph_generator, "max_feasibility_seconds_per_sample"):
+        graph_generator.max_feasibility_seconds_per_sample = (
+            DEFAULT_FEASIBILITY_EFFORT_PROFILE.max_feasibility_seconds_per_sample
+        )
     if not hasattr(graph_generator, "use_embedding_svd"):
         graph_generator.use_embedding_svd = False
     if not hasattr(graph_generator, "node_embedding_svd_dimension"):
