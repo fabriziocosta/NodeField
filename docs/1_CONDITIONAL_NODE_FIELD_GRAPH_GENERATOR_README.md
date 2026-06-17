@@ -625,6 +625,8 @@ samples = graph_generator.sample(
 
 When `return_decode_stages=True`, `sample(...)` returns a dictionary keyed by `effort_0`, `effort_1`, and so on. If `feasibility_effort` is omitted, the dictionary includes all six levels through `effort_5`; if `feasibility_effort=3`, it includes only `effort_0` through `effort_3`.
 
+For ordinary `sample(...)` calls, explicit efforts `2..5` automatically retry the same sampled conditioning at effort `1` with fallback filtering if the requested effort returns no graphs. This preserves a cheap level-1 generate-and-test result when a higher-effort oracle solve times out or otherwise produces an empty batch.
+
 When feasibility filtering is active, the final log line reports:
 
 - `requested`

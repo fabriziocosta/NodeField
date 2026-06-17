@@ -5000,6 +5000,49 @@ def test_sample_feasibility_filter_strict_applies_skip_policy_temporarily(monkey
     assert generator.feasibility_rejection_mode == "fallback_unfiltered"
 
 
+def test_sample_high_effort_empty_result_falls_back_to_effort_one(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    decode_calls = []
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        decode_calls.append(
+            {
+                "kwargs": dict(kwargs),
+                "oracle_candidates": generator.feasibility_oracle_candidates_per_attempt,
+                "max_oracle_iterations": generator.max_oracle_iterations,
+                "fallback_strategy": getattr(generator, "feasibility_fallback_strategy", None),
+            }
+        )
+        if len(decode_calls) == 1:
+            return []
+        return ["effort-1-fallback"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, feasibility_effort=3, feasibility_filter="strict")
+
+    assert result == ["effort-1-fallback"]
+    assert len(decode_calls) == 2
+    assert decode_calls[0]["oracle_candidates"] == 2
+    assert decode_calls[0]["kwargs"]["apply_feasibility_filtering"] is True
+    assert decode_calls[1]["oracle_candidates"] == 0
+    assert decode_calls[1]["max_oracle_iterations"] == 1
+    assert decode_calls[1]["fallback_strategy"] == "best_candidate"
+    assert decode_calls[1]["kwargs"]["apply_feasibility_filtering"] is True
+    assert not hasattr(generator, "feasibility_fallback_strategy")
+
+
 def test_sample_feasibility_filter_rejects_apply_filtering_override():
     generator = _make_fitted_sampling_generator()
 

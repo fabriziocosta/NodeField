@@ -3179,7 +3179,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         else 5
                     ),
                 )
-            return self.decode_service_.decode(
+            decoded_graphs = self.decode_service_.decode(
                 sampled_conditioning,
                 sampling_mode="unguided",
                 desired_target=desired_target,
@@ -3204,6 +3204,37 @@ class ConditionalNodeFieldGraphGenerator(object):
                 use_ilp_decoder=use_ilp_decoder,
                 edge_probability_threshold=edge_probability_threshold,
             )
+            if (
+                effort_profile is not None
+                and int(effort_profile.effort) >= 2
+                and len(decoded_graphs) == 0
+            ):
+                verbose_log(
+                    self,
+                    "Feasibility effort returned no graphs; retrying same sampled "
+                    "conditioning at effort 1 with fallback filtering.",
+                    level=1,
+                )
+                with self._feasibility_effort_context(1) as fallback_effort_profile, self._feasibility_filter_context(
+                    "fallback"
+                ) as fallback_filter_override:
+                    decoded_graphs = self.decode_service_.decode(
+                        sampled_conditioning,
+                        sampling_mode="unguided",
+                        desired_target=desired_target,
+                        guidance_scale=guidance_scale,
+                        apply_feasibility_filtering=(
+                            fallback_filter_override
+                            if fallback_filter_override is not None
+                            else fallback_effort_profile.apply_feasibility_filtering
+                        ),
+                        feasibility_oracle_candidates_per_attempt=int(
+                            self.feasibility_oracle_candidates_per_attempt
+                        ),
+                        use_ilp_decoder=use_ilp_decoder,
+                        edge_probability_threshold=edge_probability_threshold,
+                    )
+            return decoded_graphs
 
     def _sample_decode_stages(
         self,
