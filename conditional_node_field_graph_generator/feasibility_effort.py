@@ -9,6 +9,7 @@ from typing import Dict, Optional
 @dataclass(frozen=True)
 class FeasibilityEffortProfile:
     effort: int
+    use_ilp_decoder: bool
     apply_feasibility_filtering: bool
     use_feasibility_oracle: bool
     feasibility_oracle_candidates_per_attempt: int
@@ -24,12 +25,12 @@ class FeasibilityEffortProfile:
 
 
 _EFFORT_PROFILES = {
-    0: FeasibilityEffortProfile(0, False, False, 0, 1, 0, 1, 1, 1, None),
-    1: FeasibilityEffortProfile(1, True, False, 0, 1, 0, 1, 1, 1, 2.0),
-    2: FeasibilityEffortProfile(2, True, True, 1, 2, 8, 2, 1, 1, 2.0),
-    3: FeasibilityEffortProfile(3, True, True, 2, 5, 16, 8, 3, 2, 9.0),
-    4: FeasibilityEffortProfile(4, True, True, 4, 7, 32, 14, 6, 3, 43.0),
-    5: FeasibilityEffortProfile(5, True, True, 8, 10, 64, 20, 8, 4, 200.0),
+    0: FeasibilityEffortProfile(0, False, False, False, 0, 1, 0, 1, 1, 1, None),
+    1: FeasibilityEffortProfile(1, True, True, False, 0, 1, 0, 1, 1, 1, 2.0),
+    2: FeasibilityEffortProfile(2, True, True, True, 1, 2, 8, 2, 1, 1, 2.0),
+    3: FeasibilityEffortProfile(3, True, True, True, 2, 5, 16, 8, 3, 2, 9.0),
+    4: FeasibilityEffortProfile(4, True, True, True, 4, 7, 32, 14, 6, 3, 43.0),
+    5: FeasibilityEffortProfile(5, True, True, True, 8, 10, 64, 20, 8, 4, 200.0),
 }
 
 
@@ -57,4 +58,3 @@ def feasibility_effort_map() -> Dict[int, dict]:
 
 DEFAULT_FEASIBILITY_EFFORT = 5
 DEFAULT_FEASIBILITY_EFFORT_PROFILE = _EFFORT_PROFILES[DEFAULT_FEASIBILITY_EFFORT]
-

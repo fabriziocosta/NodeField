@@ -3140,7 +3140,6 @@ class ConditionalNodeFieldGraphGenerator(object):
     ) -> Union[List[nx.Graph], Dict[str, List[Optional[nx.Graph]]]]:
         """Sample random graph-conditioning vectors and decode them into graphs."""
         self._require_fitted_for_generation()
-        self._log_sampling_request(n_samples, use_ilp_decoder=use_ilp_decoder)
         if interpolate_between_n_samples is not None:
             verbose_log(
                 self,
@@ -3154,6 +3153,12 @@ class ConditionalNodeFieldGraphGenerator(object):
             raise ValueError(
                 "feasibility_filter cannot be combined with apply_feasibility_filtering."
             )
+        log_use_ilp_decoder = (
+            resolve_feasibility_effort(feasibility_effort).use_ilp_decoder
+            if feasibility_effort is not None
+            else use_ilp_decoder
+        )
+        self._log_sampling_request(n_samples, use_ilp_decoder=log_use_ilp_decoder)
         with self._feasibility_effort_context(
             feasibility_effort,
             apply_feasibility_filtering=apply_feasibility_filtering,
@@ -3201,7 +3206,11 @@ class ConditionalNodeFieldGraphGenerator(object):
                         feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
                     )
                 ),
-                use_ilp_decoder=use_ilp_decoder,
+                use_ilp_decoder=(
+                    effort_profile.use_ilp_decoder
+                    if effort_profile is not None
+                    else use_ilp_decoder
+                ),
                 edge_probability_threshold=edge_probability_threshold,
             )
             if (
@@ -3231,7 +3240,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                         feasibility_oracle_candidates_per_attempt=int(
                             self.feasibility_oracle_candidates_per_attempt
                         ),
-                        use_ilp_decoder=use_ilp_decoder,
+                        use_ilp_decoder=fallback_effort_profile.use_ilp_decoder,
                         edge_probability_threshold=edge_probability_threshold,
                     )
             return decoded_graphs
@@ -3270,7 +3279,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                                 if profile.use_feasibility_oracle
                                 else 0
                             ),
-                            use_ilp_decoder=True,
+                            use_ilp_decoder=profile.use_ilp_decoder,
                         )
                     except (RuntimeError, TimeoutError) as exc:
                         verbose_log(

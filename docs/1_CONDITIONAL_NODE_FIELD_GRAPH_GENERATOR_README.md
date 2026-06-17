@@ -600,7 +600,7 @@ By default, this samples stored graph-conditioning rows directly. When `interpol
 
 Use `feasibility_effort=0..5` as the simple generation-time feasibility control:
 
-- `0` disables feasibility filtering,
+- `0` uses direct edge-threshold decoding without ILP, filtering, or oracle,
 - `1` uses structural ILP filtering without the oracle,
 - `2..5` enable the oracle with increasing budgets,
 - omitted effort uses the generator defaults, which match effort `5`.

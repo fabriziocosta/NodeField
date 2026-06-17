@@ -461,6 +461,7 @@ def test_feasibility_effort_map_matches_public_profiles():
     assert feasibility_effort_map() == {
         0: {
             "effort": 0,
+            "use_ilp_decoder": False,
             "apply_feasibility_filtering": False,
             "use_feasibility_oracle": False,
             "feasibility_oracle_candidates_per_attempt": 0,
@@ -473,6 +474,7 @@ def test_feasibility_effort_map_matches_public_profiles():
         },
         1: {
             "effort": 1,
+            "use_ilp_decoder": True,
             "apply_feasibility_filtering": True,
             "use_feasibility_oracle": False,
             "feasibility_oracle_candidates_per_attempt": 0,
@@ -485,6 +487,7 @@ def test_feasibility_effort_map_matches_public_profiles():
         },
         2: {
             "effort": 2,
+            "use_ilp_decoder": True,
             "apply_feasibility_filtering": True,
             "use_feasibility_oracle": True,
             "feasibility_oracle_candidates_per_attempt": 1,
@@ -497,6 +500,7 @@ def test_feasibility_effort_map_matches_public_profiles():
         },
         3: {
             "effort": 3,
+            "use_ilp_decoder": True,
             "apply_feasibility_filtering": True,
             "use_feasibility_oracle": True,
             "feasibility_oracle_candidates_per_attempt": 2,
@@ -509,6 +513,7 @@ def test_feasibility_effort_map_matches_public_profiles():
         },
         4: {
             "effort": 4,
+            "use_ilp_decoder": True,
             "apply_feasibility_filtering": True,
             "use_feasibility_oracle": True,
             "feasibility_oracle_candidates_per_attempt": 4,
@@ -521,6 +526,7 @@ def test_feasibility_effort_map_matches_public_profiles():
         },
         5: {
             "effort": 5,
+            "use_ilp_decoder": True,
             "apply_feasibility_filtering": True,
             "use_feasibility_oracle": True,
             "feasibility_oracle_candidates_per_attempt": 8,
@@ -1112,8 +1118,9 @@ def test_sample_return_decode_stages_reuses_single_generated_batch():
     assert [graph.nodes[0]["label"] for graph in variants["effort_0"]] == ["effort_0", "effort_6"]
     assert [graph.nodes[0]["label"] for graph in variants["effort_5"]] == ["effort_5", "effort_11"]
     assert len(decode_calls) == 12
-    assert decode_calls[0][2]["use_ilp_decoder"] is True
+    assert decode_calls[0][2]["use_ilp_decoder"] is False
     assert decode_calls[0][2]["feasibility_oracle_candidates_per_attempt"] == 0
+    assert decode_calls[1][2]["use_ilp_decoder"] is True
     assert decode_calls[1][2]["feasibility_oracle_candidates_per_attempt"] == 0
     assert decode_calls[2][2]["feasibility_oracle_candidates_per_attempt"] == 1
     assert decode_calls[3][2]["feasibility_oracle_candidates_per_attempt"] == 2
@@ -1181,9 +1188,9 @@ def test_sample_return_decode_stages_retries_after_timeout():
     variants = generator.sample(1, return_decode_stages=True)
 
     assert prediction_calls == [generated]
-    assert ilp_calls == [generated] * 6
-    assert variants["effort_0"] == [None]
-    assert variants["effort_1"][0] is not None
+    assert ilp_calls == [generated] * 5
+    assert variants["effort_0"][0] is not None
+    assert variants["effort_1"] == [None]
     assert variants["effort_5"][0] is not None
 
 
@@ -1217,7 +1224,7 @@ def test_sample_return_decode_stages_skips_only_slot_after_retries_exhausted():
 
     variants = generator.sample(2, return_decode_stages=True)
 
-    assert variants["effort_0"][0] is None
+    assert variants["effort_0"][0] is not None
     assert variants["effort_1"][0] is None
     assert variants["effort_5"][0] is None
     assert variants["effort_0"][1] is not None
@@ -4905,6 +4912,7 @@ def test_sample_feasibility_effort_zero_disables_filtering_and_oracle(monkeypatc
     assert result == ["decoded"]
     assert captured["apply_feasibility_filtering"] is False
     assert captured["feasibility_oracle_candidates_per_attempt"] == 0
+    assert captured["use_ilp_decoder"] is False
 
 
 def test_sample_feasibility_filter_none_disables_filtering_with_effort(monkeypatch):

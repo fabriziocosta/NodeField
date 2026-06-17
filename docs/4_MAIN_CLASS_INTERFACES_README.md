@@ -1411,9 +1411,10 @@ Parameters:
 
 - `feasibility_effort`
   Preferred simple feasibility control. Use an integer `0..5`:
-  `0` disables feasibility filtering, `1` uses structural ILP filtering without
-  oracle cuts, and `2..5` enable the oracle with increasing candidates,
-  iterations, repair budget, retry count, decode attempts, and per-sample time.
+  `0` uses direct edge-threshold decoding without ILP, filtering, or oracle;
+  `1` uses structural ILP filtering without oracle cuts; and `2..5` enable the
+  oracle with increasing candidates, iterations, repair budget, retry count,
+  decode attempts, and per-sample time.
   Omit it to use the generator's object defaults, which match effort `5`.
   Inspect the exact profiles with `graph_generator.feasibility_effort_map()`.
 
