@@ -71,6 +71,53 @@ class DecodeService:
     def _should_use_candidate_fallback(self) -> bool:
         return getattr(self.owner, "feasibility_fallback_strategy", None) == "best_candidate"
 
+    def _decode_unfiltered_backup_conditioning(
+        self,
+        graph_conditioning: GraphConditioningBatch,
+        *,
+        sampling_mode: str,
+        desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
+        guidance_scale: float = 1.0,
+        predictor_scale: float = 1.0,
+        desired_class: Optional[Union[int, Sequence[Any]]] = None,
+        classifier_scale: float = 1.0,
+        use_ilp_decoder: bool = True,
+        edge_probability_threshold: Optional[float] = None,
+        attempt_idx: int = 0,
+    ) -> list[nx.Graph]:
+        owner = self.owner
+        previous_deadline = owner._get_generation_timeout_deadline()
+        previous_max_feasibility_seconds = getattr(owner, "max_feasibility_seconds_per_sample", None)
+        graph_decoder = getattr(owner, "graph_decoder", None)
+        previous_active_time_limit = None if graph_decoder is None else getattr(
+            graph_decoder,
+            "active_time_limit_seconds",
+            None,
+        )
+        try:
+            owner._restore_generation_timeout_deadline(None)
+            owner.max_feasibility_seconds_per_sample = None
+            if graph_decoder is not None:
+                graph_decoder.active_time_limit_seconds = previous_active_time_limit
+            return self.decode_conditioning_batch(
+                graph_conditioning,
+                sampling_mode=sampling_mode,
+                desired_target=desired_target,
+                guidance_scale=guidance_scale,
+                predictor_scale=predictor_scale,
+                desired_class=desired_class,
+                classifier_scale=classifier_scale,
+                feasibility_oracle_candidates_per_attempt=0,
+                use_ilp_decoder=use_ilp_decoder,
+                edge_probability_threshold=edge_probability_threshold,
+                attempt_idx=attempt_idx,
+            )
+        finally:
+            owner.max_feasibility_seconds_per_sample = previous_max_feasibility_seconds
+            if graph_decoder is not None:
+                graph_decoder.active_time_limit_seconds = previous_active_time_limit
+            owner._restore_generation_timeout_deadline(previous_deadline)
+
     def _decode_single_conditioning_with_timeout(
         self,
         graph_conditioning: GraphConditioningBatch,
@@ -142,7 +189,7 @@ class DecodeService:
             0,
             int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0)),
         )
-        fallback_graphs = self.decode_conditioning_batch(
+        fallback_graphs = self._decode_unfiltered_backup_conditioning(
             graph_conditioning,
             sampling_mode=sampling_mode,
             desired_target=desired_target,
@@ -150,7 +197,6 @@ class DecodeService:
             predictor_scale=predictor_scale,
             desired_class=desired_class,
             classifier_scale=classifier_scale,
-            feasibility_oracle_candidates_per_attempt=0,
             use_ilp_decoder=use_ilp_decoder,
             edge_probability_threshold=edge_probability_threshold,
             attempt_idx=fallback_attempt_idx,
@@ -488,7 +534,7 @@ class DecodeService:
                     ]
                 else:
                     fallback_graphs_for_missing = list(
-                        self.decode_conditioning_batch(
+                        self._decode_unfiltered_backup_conditioning(
                             owner._slice_graph_conditioning(graph_conditioning, missing_slot_indices),
                             sampling_mode=sampling_mode,
                             desired_target=desired_target,
@@ -496,7 +542,6 @@ class DecodeService:
                             predictor_scale=predictor_scale,
                             desired_class=desired_class,
                             classifier_scale=classifier_scale,
-                            feasibility_oracle_candidates_per_attempt=0,
                             use_ilp_decoder=use_ilp_decoder,
                             edge_probability_threshold=edge_probability_threshold,
                             attempt_idx=max(0, int(getattr(owner, "feasibility_oracle_candidates_per_attempt", 0))),

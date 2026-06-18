@@ -24,6 +24,7 @@ class _Owner:
         self.max_decode_attempts_per_sample = 1
         self.graph_decoder = None
         self._calls = 0
+        self._generation_timeout_deadline = None
         self.conditional_node_generator_model = types.SimpleNamespace(
             predict_classifier_guided=lambda *args, **kwargs: None,
         )
@@ -52,12 +53,15 @@ class _Owner:
         return None
 
     def _set_generation_timeout_deadline(self, timeout_seconds):
-        del timeout_seconds
-        return None
+        previous = self._generation_timeout_deadline
+        self._generation_timeout_deadline = timeout_seconds
+        return previous
 
     def _restore_generation_timeout_deadline(self, previous_deadline):
-        del previous_deadline
-        return None
+        self._generation_timeout_deadline = previous_deadline
+
+    def _get_generation_timeout_deadline(self):
+        return self._generation_timeout_deadline
 
     def _resolve_solver_time_limit_seconds(self, default_seconds=None):
         return default_seconds
@@ -230,6 +234,39 @@ def test_decode_service_candidate_fallback_returns_generated_candidate():
     assert decode_calls["count"] == 1
     assert owner.last_decode_summary_["unfiltered"] == 1
     assert owner.last_decode_summary_["rejected"] == 0
+
+
+def test_decode_service_unfiltered_backup_ignores_feasibility_timing(monkeypatch):
+    owner = _Owner()
+    owner.max_feasibility_seconds_per_sample = 5.0
+    owner._generation_timeout_deadline = 123.0
+    service = DecodeService(owner)
+    conditioning = GraphConditioningBatch(
+        graph_embeddings=np.asarray([[0.0]], dtype=float),
+        node_counts=np.asarray([2], dtype=int),
+        edge_counts=np.asarray([1], dtype=int),
+    )
+
+    monkeypatch.setattr(
+        "conditional_node_field_graph_generator.decode_service.decode_with_feasibility_slots_core",
+        lambda *args, **kwargs: ([None], 1, 0) if kwargs.get("return_stats") else [None],
+    )
+
+    def _fake_decode(candidate_conditioning, sampling_mode, **kwargs):
+        del candidate_conditioning, sampling_mode
+        assert owner.max_feasibility_seconds_per_sample is None
+        assert owner._get_generation_timeout_deadline() is None
+        assert kwargs["feasibility_oracle_candidates_per_attempt"] == 0
+        return [{"slot": 0, "feasible": False}]
+
+    service.decode_conditioning_batch = _fake_decode
+
+    decoded = service.decode_with_feasibility_slots(conditioning, sampling_mode="unguided")
+
+    assert decoded == [{"slot": 0, "feasible": False}]
+    assert owner.max_feasibility_seconds_per_sample == 5.0
+    assert owner._get_generation_timeout_deadline() == 123.0
+    assert owner.last_decode_summary_["unfiltered"] == 1
 
 
 def test_decode_service_strict_mode_skips_unfiltered_fallback(monkeypatch):
