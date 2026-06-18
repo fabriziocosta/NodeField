@@ -3184,35 +3184,46 @@ class ConditionalNodeFieldGraphGenerator(object):
                         else 5
                     ),
                 )
-            decoded_graphs = self.decode_service_.decode(
-                sampled_conditioning,
-                sampling_mode="unguided",
-                desired_target=desired_target,
-                guidance_scale=guidance_scale,
-                apply_feasibility_filtering=(
-                    filter_override
-                    if filter_override is not None
-                    else (
-                        effort_profile.apply_feasibility_filtering
+            try:
+                decoded_graphs = self.decode_service_.decode(
+                    sampled_conditioning,
+                    sampling_mode="unguided",
+                    desired_target=desired_target,
+                    guidance_scale=guidance_scale,
+                    apply_feasibility_filtering=(
+                        filter_override
+                        if filter_override is not None
+                        else (
+                            effort_profile.apply_feasibility_filtering
+                            if effort_profile is not None
+                            else apply_feasibility_filtering
+                        )
+                    ),
+                    feasibility_oracle_candidates_per_attempt=(
+                        int(self.feasibility_oracle_candidates_per_attempt)
                         if effort_profile is not None
-                        else apply_feasibility_filtering
-                    )
-                ),
-                feasibility_oracle_candidates_per_attempt=(
-                    int(self.feasibility_oracle_candidates_per_attempt)
-                    if effort_profile is not None
-                    else self._resolve_feasibility_oracle_override(
-                        use_feasibility_oracle=use_feasibility_oracle,
-                        feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
-                    )
-                ),
-                use_ilp_decoder=(
-                    effort_profile.use_ilp_decoder
-                    if effort_profile is not None
-                    else use_ilp_decoder
-                ),
-                edge_probability_threshold=edge_probability_threshold,
-            )
+                        else self._resolve_feasibility_oracle_override(
+                            use_feasibility_oracle=use_feasibility_oracle,
+                            feasibility_oracle_candidates_per_attempt=feasibility_oracle_candidates_per_attempt,
+                        )
+                    ),
+                    use_ilp_decoder=(
+                        effort_profile.use_ilp_decoder
+                        if effort_profile is not None
+                        else use_ilp_decoder
+                    ),
+                    edge_probability_threshold=edge_probability_threshold,
+                )
+            except (RuntimeError, TimeoutError) as exc:
+                if effort_profile is None or int(effort_profile.effort) < 2:
+                    raise
+                verbose_log(
+                    self,
+                    "Feasibility effort failed; retrying lower-effort fallbacks "
+                    f"(effort={effort_profile.effort}, error={exc}).",
+                    level=1,
+                )
+                decoded_graphs = []
             if (
                 effort_profile is not None
                 and int(effort_profile.effort) >= 2
@@ -3224,25 +3235,44 @@ class ConditionalNodeFieldGraphGenerator(object):
                     "conditioning at effort 1 with fallback filtering.",
                     level=1,
                 )
-                with self._feasibility_effort_context(1) as fallback_effort_profile, self._feasibility_filter_context(
-                    "fallback"
-                ) as fallback_filter_override:
-                    decoded_graphs = self.decode_service_.decode(
-                        sampled_conditioning,
-                        sampling_mode="unguided",
-                        desired_target=desired_target,
-                        guidance_scale=guidance_scale,
-                        apply_feasibility_filtering=(
-                            fallback_filter_override
-                            if fallback_filter_override is not None
-                            else fallback_effort_profile.apply_feasibility_filtering
-                        ),
-                        feasibility_oracle_candidates_per_attempt=int(
-                            self.feasibility_oracle_candidates_per_attempt
-                        ),
-                        use_ilp_decoder=fallback_effort_profile.use_ilp_decoder,
-                        edge_probability_threshold=edge_probability_threshold,
-                    )
+                for fallback_effort in (1, 0):
+                    with self._feasibility_effort_context(fallback_effort) as fallback_effort_profile, self._feasibility_filter_context(
+                        "fallback" if fallback_effort == 1 else "none"
+                    ) as fallback_filter_override:
+                        try:
+                            decoded_graphs = self.decode_service_.decode(
+                                sampled_conditioning,
+                                sampling_mode="unguided",
+                                desired_target=desired_target,
+                                guidance_scale=guidance_scale,
+                                apply_feasibility_filtering=(
+                                    fallback_filter_override
+                                    if fallback_filter_override is not None
+                                    else fallback_effort_profile.apply_feasibility_filtering
+                                ),
+                                feasibility_oracle_candidates_per_attempt=int(
+                                    self.feasibility_oracle_candidates_per_attempt
+                                ),
+                                use_ilp_decoder=fallback_effort_profile.use_ilp_decoder,
+                                edge_probability_threshold=edge_probability_threshold,
+                            )
+                        except (RuntimeError, TimeoutError) as exc:
+                            verbose_log(
+                                self,
+                                "Lower-effort fallback failed; continuing fallback chain "
+                                f"(effort={fallback_effort}, error={exc}).",
+                                level=1,
+                            )
+                            decoded_graphs = []
+                    if decoded_graphs:
+                        break
+                    if fallback_effort == 1:
+                        verbose_log(
+                            self,
+                            "Effort 1 fallback returned no graphs; retrying effort 0 "
+                            "direct edge-threshold decoding.",
+                            level=1,
+                        )
             return decoded_graphs
 
     def _sample_decode_stages(
