@@ -1051,20 +1051,22 @@ def build_graph_generator(
         feasibility_estimator = FeasibilityEstimator(
             [
                 # feasibility_size,
-                feasibility_edge,
-                feasibility_path,
+                #feasibility_edge,
+                #feasibility_path,
                 feasibility_valence,
                 feasibility_cycle,
                 feasibility_aromatic,
-                # feasibility_unlabeled_structure,
-                # feasibility_cycle_composition,
+                feasibility_unlabeled_structure,
+                feasibility_cycle_composition,
             ],
             estimator_names=[
-                "edge",
-                "path",
+                #"edge",
+                #"path",
                 "valence",
                 "cycle",
                 "aromatic",
+                "structure",
+                "cycle_composition"
             ],
         )
         feasibility_estimator = ensure_demo_feasibility_estimator(feasibility_estimator)
