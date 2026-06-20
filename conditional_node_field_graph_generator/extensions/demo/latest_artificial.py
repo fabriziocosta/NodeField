@@ -70,3 +70,32 @@ def summarize_graphs(graphs: Iterable[nx.Graph]) -> dict[str, list[int]]:
         "edge_counts": [graph.number_of_edges() for graph in graph_list],
         "connected_components": [nx.number_connected_components(graph) for graph in graph_list],
     }
+
+
+def draw_artificial_graphs(
+    graphs,
+    *,
+    n: int | None = None,
+    title: str | None = None,
+    titles=None,
+    n_graphs_per_line: int = 7,
+    plotter=None,
+):
+    """Draw artificial graphs with the same notebook-facing shape as ``draw_graphs``."""
+    graph_list = list(graphs or [])
+    if n is not None:
+        graph_list = graph_list[: int(n)]
+    if not graph_list:
+        print("No graphs to display.")
+        return None
+    if titles is None:
+        titles = [f"graph {idx}" for idx in range(len(graph_list))]
+    if title is not None:
+        titles = [f"{title} | {item}" for item in titles]
+    if plotter is None:
+        plotter = build_artificial_plotter()
+    return plotter(
+        graph_list,
+        n_cols=max(1, min(int(n_graphs_per_line), len(graph_list))),
+        titles=titles,
+    )

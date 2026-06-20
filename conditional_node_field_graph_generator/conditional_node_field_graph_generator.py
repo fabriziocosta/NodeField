@@ -3215,7 +3215,7 @@ class ConditionalNodeFieldGraphGenerator(object):
                     edge_probability_threshold=edge_probability_threshold,
                 )
             except (RuntimeError, TimeoutError) as exc:
-                if effort_profile is None or int(effort_profile.effort) < 2:
+                if effort_profile is None:
                     raise
                 verbose_log(
                     self,
@@ -3226,16 +3226,17 @@ class ConditionalNodeFieldGraphGenerator(object):
                 decoded_graphs = []
             if (
                 effort_profile is not None
-                and int(effort_profile.effort) >= 2
+                and int(effort_profile.effort) >= 1
                 and len(decoded_graphs) == 0
             ):
+                fallback_efforts = (1, 0) if int(effort_profile.effort) >= 2 else (0,)
                 verbose_log(
                     self,
-                    "Feasibility effort returned no graphs; retrying same sampled "
-                    "conditioning at effort 1 with fallback filtering.",
+                    "Feasibility effort returned no graphs; retrying same sampled conditioning "
+                    f"at lower effort(s) {fallback_efforts}.",
                     level=1,
                 )
-                for fallback_effort in (1, 0):
+                for fallback_effort in fallback_efforts:
                     with self._feasibility_effort_context(fallback_effort) as fallback_effort_profile, self._feasibility_filter_context(
                         "fallback" if fallback_effort == 1 else "none"
                     ) as fallback_filter_override:

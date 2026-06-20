@@ -5098,6 +5098,48 @@ def test_sample_high_effort_falls_back_to_effort_zero_when_effort_one_times_out(
     assert not hasattr(generator, "feasibility_fallback_strategy")
 
 
+def test_sample_effort_one_timeout_falls_back_to_effort_zero(monkeypatch):
+    generator = _make_fitted_sampling_generator()
+    decode_calls = []
+
+    monkeypatch.setattr(
+        generator,
+        "_sample_conditions",
+        lambda n_samples, interpolate_between_n_samples=None: type(generator.training_graph_conditioning_)(
+            graph_embeddings=np.asarray([[1.0, 2.0]], dtype=float),
+            node_counts=np.asarray([3], dtype=np.int64),
+            edge_counts=np.asarray([2], dtype=np.int64),
+        ),
+    )
+
+    def _fake_decode(graph_conditioning, **kwargs):
+        del graph_conditioning
+        decode_calls.append(
+            {
+                "kwargs": dict(kwargs),
+                "oracle_candidates": generator.feasibility_oracle_candidates_per_attempt,
+                "max_feasibility_seconds_per_sample": generator.max_feasibility_seconds_per_sample,
+                "fallback_strategy": getattr(generator, "feasibility_fallback_strategy", None),
+            }
+        )
+        if len(decode_calls) == 1:
+            raise TimeoutError("slow effort 1")
+        return ["effort-0-direct"]
+
+    monkeypatch.setattr(generator.decode_service_, "decode", _fake_decode)
+
+    result = generator.sample(1, feasibility_effort=1, feasibility_filter="none")
+
+    assert result == ["effort-0-direct"]
+    assert len(decode_calls) == 2
+    assert decode_calls[0]["kwargs"]["use_ilp_decoder"] is True
+    assert decode_calls[0]["max_feasibility_seconds_per_sample"] == pytest.approx(2.0)
+    assert decode_calls[1]["kwargs"]["use_ilp_decoder"] is False
+    assert decode_calls[1]["kwargs"]["apply_feasibility_filtering"] is False
+    assert decode_calls[1]["max_feasibility_seconds_per_sample"] is None
+    assert decode_calls[1]["fallback_strategy"] is None
+
+
 def test_sample_feasibility_filter_rejects_apply_filtering_override():
     generator = _make_fitted_sampling_generator()
 
