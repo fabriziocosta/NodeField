@@ -1,54 +1,61 @@
 campaign:
-  id: molecules
-  domain: molecules
-  prefix: molecules
+  id: artificial_graphs_small
+  domain: artificial_graphs
+  prefix: artificial_graphs_small
 
 artifacts:
   root: artifact
 
 logbook:
-  path: LOGBOOK_molecules.md
+  path: LOGBOOK_artificial_graphs.md
 
 runner:
-  config_path: notebooks/configs/zinc_molecule_hyperparameter_optimization.yaml
+  config_path: notebooks/configs/artificial_graph_hyperparameter_optimization.yaml
+  poll_seconds: 1800
 
 dataset:
-  num_graphs: 500
-  min_size: 4
-  max_size: 10
-  random_state: 42
+  num_graphs: 100
+  cycle_length: 6
+  path_length: 4
+  num_rays: 3
+  ray_length: 2
+  node_alphabet_size: 3
+  edge_alphabet_size: 1
+  node_alphabet_kind: int
+  edge_alphabet_kind: int
+  component_specific_alphabets: true
+  seed: 42
+
+generation:
+  n_samples: 16
+  feasibility_effort: 2
+  feasibility_filter: none
 
 random_search:
   batch_size: 3
-  random_state: 101
+  random_state: 202
 
 agent:
+  model: gpt-5.3-codex
+  reasoning_effort: medium
+  max_output_tokens: 2000
+  api_key_env: OPENAI_API_KEY
+  prompts:
+    proposal: configs/campaigns/prompts/nodefield_campaign_proposal.md
+    logbook: configs/campaigns/prompts/nodefield_campaign_logbook.md
   proposal_mode: range_search
   mutable_groups:
-    - dataset
     - architecture
     - training
     - loss_weights
     - sampling
-    - generation
   allowed_paths:
-    - dataset
-    - generation
     - model.fixed
     - model.search_space
-  max_search_leaf_count: 24
-  reason: Explore ZINC feasibility using dataset scale, architecture size, training budget, loss weights, and sampling controls.
-  next_attempt: Compare average violations, then narrow dataset complexity and architecture ranges around the best candidates.
+  max_search_leaf_count: 23
+  reason: Explore validity on the fixed small 100-graph artificial campaign.
+  next_attempt: Compare feasibility violations, then tighten architecture, training, loss-weight, and sampling ranges.
   default_trial_patch_space:
-    dataset:
-      num_graphs:
-        type: int
-        low: 250
-        high: 750
-      max_size:
-        type: int
-        low: 8
-        high: 14
     model:
       fixed:
         latent_embedding_dimension:
@@ -120,11 +127,3 @@ agent:
           type: real
           low: 0.025
           high: 0.075
-    generation:
-      feasibility_effort:
-        type: int
-        low: 1
-        high: 4
-      n_samples:
-        type: choice
-        values: [8, 16, 24]

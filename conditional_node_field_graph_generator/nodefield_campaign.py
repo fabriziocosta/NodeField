@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import csv
+import contextlib
+from dataclasses import dataclass
 import json
+import os
 import shutil
+import signal
+import subprocess
 import sys
+import time
+import traceback
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, TextIO
+import uuid
 
 from .runtime_paths import (
     make_timestamped_run_dir,
@@ -20,16 +28,31 @@ from .campaign_search import flatten_leaf_paths, sample_patch_space, validate_pa
 
 
 CAMPAIGN_CONFIGS = {
-    "molecules": Path("configs") / "campaigns" / "molecules.yaml",
-    "artificial_graphs": Path("configs") / "campaigns" / "artificial_graphs.yaml",
-    "artificial-graphs": Path("configs") / "campaigns" / "artificial_graphs.yaml",
+    "molecules": Path("configs") / "campaigns" / "molecules_small.yaml",
+    "molecules-small": Path("configs") / "campaigns" / "molecules_small.yaml",
+    "molecules_small": Path("configs") / "campaigns" / "molecules_small.yaml",
+    "molecules-large": Path("configs") / "campaigns" / "molecules_large.yaml",
+    "molecules_large": Path("configs") / "campaigns" / "molecules_large.yaml",
+    "artificial_graphs": Path("configs") / "campaigns" / "artificial_graphs_small.yaml",
+    "artificial-graphs": Path("configs") / "campaigns" / "artificial_graphs_small.yaml",
+    "artificial-graphs-small": Path("configs") / "campaigns" / "artificial_graphs_small.yaml",
+    "artificial_graphs_small": Path("configs") / "campaigns" / "artificial_graphs_small.yaml",
+    "artificial-graphs-simple": Path("configs") / "campaigns" / "artificial_graphs_small.yaml",
+    "artificial_graphs_simple": Path("configs") / "campaigns" / "artificial_graphs_small.yaml",
+    "artificial-graphs-large": Path("configs") / "campaigns" / "artificial_graphs_large.yaml",
+    "artificial_graphs_large": Path("configs") / "campaigns" / "artificial_graphs_large.yaml",
+    "artificial-graphs-complex": (
+        Path("configs") / "campaigns" / "artificial_graphs_large.yaml"
+    ),
+    "artificial_graphs_complex": (
+        Path("configs") / "campaigns" / "artificial_graphs_large.yaml"
+    ),
 }
 
 RUN_SUBDIRECTORIES = ("configs", "trials", "logs", "metrics", "samples")
+MANAGED_EXPERIMENT_VERBOSE = 2
 
 MUTABLE_GROUP_PATHS = {
-    "dataset": ["dataset"],
-    "generation": ["generation"],
     "loss_weights": [
         "model.search_space.lambda_degree_importance",
         "model.search_space.lambda_node_exist_importance",
@@ -47,7 +70,6 @@ MUTABLE_GROUP_PATHS = {
         "model.search_space.sampling_steps",
         "model.search_space.langevin_noise_scale",
         "model.search_space.sparse_supervision_mask_ratio",
-        "generation",
     ],
     "training": [
         "model.fixed.learning_rate",
@@ -71,6 +93,31 @@ MUTABLE_GROUP_PATHS = {
 }
 
 VALID_PROPOSAL_MODES = {"range_search", "exact_configs"}
+ALLOWED_AGENT_DECISIONS = {"no_action", "update_logbook", "propose_trial", "stop_campaign"}
+ALLOWED_CAMPAIGN_PATCH_PATHS = {
+    "agent.reason",
+    "agent.next_attempt",
+    "agent.default_trial_patch_space",
+    "agent.default_trial_configs",
+}
+CREDIT_EXHAUSTION_CODES = {
+    "billing_hard_limit_reached",
+    "billing_not_active",
+    "insufficient_quota",
+    "quota_exceeded",
+}
+DEFAULT_AGENT_PROMPTS = {
+    "proposal": Path("configs") / "campaigns" / "prompts" / "nodefield_campaign_proposal.md",
+    "logbook": Path("configs") / "campaigns" / "prompts" / "nodefield_campaign_logbook.md",
+}
+
+
+@dataclass(frozen=True)
+class AgentCampaignDecision:
+    decision: str
+    reason: str
+    logbook_markdown: str
+    campaign_patch: dict[str, Any]
 
 
 def _read_yaml_or_json(path: Path) -> dict[str, Any]:
@@ -113,7 +160,12 @@ def _json_safe(value: Any) -> Any:
 
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_json_safe(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(
+        json.dumps(_json_safe(data), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -174,6 +226,109 @@ def _path_allowed(path: str, allowed_paths: list[str]) -> bool:
     return any(path == allowed or path.startswith(f"{allowed}.") for allowed in allowed_paths)
 
 
+def _campaign_patch_path_allowed(path: str) -> bool:
+    return any(
+        path == allowed or path.startswith(f"{allowed}.")
+        for allowed in ALLOWED_CAMPAIGN_PATCH_PATHS
+    )
+
+
+def _validate_campaign_patch(config: Mapping[str, Any], patch: Mapping[str, Any]) -> None:
+    if not isinstance(patch, Mapping):
+        raise ValueError("campaign_patch must be a mapping.")
+    rejected = sorted(
+        path for path in flatten_leaf_paths(patch) if not _campaign_patch_path_allowed(path)
+    )
+    if rejected:
+        raise ValueError(
+            "campaign_patch contains non-allowlisted path(s): " + ", ".join(rejected)
+        )
+    patched_agent = _deep_merge(config.get("agent", {}), patch.get("agent", {}))
+    proposal_mode = str(patched_agent.get("proposal_mode") or config["agent"]["proposal_mode"])
+    allowed_paths = list(config["agent"]["allowed_paths"])
+    max_leaf_count = int(config["agent"].get("max_search_leaf_count", len(allowed_paths)))
+    if proposal_mode == "range_search" and "default_trial_patch_space" in patched_agent:
+        validate_patch_space(
+            patched_agent["default_trial_patch_space"],
+            allowed_paths=allowed_paths,
+            max_leaf_count=max_leaf_count,
+        )
+    if proposal_mode == "exact_configs" and "default_trial_configs" in patched_agent:
+        exact_configs = patched_agent["default_trial_configs"]
+        if not isinstance(exact_configs, list) or not exact_configs:
+            raise ValueError("agent.default_trial_configs must be a non-empty list.")
+        _validate_exact_patches(exact_configs, allowed_paths=allowed_paths)
+
+
+def apply_campaign_patch(config: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and persist an agent-proposed patch to the tracked campaign YAML."""
+    _validate_campaign_patch(config, patch)
+    config_path = Path(str(config["campaign"]["config_path"]))
+    raw_config = _read_yaml_or_json(config_path)
+    patched = _deep_merge(raw_config, patch)
+    _write_yaml_or_json(config_path, patched)
+    return load_campaign_config(config_path, repo_root=config.get("_repo_root"))
+
+
+def campaign_decision_text_format() -> dict[str, Any]:
+    """Return the strict Responses API schema for one NodeField campaign decision."""
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "nodefield_campaign_decision",
+            "description": "A single NodeField campaign orchestration decision.",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["decision", "reason", "logbook_markdown", "campaign_patch"],
+                "properties": {
+                    "decision": {
+                        "type": "string",
+                        "enum": sorted(ALLOWED_AGENT_DECISIONS),
+                    },
+                    "reason": {"type": "string"},
+                    "logbook_markdown": {"type": "string"},
+                    "campaign_patch": {
+                        "type": "string",
+                        "description": (
+                            "JSON-encoded object patching only agent.reason, "
+                            "agent.next_attempt, agent.default_trial_patch_space, or "
+                            "agent.default_trial_configs. Use {} when no patch is proposed."
+                        ),
+                    },
+                },
+            },
+        }
+    }
+
+
+def parse_agent_campaign_decision(text: str) -> AgentCampaignDecision:
+    payload = json.loads(text.strip())
+    if not isinstance(payload, dict):
+        raise ValueError("Agent response must be a JSON object.")
+    decision = str(payload.get("decision", ""))
+    if decision not in ALLOWED_AGENT_DECISIONS:
+        raise ValueError(f"Unsupported agent decision: {decision!r}")
+    reason = str(payload.get("reason") or "").strip()
+    logbook_markdown = str(payload.get("logbook_markdown") or "").strip()
+    if not reason and not logbook_markdown:
+        raise ValueError("Agent decision must include reason or logbook_markdown.")
+    campaign_patch = payload.get("campaign_patch")
+    if isinstance(campaign_patch, str):
+        campaign_patch = json.loads(campaign_patch) if campaign_patch.strip() else {}
+    if campaign_patch is None:
+        campaign_patch = {}
+    if not isinstance(campaign_patch, dict):
+        raise ValueError("campaign_patch must decode to a mapping.")
+    return AgentCampaignDecision(
+        decision=decision,
+        reason=reason,
+        logbook_markdown=logbook_markdown,
+        campaign_patch=campaign_patch,
+    )
+
+
 def _validate_exact_patches(patches: list[Mapping[str, Any]], *, allowed_paths: list[str]) -> None:
     for index, patch in enumerate(patches, start=1):
         if not isinstance(patch, Mapping):
@@ -224,10 +379,37 @@ def load_campaign_config(
     if "config_path" not in runner:
         raise ValueError("runner.config_path must be provided.")
     runner["config_path"] = str(_resolve_repo_path(root, runner["config_path"]))
+    runner["poll_seconds"] = int(runner.get("poll_seconds", 1800))
+    if runner["poll_seconds"] < 1:
+        raise ValueError("runner.poll_seconds must be >= 1.")
 
     agent = config.setdefault("agent", {})
     if not isinstance(agent, dict):
         raise ValueError("agent section must be a mapping.")
+    agent.setdefault("model", "gpt-5.3-codex")
+    agent.setdefault("reasoning_effort", "medium")
+    agent["max_output_tokens"] = int(agent.get("max_output_tokens", 2000))
+    agent.setdefault("api_key_env", "OPENAI_API_KEY")
+    prompts = agent.setdefault("prompts", {})
+    if prompts is None:
+        prompts = {}
+    if not isinstance(prompts, dict):
+        raise ValueError("agent.prompts must be a mapping when provided.")
+    resolved_prompts: dict[str, str] = {}
+    for prompt_name, default_path in DEFAULT_AGENT_PROMPTS.items():
+        prompt_path = prompts.get(prompt_name, default_path)
+        resolved_path = _resolve_repo_path(root, prompt_path)
+        if not resolved_path.is_file():
+            raise FileNotFoundError(f"Agent prompt file does not exist: {resolved_path}")
+        resolved_prompts[prompt_name] = str(resolved_path)
+    for prompt_name, prompt_path in prompts.items():
+        if prompt_name in resolved_prompts:
+            continue
+        resolved_path = _resolve_repo_path(root, prompt_path)
+        if not resolved_path.is_file():
+            raise FileNotFoundError(f"Agent prompt file does not exist: {resolved_path}")
+        resolved_prompts[str(prompt_name)] = str(resolved_path)
+    agent["prompts"] = resolved_prompts
     proposal_mode = str(agent.get("proposal_mode") or "range_search")
     if proposal_mode not in VALID_PROPOSAL_MODES:
         raise ValueError(f"agent.proposal_mode must be one of {sorted(VALID_PROPOSAL_MODES)}.")
@@ -276,7 +458,12 @@ def list_campaigns(*, repo_root: str | Path | None = None) -> list[dict[str, Any
     """Return known campaign configs and whether their config files exist."""
     root = resolve_repo_root(repo_root)
     rows = []
-    for name in ("molecules", "artificial_graphs"):
+    for name in (
+        "molecules-small",
+        "molecules-large",
+        "artificial-graphs-small",
+        "artificial-graphs-large",
+    ):
         path = _resolve_repo_path(root, CAMPAIGN_CONFIGS[name])
         rows.append({"campaign": name, "config_path": str(path), "exists": path.is_file()})
     return rows
@@ -292,20 +479,121 @@ def _campaign_domain_root(config: Mapping[str, Any]) -> Path:
     return _campaign_artifact_root(config) / str(config["campaign"]["domain"])
 
 
+def _campaign_state_path(config: Mapping[str, Any]) -> Path:
+    return _campaign_domain_root(config) / f"{config['campaign']['prefix']}_campaign_state.json"
+
+
+def _campaign_lock_path(config: Mapping[str, Any]) -> Path:
+    return _campaign_domain_root(config) / f"{config['campaign']['prefix']}.lock"
+
+
+def _agent_decisions_path(config: Mapping[str, Any]) -> Path:
+    return _campaign_domain_root(config) / f"{config['campaign']['prefix']}_agent_decisions.jsonl"
+
+
+def _now_iso(now: datetime | None = None) -> str:
+    return (now or datetime.now()).isoformat(timespec="seconds")
+
+
+def _read_json_if_exists(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"state_error": f"Could not parse {path}"}
+    return data if isinstance(data, dict) else {}
+
+
+def _is_process_running(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _read_lock_pid(path: Path) -> int | None:
+    payload = _read_json_if_exists(path)
+    try:
+        return int(payload.get("pid"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _acquire_campaign_lock(config: Mapping[str, Any]) -> Path:
+    path = _campaign_lock_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    for attempt in range(2):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        except FileExistsError:
+            existing_pid = _read_lock_pid(path)
+            if attempt == 0 and existing_pid is not None and not _is_process_running(existing_pid):
+                path.unlink(missing_ok=True)
+                continue
+            raise RuntimeError(f"Campaign lock already exists at {path}; pid={existing_pid}")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"pid": pid, "created_at": _now_iso()}, indent=2))
+        return path
+    raise RuntimeError(f"Could not acquire campaign lock at {path}")
+
+
+def _release_campaign_lock(path: Path) -> None:
+    if _read_lock_pid(path) == os.getpid():
+        path.unlink(missing_ok=True)
+
+
+def _append_jsonl(path: Path, row: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_json_safe(row), sort_keys=True) + "\n")
+
+
+def _response_output_text(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str):
+        return output_text
+    output = getattr(response, "output", None)
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            content = getattr(item, "content", None)
+            if isinstance(content, list):
+                for content_item in content:
+                    text = getattr(content_item, "text", None)
+                    if isinstance(text, str):
+                        parts.append(text)
+        if parts:
+            return "\n".join(parts)
+    raise ValueError("OpenAI response did not contain output_text.")
+
+
 def _make_run_dir(
     config: Mapping[str, Any],
     *,
     now: datetime | None = None,
     short_id: str | None = None,
     dry_run: bool = False,
+    allow_existing: bool = False,
 ) -> Path:
-    return make_timestamped_run_dir(
+    run_dir = make_timestamped_run_dir(
         _campaign_domain_root(config),
         str(config["campaign"]["prefix"]),
         now=now,
         short_id=short_id,
-        create=not dry_run,
+        create=False,
     )
+    if not dry_run:
+        if allow_existing and ((run_dir / "state.json").exists() or (run_dir / "proposal.json").exists()):
+            raise FileExistsError(f"Run directory already contains campaign state: {run_dir}")
+        run_dir.mkdir(parents=True, exist_ok=allow_existing)
+    return run_dir
 
 
 def _latest_run_dir(config: Mapping[str, Any]) -> Path | None:
@@ -319,6 +607,208 @@ def _latest_run_dir(config: Mapping[str, Any]) -> Path | None:
         reverse=True,
     )
     return matches[0] if matches else None
+
+
+def _latest_campaign_context(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return compact context from the latest completed/failed run before proposing."""
+    run_dir = _latest_run_dir(config)
+    if run_dir is None:
+        return {
+            "status": "not_started",
+            "run_dir": None,
+            "latest_metrics": {},
+            "latest_error": {},
+            "summary_csv_path": None,
+            "proposal_path": None,
+            "logbook_path": config["logbook"]["path"],
+            "logbook_tail": "",
+        }
+    state_path = run_dir / "state.json"
+    state = _read_json(state_path) if state_path.is_file() else {}
+    summary_csv_path = run_dir / "metrics" / "summary.csv"
+    logbook_path = Path(str(config["logbook"]["path"]))
+    logbook_tail = ""
+    if logbook_path.is_file():
+        logbook_tail = logbook_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+    return {
+        "status": state.get("status", "unknown"),
+        "run_dir": str(run_dir),
+        "latest_metrics": state.get("latest_metrics", {}),
+        "latest_error": state.get("latest_error", {}),
+        "summary_csv_path": str(summary_csv_path) if summary_csv_path.is_file() else None,
+        "proposal_path": str(run_dir / "proposal.json") if (run_dir / "proposal.json").is_file() else None,
+        "logbook_path": str(logbook_path),
+        "logbook_tail": logbook_tail,
+    }
+
+
+def _campaign_result_summary(config: Mapping[str, Any], run_dir: Path | None = None) -> dict[str, Any]:
+    run_dir = run_dir or _latest_run_dir(config)
+    if run_dir is None:
+        return {
+            "status": "not_started",
+            "run_dir": None,
+            "state": {},
+            "proposal": {},
+            "summary": {},
+            "log_tail": "",
+        }
+    state = _read_json_if_exists(run_dir / "state.json")
+    proposal = _read_json_if_exists(run_dir / "proposal.json")
+    summary = _read_json_if_exists(run_dir / "metrics" / "summary.json")
+    log_tail = ""
+    log_files = sorted((run_dir / "logs").glob("*.log")) if (run_dir / "logs").is_dir() else []
+    if log_files:
+        lines = log_files[-1].read_text(encoding="utf-8", errors="replace").splitlines()
+        log_tail = "\n".join(lines[-80:])
+    return {
+        "status": state.get("status", "unknown"),
+        "run_dir": str(run_dir),
+        "state": state,
+        "proposal": proposal,
+        "summary": summary,
+        "log_tail": log_tail,
+        "loss_pdf_paths": state.get("loss_pdf_paths", []),
+    }
+
+
+def _agent_prompt_text(config: Mapping[str, Any], campaign_state: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    proposal_prompt = Path(str(config["agent"]["prompts"]["proposal"])).read_text(
+        encoding="utf-8"
+    )
+    logbook_prompt = Path(str(config["agent"]["prompts"]["logbook"])).read_text(
+        encoding="utf-8"
+    )
+    logbook_path = Path(str(config["logbook"]["path"]))
+    logbook_tail = ""
+    if logbook_path.is_file():
+        logbook_tail = logbook_path.read_text(encoding="utf-8", errors="replace")[-6000:]
+    visible_config = {
+        "campaign": config.get("campaign", {}),
+        "random_search": config.get("random_search", {}),
+        "dataset": config.get("dataset", {}),
+        "generation": config.get("generation", {}),
+        "agent": {
+            key: value
+            for key, value in config.get("agent", {}).items()
+            if key not in {"prompts"}
+        },
+    }
+    return "\n\n".join(
+        [
+            "You are managing a NodeField graph-generation hyperparameter campaign.",
+            "The deterministic controller handles launching, polling, and validation.",
+            "Return only the strict JSON object requested by the response schema.",
+            "Proposal prompt:",
+            proposal_prompt,
+            "Logbook prompt:",
+            logbook_prompt,
+            "Allowed campaign_patch paths:",
+            json.dumps(sorted(ALLOWED_CAMPAIGN_PATCH_PATHS), indent=2),
+            "Current campaign config JSON:",
+            json.dumps(_json_safe(visible_config), indent=2, sort_keys=True),
+            "Campaign controller state JSON:",
+            json.dumps(_json_safe(campaign_state), indent=2, sort_keys=True),
+            "Latest mini-batch result JSON:",
+            json.dumps(_json_safe(result), indent=2, sort_keys=True),
+            "Domain logbook tail:",
+            logbook_tail,
+        ]
+    )
+
+
+def request_agent_campaign_decision(
+    config: Mapping[str, Any],
+    campaign_state: Mapping[str, Any],
+    result: Mapping[str, Any],
+    *,
+    client: Any | None = None,
+) -> AgentCampaignDecision:
+    if client is None:
+        from openai import OpenAI
+
+        api_key_env = str(config["agent"].get("api_key_env", "OPENAI_API_KEY"))
+        api_key = os.environ.get(api_key_env)
+        client = OpenAI(api_key=api_key) if api_key else OpenAI()
+    response = client.responses.create(
+        model=config["agent"].get("model", "gpt-5.3-codex"),
+        reasoning={"effort": config["agent"].get("reasoning_effort", "medium")},
+        max_output_tokens=int(config["agent"].get("max_output_tokens", 2000)),
+        text=campaign_decision_text_format(),
+        input=_agent_prompt_text(config, campaign_state, result),
+    )
+    return parse_agent_campaign_decision(_response_output_text(response))
+
+
+def _is_openai_credits_exhausted(exc: Exception) -> bool:
+    structured_values: list[str] = []
+    for attr in ("code", "type"):
+        value = getattr(exc, attr, None)
+        if value:
+            structured_values.append(str(value).lower())
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            for key in ("code", "type", "message"):
+                value = error.get(key)
+                if value:
+                    structured_values.append(str(value).lower())
+    if any(value in CREDIT_EXHAUSTION_CODES for value in structured_values):
+        return True
+    message = f"{type(exc).__name__}: {exc}".lower()
+    markers = [
+        "insufficient_quota",
+        "exceeded your current quota",
+        "billing hard limit",
+        "billing_not_active",
+        "quota_exceeded",
+        "credits exhausted",
+        "credit balance",
+    ]
+    return any(marker in message for marker in markers)
+
+
+def _format_metric_summary(metrics: Mapping[str, Any]) -> str:
+    if not metrics:
+        return "no metrics"
+    preferred = [
+        "average_num_violations",
+        "median_num_violations",
+        "feasible_rate",
+        "campaign_trial_id",
+        "trial_id",
+    ]
+    parts = []
+    for key in preferred:
+        if key in metrics:
+            parts.append(f"{key}={metrics[key]}")
+    for key in sorted(metrics):
+        if key not in preferred and len(parts) < 6:
+            parts.append(f"{key}={metrics[key]}")
+    return ", ".join(parts)
+
+
+def _proposal_reason(agent: Mapping[str, Any], previous_result: Mapping[str, Any]) -> str:
+    base_reason = str(agent.get("reason") or "Config-defined range proposal.")
+    status = str(previous_result.get("status") or "not_started")
+    run_dir = previous_result.get("run_dir")
+    if status == "not_started" or not run_dir:
+        return f"No prior campaign result found; starting from configured ranges. {base_reason}"
+    error = previous_result.get("latest_error") or {}
+    if error:
+        message = error.get("message") or "unknown error"
+        return (
+            f"Latest run {run_dir} ended with {error.get('type', 'error')}: {message}. "
+            f"Retrying from the configured ranges while preserving the fixed campaign conditions. "
+            f"{base_reason}"
+        )
+    metrics = previous_result.get("latest_metrics") or {}
+    return (
+        f"Latest run {run_dir} finished with {_format_metric_summary(metrics)}. "
+        f"Proposing the next mini-batch from the configured mutable ranges and exact patches. "
+        f"{base_reason}"
+    )
 
 
 def apply_exact_trial_patch(
@@ -468,8 +958,15 @@ def _initial_state(
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "run_dir": str(run_dir),
         "proposal_mode": proposal.get("proposal_mode", "range_search"),
+        "poll_seconds": int((config.get("runner") or {}).get("poll_seconds", 1800)),
+        "logs_dir": str(run_dir / "logs"),
+        "loss_pdf_paths": [],
         "queued_trials": [
-            {"trial_id": idx + 1, "status": "queued"}
+            {
+                "trial_id": idx + 1,
+                "status": "queued",
+                "log_path": str(run_dir / "logs" / f"trial_{idx + 1:03d}.log"),
+            }
             for idx, _patch in enumerate(proposal.get("sampled_patches", []))
         ],
         "completed_trials": [],
@@ -482,8 +979,10 @@ def _proposal_from_config(
     config: Mapping[str, Any],
     *,
     run_dir: Path,
+    previous_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     agent = config["agent"]
+    previous_result = dict(previous_result or {})
     proposal_mode = str(agent.get("proposal_mode") or "range_search")
     patch_space = None
     flattened = {}
@@ -513,7 +1012,9 @@ def _proposal_from_config(
         "proposal_mode": proposal_mode,
         "mutable_groups": list(agent.get("mutable_groups", [])),
         "allowed_paths": list(agent["allowed_paths"]),
-        "reason": str(agent.get("reason") or "Config-defined range proposal."),
+        "prompt_paths": dict(agent.get("prompts", {})),
+        "previous_result": previous_result,
+        "reason": _proposal_reason(agent, previous_result),
         "next_attempt": str(
             agent.get("next_attempt") or "Review metrics and narrow the best ranges."
         ),
@@ -539,6 +1040,26 @@ def _summarize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _collect_loss_pdf_paths(run_dir: Path) -> list[str]:
+    pdfs = sorted(
+        path
+        for path in run_dir.rglob("*.pdf")
+        if "loss" in path.name.lower() or "metric" in path.name.lower()
+    )
+    return [str(path) for path in pdfs]
+
+
+def _export_trial_loss_pdf(result: Mapping[str, Any], trial_dir: Path) -> str | None:
+    graph_generator = result.get("best_graph_generator")
+    exporter = getattr(graph_generator, "export_metrics_pdf", None)
+    if not callable(exporter):
+        return None
+    pdf_path = trial_dir / "metrics" / "loss_curves.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    exporter(str(pdf_path))
+    return str(pdf_path)
+
+
 def _write_summary_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row})
@@ -555,11 +1076,30 @@ def run_campaign_once(
     now: datetime | None = None,
     short_id: str | None = None,
     stream: TextIO | None = None,
+    allow_existing_run_dir: bool = False,
 ) -> dict[str, Any]:
     """Sample one mini-batch proposal and optionally execute it sequentially."""
     stream = stream or sys.stdout
-    run_dir = _make_run_dir(config, now=now, short_id=short_id, dry_run=dry_run)
-    proposal = _proposal_from_config(config, run_dir=run_dir)
+    loader = None
+    runner = None
+    base_workflow_config = None
+    if not dry_run:
+        loader, runner = _domain_runner(str(config["campaign"]["domain"]))
+        base_workflow_config = _load_campaign_workflow_config(config)
+
+    previous_result = _latest_campaign_context(config)
+    run_dir = _make_run_dir(
+        config,
+        now=now,
+        short_id=short_id,
+        dry_run=dry_run,
+        allow_existing=allow_existing_run_dir,
+    )
+    proposal = _proposal_from_config(
+        config,
+        run_dir=run_dir,
+        previous_result=previous_result,
+    )
     state = _initial_state(config, run_dir, proposal)
     if dry_run:
         state["status"] = "dry_run"
@@ -576,20 +1116,26 @@ def run_campaign_once(
         run_dir / "configs" / "base_workflow.yaml",
     )
 
-    loader, runner = _domain_runner(str(config["campaign"]["domain"]))
-    base_workflow_config = _load_campaign_workflow_config(config)
     metrics_rows: list[dict[str, Any]] = []
 
     state["status"] = "running"
+    print(f"campaign: {config['campaign']['id']}", file=stream)
+    print(f"run_dir: {run_dir}", file=stream)
+    print(f"proposal: {proposal['reason']}", file=stream)
+    print(f"logs: {run_dir / 'logs'}", file=stream)
     for index, patch in enumerate(proposal["sampled_patches"], start=1):
         trial_name = f"trial_{index:03d}"
         trial_dir = run_dir / "trials" / trial_name
+        trial_log_path = run_dir / "logs" / f"{trial_name}.log"
         trial_dir.mkdir(parents=True, exist_ok=True)
         state["queued_trials"][index - 1]["status"] = "running"
+        state["queued_trials"][index - 1]["log_path"] = str(trial_log_path)
         _write_json(run_dir / "state.json", state)
 
         workflow_config = apply_exact_trial_patch(base_workflow_config, patch)
-        workflow_config.setdefault("experiment", {})["n_trials"] = 1
+        experiment_config = workflow_config.setdefault("experiment", {})
+        experiment_config["n_trials"] = 1
+        experiment_config["verbose"] = MANAGED_EXPERIMENT_VERBOSE
         workflow_config.setdefault("outputs", {})["run_dir"] = str(trial_dir)
         workflow_config["outputs"]["artifact_root"] = str(_campaign_artifact_root(config))
         workflow_config["outputs"]["artifact_subdir"] = str(config["campaign"]["domain"])
@@ -598,21 +1144,79 @@ def run_campaign_once(
         _write_yaml_or_json(trial_dir / "config.yaml", workflow_config)
 
         loaded_workflow_config = loader(run_dir / "configs" / f"{trial_name}.yaml")
-        print(f"Running {trial_name} in {trial_dir}", file=stream)
-        result = runner(loaded_workflow_config, notebook_context=_notebook_context(config))
+        print(f"{trial_name}: running; log={trial_log_path}", file=stream)
+        try:
+            with trial_log_path.open("w", encoding="utf-8") as log_handle:
+                print(f"Running {trial_name} in {trial_dir}", file=log_handle)
+                print(f"Config: {trial_dir / 'config.yaml'}", file=log_handle)
+                with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
+                    result = runner(loaded_workflow_config, notebook_context=_notebook_context(config))
+                    loss_pdf_path = _export_trial_loss_pdf(result, trial_dir)
+        except Exception as exc:
+            state["status"] = "failed"
+            state["queued_trials"][index - 1]["status"] = "failed"
+            state["queued_trials"][index - 1]["log_path"] = str(trial_log_path)
+            state["latest_error"] = {
+                "trial_id": index,
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "log_path": str(trial_log_path),
+            }
+            _write_json(run_dir / "state.json", state)
+            _write_json(
+                run_dir / "campaign_result.json",
+                {
+                    "run_dir": str(run_dir),
+                    "status": "failed",
+                    "state": state,
+                    "proposal": proposal,
+                    "metrics": metrics_rows,
+                },
+            )
+            with trial_log_path.open("a", encoding="utf-8") as log_handle:
+                print("\nTrial failed with exception:", file=log_handle)
+                traceback.print_exc(file=log_handle)
+            print(f"{trial_name}: failed; log={trial_log_path}", file=stream)
+            raise
         trial_metrics = {"campaign_trial_id": index, **_summarize_result(result)}
+        if loss_pdf_path:
+            trial_metrics["loss_pdf_path"] = loss_pdf_path
         metrics_rows.append(trial_metrics)
         _write_json(trial_dir / "metrics.json", trial_metrics)
 
         state["queued_trials"][index - 1]["status"] = "completed"
-        state["completed_trials"].append({"trial_id": index, "trial_dir": str(trial_dir)})
+        if loss_pdf_path:
+            state["queued_trials"][index - 1]["loss_pdf_path"] = loss_pdf_path
+        state["completed_trials"].append(
+            {
+                "trial_id": index,
+                "trial_dir": str(trial_dir),
+                "log_path": str(trial_log_path),
+                "loss_pdf_path": loss_pdf_path,
+            }
+        )
         state["latest_metrics"] = trial_metrics
+        state["loss_pdf_paths"] = _collect_loss_pdf_paths(run_dir)
         _write_json(run_dir / "state.json", state)
+        metric_summary = _format_metric_summary(trial_metrics)
+        pdf_note = f"; loss_pdf={loss_pdf_path}" if loss_pdf_path else ""
+        print(f"{trial_name}: completed; {metric_summary}{pdf_note}", file=stream)
 
     state["status"] = "completed"
+    state["loss_pdf_paths"] = _collect_loss_pdf_paths(run_dir)
     _write_json(run_dir / "state.json", state)
     _write_json(run_dir / "metrics" / "summary.json", {"trials": metrics_rows})
     _write_summary_csv(run_dir / "metrics" / "summary.csv", metrics_rows)
+    _write_json(
+        run_dir / "campaign_result.json",
+        {
+            "run_dir": str(run_dir),
+            "status": state["status"],
+            "state": state,
+            "proposal": proposal,
+            "metrics": metrics_rows,
+        },
+    )
     logbook_entry = _format_logbook_entry(
         config=config,
         run_dir=run_dir,
@@ -629,16 +1233,385 @@ def run_campaign_once(
     }
 
 
+def _child_log_path(config: Mapping[str, Any], run_dir: Path) -> Path:
+    return run_dir / "logs" / "mini_batch.log"
+
+
+def _parse_run_timestamp(value: str) -> datetime:
+    return datetime.strptime(value, "%Y%m%d_%H%M%S")
+
+
+def _next_run_identity() -> tuple[datetime, str]:
+    return datetime.now(), uuid.uuid4().hex[:6]
+
+
+def _launch_mini_batch_child(
+    config: Mapping[str, Any],
+    *,
+    campaign_name: str,
+    device: str = "cpu",
+    run_timestamp: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    now, generated_id = _next_run_identity()
+    if run_timestamp is not None:
+        now = _parse_run_timestamp(run_timestamp)
+    run_id = run_id or generated_id
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    run_dir = _make_run_dir(config, now=now, short_id=run_id, dry_run=True)
+    log_path = _child_log_path(config, run_dir)
+    run_dir.mkdir(parents=True, exist_ok=False)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    repo_root = Path(str(config["_repo_root"]))
+    command = [
+        sys.executable,
+        str(repo_root / "run_nodefield_campaign.py"),
+        "run-mini-batch",
+        campaign_name,
+        "--config",
+        str(config["campaign"]["config_path"]),
+        "--run-timestamp",
+        timestamp,
+        "--run-id",
+        run_id,
+        "--device",
+        device,
+    ]
+    env = dict(os.environ)
+    if device == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    elif device == "cuda":
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+    log_handle = log_path.open("a", encoding="utf-8")
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(repo_root),
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        log_handle.close()
+    state = {
+        "campaign": config["campaign"]["domain"],
+        "campaign_id": config["campaign"]["id"],
+        "prefix": config["campaign"]["prefix"],
+        "status": "running",
+        "phase": "mini_batch",
+        "pid": process.pid,
+        "process_running": True,
+        "run_dir": str(run_dir),
+        "child_log_path": str(log_path),
+        "command": command,
+        "poll_seconds": int(config["runner"]["poll_seconds"]),
+        "started_at": _now_iso(),
+        "updated_at": _now_iso(),
+        "config_path": str(config["campaign"]["config_path"]),
+        "latest_decision": {},
+        "latest_error": {},
+    }
+    _write_json(_campaign_state_path(config), state)
+    return state
+
+
+def _decision_to_json(decision: AgentCampaignDecision) -> dict[str, Any]:
+    return {
+        "decision": decision.decision,
+        "reason": decision.reason,
+        "logbook_markdown": decision.logbook_markdown,
+        "campaign_patch": decision.campaign_patch,
+    }
+
+
+def _write_agent_decision(
+    config: Mapping[str, Any],
+    run_dir: Path,
+    campaign_state: Mapping[str, Any],
+    decision: AgentCampaignDecision,
+) -> dict[str, Any]:
+    row = {
+        **_decision_to_json(decision),
+        "campaign": config["campaign"]["id"],
+        "run_dir": str(run_dir),
+        "created_at": _now_iso(),
+        "previous_status": campaign_state.get("status"),
+    }
+    _write_json(run_dir / "agent_decision.json", row)
+    _append_jsonl(_agent_decisions_path(config), row)
+    if decision.logbook_markdown:
+        upsert_logbook_block(
+            config["logbook"]["path"],
+            f"{run_dir.name}:agent",
+            decision.logbook_markdown,
+        )
+    return row
+
+
+def _campaign_state_for_decision(
+    config: Mapping[str, Any],
+    state: Mapping[str, Any],
+    *,
+    status: str,
+    phase: str,
+    decision_row: Mapping[str, Any] | None = None,
+    error: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    next_state = dict(state)
+    next_state.update(
+        {
+            "campaign": config["campaign"]["domain"],
+            "campaign_id": config["campaign"]["id"],
+            "prefix": config["campaign"]["prefix"],
+            "status": status,
+            "phase": phase,
+            "process_running": False,
+            "poll_seconds": int(config["runner"]["poll_seconds"]),
+            "updated_at": _now_iso(),
+            "config_path": str(config["campaign"]["config_path"]),
+        }
+    )
+    if decision_row is not None:
+        next_state["latest_decision"] = dict(decision_row)
+    if error is not None:
+        next_state["latest_error"] = dict(error)
+    _write_json(_campaign_state_path(config), next_state)
+    return next_state
+
+
+def _handle_agent_decision(
+    config: Mapping[str, Any],
+    *,
+    campaign_state: Mapping[str, Any],
+    campaign_name: str,
+    device: str = "cpu",
+    client: Any | None = None,
+    stream: TextIO | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    stream = stream or sys.stdout
+    run_dir_text = campaign_state.get("run_dir")
+    run_dir = Path(str(run_dir_text)) if run_dir_text else (_latest_run_dir(config) or Path())
+    result = _campaign_result_summary(config, run_dir if run_dir_text else None)
+    try:
+        decision = request_agent_campaign_decision(
+            config,
+            campaign_state,
+            result,
+            client=client,
+        )
+        _validate_campaign_patch(config, decision.campaign_patch)
+    except Exception as exc:
+        status = "openai_credits_exhausted" if _is_openai_credits_exhausted(exc) else "agent_decision_failed"
+        error = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "at": _now_iso(),
+        }
+        state = _campaign_state_for_decision(
+            config,
+            campaign_state,
+            status=status,
+            phase="agent_decision",
+            error=error,
+        )
+        if status == "openai_credits_exhausted":
+            print("status: openai_credits_exhausted; not retrying", file=stream)
+        else:
+            print(f"status: agent_decision_failed; retry_after={state['poll_seconds']}s", file=stream)
+        return state, config
+
+    decision_row = _write_agent_decision(config, run_dir, campaign_state, decision)
+    print(f"agent_decision: {decision.decision}", file=stream)
+    if decision.decision == "stop_campaign":
+        state = _campaign_state_for_decision(
+            config,
+            campaign_state,
+            status="campaign_completed",
+            phase="stopped",
+            decision_row=decision_row,
+        )
+        return state, config
+    if decision.decision in {"no_action", "update_logbook"}:
+        state = _campaign_state_for_decision(
+            config,
+            campaign_state,
+            status="analysis_completed",
+            phase="idle",
+            decision_row=decision_row,
+        )
+        return state, config
+    if decision.decision == "propose_trial":
+        patched_config = apply_campaign_patch(config, decision.campaign_patch)
+        state = _launch_mini_batch_child(
+            patched_config,
+            campaign_name=campaign_name,
+            device=device,
+        )
+        state["latest_decision"] = decision_row
+        _write_json(_campaign_state_path(patched_config), state)
+        print(f"launched: {state['run_dir']}", file=stream)
+        print(f"logs: {state['child_log_path']}", file=stream)
+        return state, patched_config
+    raise ValueError(f"Unsupported agent decision: {decision.decision!r}")
+
+
+def run_campaign_loop(
+    config: Mapping[str, Any],
+    *,
+    campaign_name: str,
+    once: bool = False,
+    dry_run: bool = False,
+    device: str = "cpu",
+    client: Any | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    stream: TextIO | None = None,
+) -> dict[str, Any]:
+    """Start or resume the OpenAI-backed campaign loop."""
+    stream = stream or sys.stdout
+    if dry_run:
+        status = campaign_status(config)
+        print("status: dry_run", file=stream)
+        print(format_campaign_status(status), file=stream)
+        return {"state": {"status": "dry_run"}, "status": status, "dry_run": True}
+
+    lock_path = _acquire_campaign_lock(config)
+    try:
+        active_config = dict(config)
+        while True:
+            state_path = _campaign_state_path(active_config)
+            campaign_state = _read_json_if_exists(state_path)
+            run_dir_text = campaign_state.get("run_dir")
+            run_dir = Path(str(run_dir_text)) if run_dir_text else None
+            run_state = _read_json_if_exists(run_dir / "state.json") if run_dir else {}
+            child_status = str(run_state.get("status") or "")
+            pid = campaign_state.get("pid")
+            try:
+                pid_int = int(pid) if pid is not None else None
+            except (TypeError, ValueError):
+                pid_int = None
+            running = _is_process_running(pid_int)
+
+            if not campaign_state:
+                campaign_state = _launch_mini_batch_child(
+                    active_config,
+                    campaign_name=campaign_name,
+                    device=device,
+                )
+                print(f"launched: {campaign_state['run_dir']}", file=stream)
+                print(f"logs: {campaign_state['child_log_path']}", file=stream)
+            elif campaign_state.get("status") == "running" and child_status in {"completed", "failed"}:
+                campaign_state["child_status"] = child_status
+                campaign_state["process_running"] = running
+                campaign_state, active_config = _handle_agent_decision(
+                    active_config,
+                    campaign_state=campaign_state,
+                    campaign_name=campaign_name,
+                    device=device,
+                    client=client,
+                    stream=stream,
+                )
+            elif campaign_state.get("status") == "running" and pid_int is not None and not running:
+                campaign_state["child_status"] = "failed"
+                campaign_state["process_running"] = False
+                campaign_state["latest_error"] = {
+                    "type": "ChildProcessExited",
+                    "message": "Mini-batch child process exited before writing final state.",
+                    "at": _now_iso(),
+                }
+                _write_json(_campaign_state_path(active_config), campaign_state)
+                campaign_state, active_config = _handle_agent_decision(
+                    active_config,
+                    campaign_state=campaign_state,
+                    campaign_name=campaign_name,
+                    device=device,
+                    client=client,
+                    stream=stream,
+                )
+            elif campaign_state.get("status") == "agent_decision_failed":
+                campaign_state, active_config = _handle_agent_decision(
+                    active_config,
+                    campaign_state=campaign_state,
+                    campaign_name=campaign_name,
+                    device=device,
+                    client=client,
+                    stream=stream,
+                )
+            elif campaign_state.get("status") in {"termination_requested", "terminated"}:
+                if running and pid_int is not None:
+                    try:
+                        os.killpg(pid_int, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        os.kill(pid_int, signal.SIGTERM)
+                    except OSError:
+                        os.kill(pid_int, signal.SIGTERM)
+                campaign_state["status"] = "terminated"
+                campaign_state["process_running"] = False
+                campaign_state["terminated_at"] = _now_iso()
+                _write_json(_campaign_state_path(active_config), campaign_state)
+                campaign_state = _launch_mini_batch_child(
+                    active_config,
+                    campaign_name=campaign_name,
+                    device=device,
+                )
+                print(f"launched: {campaign_state['run_dir']}", file=stream)
+                print(f"logs: {campaign_state['child_log_path']}", file=stream)
+            elif campaign_state.get("status") in {"campaign_completed", "openai_credits_exhausted"}:
+                print(f"status: {campaign_state.get('status')}", file=stream)
+                return {"state": campaign_state, "config": active_config}
+            elif campaign_state.get("status") in {"analysis_completed", "not_started"}:
+                campaign_state = _launch_mini_batch_child(
+                    active_config,
+                    campaign_name=campaign_name,
+                    device=device,
+                )
+                print(f"launched: {campaign_state['run_dir']}", file=stream)
+                print(f"logs: {campaign_state['child_log_path']}", file=stream)
+            else:
+                next_poll_at = datetime.now() + timedelta(
+                    seconds=int(active_config["runner"]["poll_seconds"])
+                )
+                print(
+                    f"status: {campaign_state.get('status', 'unknown')}; "
+                    f"run_dir={campaign_state.get('run_dir') or '-'}; "
+                    f"next_poll={next_poll_at.isoformat(timespec='seconds')}",
+                    file=stream,
+                )
+
+            if once:
+                return {"state": campaign_state, "config": active_config}
+            sleep_seconds = int(active_config["runner"]["poll_seconds"])
+            next_poll_at = datetime.now() + timedelta(seconds=sleep_seconds)
+            print(f"next_poll: {next_poll_at.isoformat(timespec='seconds')}", file=stream)
+            sleep_fn(sleep_seconds)
+    finally:
+        _release_campaign_lock(lock_path)
+
+
 def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> dict[str, Any]:
     """Read status from the latest campaign run state file."""
+    campaign_state = _read_json_if_exists(_campaign_state_path(config))
     run_dir = _latest_run_dir(config)
     if run_dir is None:
         return {
             "campaign": config["campaign"]["domain"],
-            "status": "not_started",
-            "run_dir": None,
+            "status": campaign_state.get("status", "not_started"),
+            "campaign_state_path": str(_campaign_state_path(config)),
+            "run_dir": campaign_state.get("run_dir"),
+            "logs_dir": None,
+            "child_log_path": campaign_state.get("child_log_path"),
+            "pid": campaign_state.get("pid"),
+            "process_running": _is_process_running(
+                int(campaign_state["pid"]) if str(campaign_state.get("pid", "")).isdigit() else None
+            ),
+            "poll_seconds": int((config.get("runner") or {}).get("poll_seconds", 1800)),
             "queued_trials": [],
             "latest_metrics": {},
+            "loss_pdf_paths": [],
+            "latest_decision": campaign_state.get("latest_decision", {}),
+            "latest_error": campaign_state.get("latest_error", {}),
             "log_tail": "",
         }
     state_path = run_dir / "state.json"
@@ -654,10 +1627,24 @@ def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> d
             log_lines = log_files[0].read_text(encoding="utf-8", errors="replace").splitlines()
     return {
         "campaign": config["campaign"]["domain"],
-        "status": state.get("status", "unknown"),
+        "status": campaign_state.get("status") or state.get("status", "unknown"),
+        "campaign_state_path": str(_campaign_state_path(config)),
         "run_dir": str(run_dir),
+        "logs_dir": state.get("logs_dir") or str(run_dir / "logs"),
+        "child_log_path": campaign_state.get("child_log_path"),
+        "pid": campaign_state.get("pid"),
+        "process_running": _is_process_running(
+            int(campaign_state["pid"]) if str(campaign_state.get("pid", "")).isdigit() else None
+        ),
+        "poll_seconds": state.get(
+            "poll_seconds",
+            (config.get("runner") or {}).get("poll_seconds", 1800),
+        ),
         "queued_trials": state.get("queued_trials", []),
         "latest_metrics": state.get("latest_metrics", {}),
+        "latest_decision": campaign_state.get("latest_decision", {}),
+        "latest_error": campaign_state.get("latest_error") or state.get("latest_error", {}),
+        "loss_pdf_paths": state.get("loss_pdf_paths", []),
         "log_tail": "\n".join(log_lines[-int(log_tail_lines) :]),
     }
 
@@ -668,6 +1655,11 @@ def format_campaign_status(status: Mapping[str, Any]) -> str:
         f"campaign: {status.get('campaign')}",
         f"status: {status.get('status')}",
         f"run_dir: {status.get('run_dir') or '-'}",
+        f"logs: {status.get('logs_dir') or '-'}",
+        f"child_log: {status.get('child_log_path') or '-'}",
+        f"pid: {status.get('pid') or '-'}",
+        f"process_running: {status.get('process_running')}",
+        f"poll_seconds: {status.get('poll_seconds')}",
     ]
     queued = status.get("queued_trials") or []
     if queued:
@@ -679,6 +1671,14 @@ def format_campaign_status(status: Mapping[str, Any]) -> str:
     lines.append(f"queued_trials: {queued_text}")
     metrics = status.get("latest_metrics") or {}
     lines.append("latest_metrics: " + (json.dumps(metrics, sort_keys=True) if metrics else "-"))
+    loss_pdf_paths = status.get("loss_pdf_paths") or []
+    lines.append("loss_pdfs: " + (", ".join(str(path) for path in loss_pdf_paths) if loss_pdf_paths else "-"))
+    latest_decision = status.get("latest_decision") or {}
+    if latest_decision:
+        lines.append("latest_decision: " + json.dumps(latest_decision, sort_keys=True))
+    latest_error = status.get("latest_error") or {}
+    if latest_error:
+        lines.append("latest_error: " + json.dumps(latest_error, sort_keys=True))
     log_tail = status.get("log_tail")
     if log_tail:
         lines.extend(["log_tail:", str(log_tail)])
@@ -687,6 +1687,29 @@ def format_campaign_status(status: Mapping[str, Any]) -> str:
 
 def terminate_campaign(config: Mapping[str, Any]) -> dict[str, Any]:
     """Mark the latest campaign run as termination requested."""
+    campaign_state_path = _campaign_state_path(config)
+    campaign_state = _read_json_if_exists(campaign_state_path)
+    pid = campaign_state.get("pid")
+    pid_int = int(pid) if str(pid).isdigit() else None
+    if pid_int and _is_process_running(pid_int):
+        try:
+            os.killpg(pid_int, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            os.kill(pid_int, signal.SIGTERM)
+        except OSError:
+            os.kill(pid_int, signal.SIGTERM)
+        campaign_state["status"] = "termination_requested"
+        campaign_state["termination_requested_at"] = _now_iso()
+        campaign_state["process_running"] = _is_process_running(pid_int)
+        _write_json(campaign_state_path, campaign_state)
+        return {
+            "campaign": config["campaign"]["domain"],
+            "status": "termination_requested",
+            "run_dir": campaign_state.get("run_dir"),
+            "pid": pid_int,
+        }
     run_dir = _latest_run_dir(config)
     if run_dir is None:
         return {"campaign": config["campaign"]["domain"], "status": "not_started"}
@@ -703,14 +1726,20 @@ def terminate_campaign(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 __all__ = [
+    "AgentCampaignDecision",
     "CAMPAIGN_CONFIGS",
     "MUTABLE_GROUP_PATHS",
+    "apply_campaign_patch",
     "apply_exact_trial_patch",
+    "campaign_decision_text_format",
     "campaign_status",
     "format_campaign_status",
     "list_campaigns",
     "load_campaign_config",
+    "parse_agent_campaign_decision",
+    "request_agent_campaign_decision",
     "resolve_campaign_config",
+    "run_campaign_loop",
     "run_campaign_once",
     "terminate_campaign",
     "upsert_logbook_block",

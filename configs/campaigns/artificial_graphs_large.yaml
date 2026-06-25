@@ -1,7 +1,7 @@
 campaign:
-  id: artificial_graphs
+  id: artificial_graphs_large
   domain: artificial_graphs
-  prefix: artificial_graphs
+  prefix: artificial_graphs_large
 
 artifacts:
   root: artifact
@@ -11,63 +11,51 @@ logbook:
 
 runner:
   config_path: notebooks/configs/artificial_graph_hyperparameter_optimization.yaml
+  poll_seconds: 3600
 
 dataset:
-  num_graphs: 300
-  cycle_length: 6
-  path_length: 4
-  num_rays: 3
-  ray_length: 2
+  num_graphs: 1000
+  cycle_length: 10
+  path_length: 8
+  num_rays: 5
+  ray_length: 4
   node_alphabet_size: 3
   edge_alphabet_size: 1
   node_alphabet_kind: int
   edge_alphabet_kind: int
   component_specific_alphabets: true
-  seed: 42
+  seed: 1042
+
+generation:
+  n_samples: 16
+  feasibility_effort: 2
+  feasibility_filter: none
 
 random_search:
   batch_size: 3
-  random_state: 202
+  random_state: 1202
 
 agent:
+  model: gpt-5.3-codex
+  reasoning_effort: medium
+  max_output_tokens: 2000
+  api_key_env: OPENAI_API_KEY
+  prompts:
+    proposal: configs/campaigns/prompts/nodefield_campaign_proposal.md
+    logbook: configs/campaigns/prompts/nodefield_campaign_logbook.md
   proposal_mode: range_search
   mutable_groups:
-    - dataset
     - architecture
     - training
     - loss_weights
     - sampling
-    - generation
   allowed_paths:
-    - dataset
-    - generation
     - model.fixed
     - model.search_space
-  max_search_leaf_count: 28
-  reason: Explore artificial graph validity using graph complexity, architecture size, training budget, loss weights, and sampling controls.
-  next_attempt: Compare feasibility violations, then tighten graph complexity and architecture ranges around the best candidates.
+  max_search_leaf_count: 23
+  reason: Explore validity on the fixed large 1000-graph artificial campaign.
+  next_attempt: Compare feasibility violations, then tighten architecture, training, loss-weight, and sampling ranges.
   default_trial_patch_space:
-    dataset:
-      num_graphs:
-        type: int
-        low: 150
-        high: 600
-      cycle_length:
-        type: int
-        low: 4
-        high: 9
-      path_length:
-        type: int
-        low: 2
-        high: 7
-      num_rays:
-        type: int
-        low: 2
-        high: 5
-      ray_length:
-        type: int
-        low: 1
-        high: 4
     model:
       fixed:
         latent_embedding_dimension:
@@ -139,11 +127,3 @@ agent:
           type: real
           low: 0.025
           high: 0.075
-    generation:
-      feasibility_effort:
-        type: int
-        low: 1
-        high: 4
-      n_samples:
-        type: choice
-        values: [8, 16, 24]

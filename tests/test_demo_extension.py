@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import networkx as nx
@@ -6,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from conditional_node_field_graph_generator import nodefield_campaign as core_nodefield_campaign
 from conditional_node_field_graph_generator.extensions.demo import (
     campaign_search,
     nodefield_campaign,
@@ -728,14 +730,12 @@ def test_campaign_loads_mutable_groups_and_exact_config_proposals(tmp_path):
                 "random_search": {"batch_size": 2, "random_state": 5},
                 "agent": {
                     "proposal_mode": "exact_configs",
-                    "mutable_groups": ["dataset", "architecture"],
+                    "mutable_groups": ["architecture"],
                     "default_trial_configs": [
                         {
-                            "dataset": {"num_graphs": 20},
                             "model": {"fixed": {"number_of_transformer_layers": 2}},
                         },
                         {
-                            "dataset": {"num_graphs": 40},
                             "model": {"fixed": {"number_of_transformer_layers": 3}},
                         },
                     ],
@@ -753,17 +753,47 @@ def test_campaign_loads_mutable_groups_and_exact_config_proposals(tmp_path):
     )
 
     assert config["agent"]["proposal_mode"] == "exact_configs"
-    assert "dataset" in config["agent"]["allowed_paths"]
+    assert "dataset" not in config["agent"]["allowed_paths"]
     assert "model.fixed.number_of_transformer_layers" in config["agent"]["allowed_paths"]
     assert config["logbook"]["path"].endswith("LOGBOOK_molecules.md")
     assert result["proposal"]["sampled_patches"] == config["agent"]["default_trial_configs"]
 
     bad_path = tmp_path / "bad_campaign.yaml"
     bad = dict(json.loads(campaign_path.read_text()))
-    bad["agent"]["default_trial_configs"] = [{"outputs": {"artifact_root": "bad"}}]
+    bad["agent"]["default_trial_configs"] = [{"dataset": {"num_graphs": 20}}]
     bad_path.write_text(json.dumps(bad))
     with pytest.raises(ValueError, match="non-allowlisted"):
         nodefield_campaign.load_campaign_config(bad_path)
+
+    bad_generation_path = tmp_path / "bad_generation_campaign.yaml"
+    bad_generation = dict(json.loads(campaign_path.read_text()))
+    bad_generation["agent"]["default_trial_configs"] = [{"generation": {"n_samples": 8}}]
+    bad_generation_path.write_text(json.dumps(bad_generation))
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        nodefield_campaign.load_campaign_config(bad_generation_path)
+
+
+def test_builtin_campaign_configs_define_prompts_and_poll_intervals():
+    repo_root = Path(__file__).resolve().parents[1]
+
+    small = nodefield_campaign.load_campaign_config(
+        repo_root / "configs" / "campaigns" / "artificial_graphs_small.yaml",
+        repo_root=repo_root,
+    )
+    large = nodefield_campaign.load_campaign_config(
+        repo_root / "configs" / "campaigns" / "artificial_graphs_large.yaml",
+        repo_root=repo_root,
+    )
+
+    assert small["runner"]["poll_seconds"] == 1800
+    assert large["runner"]["poll_seconds"] == 3600
+    for config in (small, large):
+        proposal_prompt = Path(config["agent"]["prompts"]["proposal"])
+        logbook_prompt = Path(config["agent"]["prompts"]["logbook"])
+        assert proposal_prompt.name == "nodefield_campaign_proposal.md"
+        assert logbook_prompt.name == "nodefield_campaign_logbook.md"
+        assert proposal_prompt.is_file()
+        assert logbook_prompt.is_file()
 
 
 def test_campaign_logbook_upsert_replaces_existing_block(tmp_path):
@@ -778,6 +808,397 @@ def test_campaign_logbook_upsert_replaces_existing_block(tmp_path):
     assert text.count("nodefield-campaign:run-a:begin") == 1
 
 
+def _write_agent_loop_campaign(tmp_path):
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
+    campaign_path = tmp_path / "campaign.yaml"
+    campaign_path.write_text(
+        json.dumps(
+            {
+                "campaign": {"id": "molecules", "domain": "molecules", "prefix": "molecules"},
+                "artifacts": {"root": str(tmp_path / "artifact")},
+                "logbook": {"path": str(tmp_path / "LOGBOOK.md")},
+                "runner": {"config_path": str(workflow_path), "poll_seconds": 1},
+                "random_search": {"batch_size": 1, "random_state": 5},
+                "agent": {
+                    "allowed_paths": ["model.search_space.trial_quality"],
+                    "max_search_leaf_count": 1,
+                    "default_trial_patch_space": {
+                        "model": {
+                            "search_space": {
+                                "trial_quality": {"type": "real", "low": 0.0, "high": 1.0}
+                            }
+                        }
+                    },
+                },
+            }
+        )
+    )
+    return campaign_path
+
+
+def test_agent_decision_schema_and_parser_validate_strict_contract():
+    schema = nodefield_campaign.campaign_decision_text_format()
+
+    assert schema["format"]["strict"] is True
+    assert schema["format"]["schema"]["additionalProperties"] is False
+    assert schema["format"]["schema"]["properties"]["campaign_patch"]["type"] == "string"
+
+    decision = nodefield_campaign.parse_agent_campaign_decision(
+        json.dumps(
+            {
+                "decision": "propose_trial",
+                "reason": "Narrow the range after the latest result.",
+                "logbook_markdown": "### analysis\n\nUse a smaller range.",
+                "campaign_patch": json.dumps(
+                    {
+                        "agent": {
+                            "default_trial_patch_space": {
+                                "model": {
+                                    "search_space": {
+                                        "trial_quality": {
+                                            "type": "real",
+                                            "low": 0.1,
+                                            "high": 0.2,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ),
+            }
+        )
+    )
+
+    assert decision.decision == "propose_trial"
+    assert decision.campaign_patch["agent"]["default_trial_patch_space"]["model"][
+        "search_space"
+    ]["trial_quality"]["low"] == 0.1
+
+    with pytest.raises(ValueError, match="Unsupported agent decision"):
+        nodefield_campaign.parse_agent_campaign_decision(
+            json.dumps(
+                {
+                    "decision": "bad",
+                    "reason": "x",
+                    "logbook_markdown": "",
+                    "campaign_patch": "{}",
+                }
+            )
+        )
+    with pytest.raises(json.JSONDecodeError):
+        nodefield_campaign.parse_agent_campaign_decision(
+            json.dumps(
+                {
+                    "decision": "no_action",
+                    "reason": "x",
+                    "logbook_markdown": "",
+                    "campaign_patch": "{bad",
+                }
+            )
+        )
+    with pytest.raises(ValueError, match="campaign_patch must decode"):
+        nodefield_campaign.parse_agent_campaign_decision(
+            json.dumps(
+                {
+                    "decision": "no_action",
+                    "reason": "x",
+                    "logbook_markdown": "",
+                    "campaign_patch": "[]",
+                }
+            )
+        )
+
+
+def test_agent_campaign_patch_validation_accepts_only_agent_fields(tmp_path):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+
+    patched = nodefield_campaign.apply_campaign_patch(
+        config,
+        {
+            "agent": {
+                "reason": "Tighten the promising range.",
+                "default_trial_patch_space": {
+                    "model": {
+                        "search_space": {
+                            "trial_quality": {"type": "real", "low": 0.1, "high": 0.2}
+                        }
+                    }
+                },
+            }
+        },
+    )
+
+    assert patched["agent"]["reason"] == "Tighten the promising range."
+    assert patched["agent"]["default_trial_patch_space"]["model"]["search_space"][
+        "trial_quality"
+    ]["high"] == 0.2
+
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        nodefield_campaign.apply_campaign_patch(config, {"dataset": {"num_graphs": 10}})
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        nodefield_campaign.apply_campaign_patch(config, {"generation": {"n_samples": 8}})
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        nodefield_campaign.apply_campaign_patch(config, {"runner": {"poll_seconds": 5}})
+
+
+def test_campaign_loop_once_launches_child_without_openai(monkeypatch, tmp_path):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    launches = []
+
+    def fake_launch(config, *, campaign_name, device, run_timestamp=None, run_id=None):
+        del run_timestamp, run_id
+        state = {
+            "campaign": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(tmp_path / "artifact" / "molecules" / "molecules_fake"),
+            "child_log_path": str(tmp_path / "artifact" / "molecules" / "logs" / "fake.log"),
+            "poll_seconds": 1,
+        }
+        launches.append({"campaign_name": campaign_name, "device": device})
+        core_nodefield_campaign._write_json(
+            core_nodefield_campaign._campaign_state_path(config),
+            state,
+        )
+        return state
+
+    def fail_decision(*args, **kwargs):
+        raise AssertionError("OpenAI should not be called before a mini-batch completes")
+
+    monkeypatch.setattr(core_nodefield_campaign, "_launch_mini_batch_child", fake_launch)
+    monkeypatch.setattr(
+        core_nodefield_campaign,
+        "request_agent_campaign_decision",
+        fail_decision,
+    )
+
+    result = nodefield_campaign.run_campaign_loop(
+        config,
+        campaign_name="molecules",
+        once=True,
+        sleep_fn=lambda seconds: None,
+    )
+
+    assert result["state"]["status"] == "running"
+    assert launches == [{"campaign_name": "molecules", "device": "cpu"}]
+
+
+def test_campaign_child_process_log_lives_inside_run_directory(tmp_path):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    run_dir = tmp_path / "artifact" / "molecules" / "molecules_20260625_091011_child"
+
+    assert core_nodefield_campaign._child_log_path(config, run_dir) == (
+        run_dir / "logs" / "mini_batch.log"
+    )
+
+
+def test_campaign_loop_restarts_after_stale_termination_request(monkeypatch, tmp_path):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    old_run_dir = tmp_path / "artifact" / "molecules" / "molecules_20260625_091011_old"
+    old_run_dir.mkdir(parents=True)
+    core_nodefield_campaign._write_json(
+        core_nodefield_campaign._campaign_state_path(config),
+        {
+            "campaign": "molecules",
+            "status": "termination_requested",
+            "phase": "mini_batch",
+            "run_dir": str(old_run_dir),
+            "pid": 999999,
+            "poll_seconds": 1,
+        },
+    )
+    launches = []
+
+    def fake_launch(config, *, campaign_name, device, run_timestamp=None, run_id=None):
+        del run_timestamp, run_id
+        state = {
+            "campaign": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(tmp_path / "artifact" / "molecules" / "molecules_new"),
+            "child_log_path": str(
+                tmp_path / "artifact" / "molecules" / "molecules_new" / "logs" / "mini_batch.log"
+            ),
+            "poll_seconds": 1,
+        }
+        launches.append({"campaign_name": campaign_name, "device": device})
+        core_nodefield_campaign._write_json(
+            core_nodefield_campaign._campaign_state_path(config),
+            state,
+        )
+        return state
+
+    monkeypatch.setattr(core_nodefield_campaign, "_launch_mini_batch_child", fake_launch)
+
+    result = nodefield_campaign.run_campaign_loop(
+        config,
+        campaign_name="molecules",
+        once=True,
+        sleep_fn=lambda seconds: None,
+    )
+
+    assert result["state"]["status"] == "running"
+    assert result["state"]["run_dir"].endswith("molecules_new")
+    assert launches == [{"campaign_name": "molecules", "device": "cpu"}]
+
+
+def test_campaign_loop_completed_minibatch_patches_config_and_relaunches(
+    monkeypatch,
+    tmp_path,
+):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    run_dir = tmp_path / "artifact" / "molecules" / "molecules_20260625_091011_done"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metrics").mkdir()
+    (run_dir / "state.json").write_text(
+        json.dumps({"status": "completed", "latest_metrics": {"average_num_violations": 0.5}})
+    )
+    core_nodefield_campaign._write_json(
+        core_nodefield_campaign._campaign_state_path(config),
+        {
+            "campaign": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(run_dir),
+            "pid": 999999,
+            "poll_seconds": 1,
+        },
+    )
+    launched_configs = []
+
+    def fake_decision(config, campaign_state, result, *, client=None):
+        del config, campaign_state, result, client
+        return nodefield_campaign.AgentCampaignDecision(
+            decision="propose_trial",
+            reason="Narrow quality after completed run.",
+            logbook_markdown="### molecules\n\nNarrow quality.",
+            campaign_patch={
+                "agent": {
+                    "reason": "Narrow quality.",
+                    "default_trial_patch_space": {
+                        "model": {
+                            "search_space": {
+                                "trial_quality": {"type": "real", "low": 0.2, "high": 0.3}
+                            }
+                        }
+                    },
+                }
+            },
+        )
+
+    def fake_launch(config, *, campaign_name, device, run_timestamp=None, run_id=None):
+        del campaign_name, device, run_timestamp, run_id
+        launched_configs.append(config)
+        state = {
+            "campaign": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(tmp_path / "artifact" / "molecules" / "molecules_next"),
+            "child_log_path": str(tmp_path / "artifact" / "molecules" / "logs" / "next.log"),
+            "poll_seconds": 1,
+        }
+        core_nodefield_campaign._write_json(
+            core_nodefield_campaign._campaign_state_path(config),
+            state,
+        )
+        return state
+
+    monkeypatch.setattr(core_nodefield_campaign, "request_agent_campaign_decision", fake_decision)
+    monkeypatch.setattr(core_nodefield_campaign, "_launch_mini_batch_child", fake_launch)
+
+    result = nodefield_campaign.run_campaign_loop(
+        config,
+        campaign_name="molecules",
+        once=True,
+        sleep_fn=lambda seconds: None,
+    )
+
+    assert result["state"]["status"] == "running"
+    assert (run_dir / "agent_decision.json").is_file()
+    assert (tmp_path / "artifact" / "molecules" / "molecules_agent_decisions.jsonl").is_file()
+    patched = nodefield_campaign.load_campaign_config(campaign_path)
+    assert patched["agent"]["default_trial_patch_space"]["model"]["search_space"][
+        "trial_quality"
+    ] == {"type": "real", "low": 0.2, "high": 0.3}
+    assert "Narrow quality." in (tmp_path / "LOGBOOK.md").read_text()
+    assert launched_configs
+
+
+def test_campaign_proposal_records_latest_result_context(tmp_path):
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
+    campaign_path = tmp_path / "campaign.yaml"
+    campaign_path.write_text(
+        json.dumps(
+            {
+                "campaign": {"id": "molecules", "domain": "molecules", "prefix": "molecules"},
+                "artifacts": {"root": str(tmp_path / "artifact")},
+                "logbook": {"path": str(tmp_path / "LOGBOOK.md")},
+                "runner": {"config_path": str(workflow_path)},
+                "random_search": {"batch_size": 1, "random_state": 5},
+                "agent": {
+                    "reason": "Narrow loss-weight ranges after reviewing the latest result.",
+                    "allowed_paths": ["model.search_space.trial_quality"],
+                    "max_search_leaf_count": 1,
+                    "default_trial_patch_space": {
+                        "model": {
+                            "search_space": {
+                                "trial_quality": {"type": "real", "low": 0.0, "high": 1.0}
+                            }
+                        }
+                    },
+                },
+            }
+        )
+    )
+    previous_run = tmp_path / "artifact" / "molecules" / "molecules_20260624_010203_prev"
+    previous_run.mkdir(parents=True)
+    (previous_run / "metrics").mkdir()
+    (previous_run / "metrics" / "summary.csv").write_text("average_num_violations\n0.5\n")
+    (previous_run / "proposal.json").write_text("{}")
+    (previous_run / "state.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "latest_metrics": {
+                    "average_num_violations": 0.5,
+                    "feasible_rate": 0.25,
+                },
+            }
+        )
+    )
+
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    result = nodefield_campaign.run_campaign_once(
+        config,
+        dry_run=True,
+        now=pd.Timestamp("2026-06-25 09:10:11").to_pydatetime(),
+        short_id="next",
+    )
+
+    proposal = result["proposal"]
+    assert Path(proposal["prompt_paths"]["proposal"]).name == "nodefield_campaign_proposal.md"
+    assert Path(proposal["prompt_paths"]["logbook"]).name == "nodefield_campaign_logbook.md"
+    assert proposal["previous_result"]["status"] == "completed"
+    assert proposal["previous_result"]["latest_metrics"] == {
+        "average_num_violations": 0.5,
+        "feasible_rate": 0.25,
+    }
+    assert proposal["previous_result"]["summary_csv_path"] == str(
+        previous_run / "metrics" / "summary.csv"
+    )
+    assert "Latest run" in proposal["reason"]
+    assert "average_num_violations=0.5" in proposal["reason"]
+    assert "Narrow loss-weight ranges" in proposal["reason"]
+
+
 def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp_path):
     workflow_path = tmp_path / "workflow.yaml"
     workflow_path.write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
@@ -790,15 +1211,13 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
                 "logbook": {"path": str(tmp_path / "LOGBOOK.md")},
                 "runner": {"config_path": str(workflow_path)},
                 "dataset": {"num_graphs": 8, "max_size": 7},
+                "generation": {"n_samples": 5, "feasibility_effort": 2},
                 "random_search": {"batch_size": 2, "random_state": 5},
                 "agent": {
-                    "mutable_groups": ["dataset", "architecture"],
+                    "mutable_groups": ["architecture"],
                     "allowed_paths": ["model.search_space.trial_quality"],
-                    "max_search_leaf_count": 3,
+                    "max_search_leaf_count": 2,
                     "default_trial_patch_space": {
-                        "dataset": {
-                            "num_graphs": {"type": "int", "low": 5, "high": 6},
-                        },
                         "model": {
                             "fixed": {
                                 "number_of_transformer_layers": {
@@ -831,7 +1250,13 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
 
     def fake_runner(config, *, notebook_context):
         del notebook_context
+        print("runner stdout should be logged")
+        print("runner stderr should be logged", file=sys.stderr)
         value = float(config["model"]["search_space"]["trial_quality"]["low"])
+        class _FakeGraphGenerator:
+            def export_metrics_pdf(self, output_path):
+                Path(output_path).write_text("pdf placeholder")
+
         return {
             "best_row": {
                 "trial_id": 1,
@@ -842,10 +1267,11 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
             "results_csv_path": (
                 Path(config["outputs"]["run_dir"]) / "metrics" / "trial_results.csv"
             ),
+            "best_graph_generator": _FakeGraphGenerator(),
         }
 
     monkeypatch.setattr(
-        nodefield_campaign,
+        core_nodefield_campaign,
         "_domain_runner",
         lambda domain: (fake_loader, fake_runner),
     )
@@ -861,18 +1287,94 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
     assert [trial["status"] for trial in state["queued_trials"]] == ["completed", "completed"]
     assert (result["run_dir"] / "proposal.json").is_file()
     assert (result["run_dir"] / "metrics" / "summary.csv").is_file()
+    assert state["logs_dir"] == str(result["run_dir"] / "logs")
+    assert len(state["loss_pdf_paths"]) == 2
+    assert all(Path(path).is_file() for path in state["loss_pdf_paths"])
+    first_log = result["run_dir"] / "logs" / "trial_001.log"
+    assert "runner stdout should be logged" in first_log.read_text()
+    assert "runner stderr should be logged" in first_log.read_text()
+    assert "loss_pdf_path" in state["latest_metrics"]
     assert len(captured_configs) == 2
     assert all(
         item["model"]["search_space"]["trial_quality"]["low"]
         == item["model"]["search_space"]["trial_quality"]["high"]
         for item in captured_configs
     )
-    assert all(5 <= item["dataset"]["num_graphs"] <= 6 for item in captured_configs)
+    assert all(item["dataset"]["num_graphs"] == 8 for item in captured_configs)
     assert all(item["dataset"]["max_size"] == 7 for item in captured_configs)
+    assert all(item["generation"]["n_samples"] == 5 for item in captured_configs)
+    assert all(item["generation"]["feasibility_effort"] == 2 for item in captured_configs)
+    assert all(item["experiment"]["verbose"] == 2 for item in captured_configs)
     assert all(
         1 <= item["model"]["fixed"]["number_of_transformer_layers"] <= 2
         for item in captured_configs
     )
+
+
+def test_campaign_mini_batch_failure_marks_state_failed(monkeypatch, tmp_path):
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
+    campaign_path = tmp_path / "campaign.yaml"
+    campaign_path.write_text(
+        json.dumps(
+            {
+                "campaign": {"id": "molecules", "domain": "molecules", "prefix": "molecules"},
+                "artifacts": {"root": str(tmp_path / "artifact")},
+                "logbook": {"path": str(tmp_path / "LOGBOOK.md")},
+                "runner": {"config_path": str(workflow_path)},
+                "random_search": {"batch_size": 2, "random_state": 5},
+                "agent": {
+                    "allowed_paths": ["model.search_space.trial_quality"],
+                    "max_search_leaf_count": 1,
+                    "default_trial_patch_space": {
+                        "model": {
+                            "search_space": {
+                                "trial_quality": {"type": "real", "low": 0.0, "high": 1.0}
+                            }
+                        }
+                    },
+                },
+            }
+        )
+    )
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+
+    def fake_loader(path):
+        try:
+            import yaml
+        except ImportError:
+            return json.loads(Path(path).read_text())
+        return yaml.safe_load(Path(path).read_text())
+
+    def failing_runner(config, *, notebook_context):
+        del config, notebook_context
+        raise RuntimeError("training failed")
+
+    monkeypatch.setattr(
+        core_nodefield_campaign,
+        "_domain_runner",
+        lambda domain: (fake_loader, failing_runner),
+    )
+
+    with pytest.raises(RuntimeError, match="training failed"):
+        nodefield_campaign.run_campaign_once(
+            config,
+            now=pd.Timestamp("2026-06-25 09:10:11").to_pydatetime(),
+            short_id="failed",
+        )
+
+    run_dir = tmp_path / "artifact" / "molecules" / "molecules_20260625_091011_failed"
+    state = json.loads((run_dir / "state.json").read_text())
+    assert state["status"] == "failed"
+    assert [trial["status"] for trial in state["queued_trials"]] == ["failed", "queued"]
+    assert state["latest_error"] == {
+        "trial_id": 1,
+        "type": "RuntimeError",
+        "message": "training failed",
+        "log_path": str(run_dir / "logs" / "trial_001.log"),
+    }
+    failure_log = run_dir / "logs" / "trial_001.log"
+    assert "Trial failed with exception" in failure_log.read_text()
 
 
 def test_campaign_status_reads_latest_state_only(tmp_path):
@@ -889,6 +1391,12 @@ def test_campaign_status_reads_latest_state_only(tmp_path):
                 "status": "running",
                 "queued_trials": [{"trial_id": 1, "status": "running"}],
                 "latest_metrics": {"average_num_violations": 0.5},
+                "latest_error": {
+                    "trial_id": 1,
+                    "type": "RuntimeError",
+                    "message": "training failed",
+                },
+                "loss_pdf_paths": [str(run_dir / "metrics" / "loss_curves.pdf")],
             }
         )
     )
@@ -897,6 +1405,15 @@ def test_campaign_status_reads_latest_state_only(tmp_path):
 
     assert status["status"] == "running"
     assert status["latest_metrics"] == {"average_num_violations": 0.5}
+    assert status["latest_error"] == {
+        "trial_id": 1,
+        "type": "RuntimeError",
+        "message": "training failed",
+    }
+    assert status["logs_dir"] == str(run_dir / "logs")
+    assert status["loss_pdf_paths"] == [str(run_dir / "metrics" / "loss_curves.pdf")]
+    assert "latest_error" in nodefield_campaign.format_campaign_status(status)
+    assert "loss_pdfs:" in nodefield_campaign.format_campaign_status(status)
     assert "molecules_20260625_091011_state1" in status["run_dir"]
 
 

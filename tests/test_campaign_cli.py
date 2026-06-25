@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from conditional_node_field_graph_generator.campaign_cli import main
@@ -58,8 +59,10 @@ def _write_campaign_files(tmp_path):
 def test_campaign_cli_list_and_status(capsys):
     assert main(["list"]) == 0
     output = capsys.readouterr().out
-    assert "molecules" in output
-    assert "artificial_graphs" in output
+    assert "molecules-small" in output
+    assert "molecules-large" in output
+    assert "artificial-graphs-small" in output
+    assert "artificial-graphs-large" in output
 
     assert main(["status", "molecules"]) == 0
     status_output = capsys.readouterr().out
@@ -67,13 +70,73 @@ def test_campaign_cli_list_and_status(capsys):
     assert "status:" in status_output
 
 
-def test_campaign_cli_dry_run_with_config_override(tmp_path, capsys):
+def test_campaign_cli_dry_run_with_config_override(tmp_path, capsys, monkeypatch):
+    campaign_path = _write_campaign_files(tmp_path)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+
+    assert main(["run", "molecules", "--dry-run", "--config", str(campaign_path)]) == 0
+    output = capsys.readouterr().out
+
+    assert "status: dry_run" in output
+    assert "queued_trials: -" in output
+    assert ".artifacts" not in output
+    assert not any(Path(tmp_path / "artifact").glob("molecules/molecules_*"))
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+
+
+def test_campaign_cli_internal_mini_batch_dry_run_samples_trials(tmp_path, capsys):
     campaign_path = _write_campaign_files(tmp_path)
 
-    assert main(["molecules", "--once", "--dry-run", "--config", str(campaign_path)]) == 0
+    assert (
+        main(
+            [
+                "run-mini-batch",
+                "molecules",
+                "--dry-run",
+                "--config",
+                str(campaign_path),
+                "--run-timestamp",
+                "20260625_091011",
+                "--run-id",
+                "dry001",
+            ]
+        )
+        == 0
+    )
     output = capsys.readouterr().out
 
     assert "status: dry_run" in output
     assert "queued_trials: 2" in output
-    assert ".artifacts" not in output
-    assert not any(Path(tmp_path / "artifact").glob("molecules/molecules_*"))
+    assert "molecules_20260625_091011_dry001" in output
+
+
+def test_campaign_cli_once_flag_is_accepted_for_compatibility(tmp_path, capsys):
+    campaign_path = _write_campaign_files(tmp_path)
+
+    assert main(["run", "molecules", "--once", "--dry-run", "--config", str(campaign_path)]) == 0
+    output = capsys.readouterr().out
+
+    assert "status: dry_run" in output
+
+
+def test_campaign_cli_cuda_device_policy_can_be_requested(tmp_path, capsys, monkeypatch):
+    campaign_path = _write_campaign_files(tmp_path)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+
+    assert (
+        main(
+            [
+                "run",
+                "molecules",
+                "--dry-run",
+                "--device",
+                "cuda",
+                "--config",
+                str(campaign_path),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert "CUDA_VISIBLE_DEVICES" not in os.environ

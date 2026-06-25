@@ -42,6 +42,7 @@ lightning_logs/
 *.ckpt
 .artifacts/
 **/.artifacts/
+artifact/
 notebooks/datasets/
 notebooks/artificial_dataset_config_*.yaml
 notebooks/artificial-cycle-path-star-*.yaml

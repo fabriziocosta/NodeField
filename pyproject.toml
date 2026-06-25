@@ -43,6 +43,9 @@ notebooks = [
   "requests",
   "pyyaml"
 ]
+agent = [
+  "openai"
+]
 synthetic = [
   "toolz"
 ]
@@ -59,6 +62,7 @@ full = [
   "pytorch-lightning",
   "matplotlib",
   "requests",
+  "openai",
   "toolz",
   "abstractgraph>=0.1.0",
   "abstractgraph-ml>=0.1.0",

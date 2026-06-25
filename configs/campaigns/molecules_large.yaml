@@ -1,0 +1,122 @@
+campaign:
+  id: molecules_large
+  domain: molecules
+  prefix: molecules_large
+
+artifacts:
+  root: artifact
+
+logbook:
+  path: LOGBOOK_molecules.md
+
+runner:
+  config_path: notebooks/configs/zinc_molecule_hyperparameter_optimization.yaml
+  poll_seconds: 3600
+
+dataset:
+  num_graphs: 1000
+  min_size: 4
+  max_size: 16
+  random_state: 1042
+
+generation:
+  n_samples: 16
+  feasibility_effort: 2
+  feasibility_filter: none
+
+random_search:
+  batch_size: 3
+  random_state: 1101
+
+agent:
+  model: gpt-5.3-codex
+  reasoning_effort: medium
+  max_output_tokens: 2000
+  api_key_env: OPENAI_API_KEY
+  prompts:
+    proposal: configs/campaigns/prompts/nodefield_campaign_proposal.md
+    logbook: configs/campaigns/prompts/nodefield_campaign_logbook.md
+  proposal_mode: range_search
+  mutable_groups:
+    - architecture
+    - training
+    - loss_weights
+    - sampling
+  allowed_paths:
+    - model.fixed
+    - model.search_space
+  max_search_leaf_count: 22
+  reason: Explore ZINC feasibility on the fixed large 1000-graph molecule campaign.
+  next_attempt: Compare average violations, then narrow architecture, training, loss-weight, and sampling ranges.
+  default_trial_patch_space:
+    model:
+      fixed:
+        latent_embedding_dimension:
+          type: choice
+          values: [32, 64, 128]
+        node_embedding_svd_dimension:
+          type: choice
+          values: [32, 64, 128]
+        graph_embedding_svd_dimension:
+          type: choice
+          values: [32, 64, 128]
+        number_of_transformer_layers:
+          type: int
+          low: 1
+          high: 4
+        transformer_attention_head_count:
+          type: choice
+          values: [2, 4, 8]
+        transformer_dropout:
+          type: real
+          low: 0.05
+          high: 0.25
+        learning_rate:
+          type: real
+          low: 0.00005
+          high: 0.0005
+          scale: log
+        batch_size:
+          type: choice
+          values: [8, 16, 24]
+        total_steps:
+          type: int
+          low: 40
+          high: 120
+      search_space:
+        lambda_degree_importance:
+          type: real
+          low: 0.5
+          high: 3.0
+        lambda_node_exist_importance:
+          type: real
+          low: 0.5
+          high: 3.0
+        lambda_node_count_importance:
+          type: real
+          low: 0.0
+          high: 1.5
+        lambda_node_label_importance:
+          type: real
+          low: 0.5
+          high: 3.0
+        lambda_edge_label_importance:
+          type: real
+          low: 0.5
+          high: 3.0
+        lambda_direct_edge_importance:
+          type: real
+          low: 0.5
+          high: 3.0
+        lambda_auxiliary_edge_importance:
+          type: real
+          low: 0.5
+          high: 3.0
+        sparse_supervision_mask_ratio:
+          type: real
+          low: 0.0
+          high: 0.35
+        sampling_step_size:
+          type: real
+          low: 0.025
+          high: 0.075

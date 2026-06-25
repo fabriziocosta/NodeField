@@ -1,101 +1,73 @@
-"""Demo-oriented helpers for notebook workflows."""
+"""Demo-oriented helpers for notebook workflows.
 
-from ...persistence import list_saved_graph_generators, load_graph_generator, save_graph_generator
-from .oracle import collect_oracle_trace_rows, oracle_trace_frame, parse_oracle_trace_title
-from .pipeline import (
-    benchmark_regression_guidance,
-    build_dataset,
-    build_graph_generator,
-    prepare_zinc_data_split,
-    build_zinc_dataset,
-    fit_graph_generator,
-    prepare_experiment,
-    sample_hyperparameter_configuration,
-    score_graph_generator_feasible_rate,
-)
-from .storage import describe_resume_checkpoint, find_latest_checkpoint, list_training_checkpoints
-from .artificial_hyperparameter_optimization import (
-    load_artificial_hyperparameter_optimization_config,
-    run_artificial_hyperparameter_optimization,
-    summarize_artificial_hyperparameter_results,
-)
-from .nodefield_campaign import (
-    apply_exact_trial_patch,
-    campaign_status,
-    format_campaign_status,
-    list_campaigns,
-    load_campaign_config,
-    resolve_campaign_config,
-    run_campaign_once,
-    terminate_campaign,
-    upsert_logbook_block,
-)
-from .visualization import (
-    compare_real_vs_generated,
-    infer_display_mode,
-    offset_neg_graphs,
-    plot_label_histogram_alignment,
-    plot_networkx_graphs,
-    plot_sample,
-    plot_similarity_distribution_with_iqr,
-    run_label_histogram_analysis,
-    sample_positive_endpoint_pair,
-    select_pos_neg,
-    show_molecules,
-    show_samples,
-    summarize_label_histogram_alignment,
-)
-from .zinc_hyperparameter_optimization import (
-    load_zinc_hyperparameter_optimization_config,
-    run_zinc_hyperparameter_optimization,
-    summarize_zinc_hyperparameter_results,
-)
+Exports are loaded lazily so importing a demo submodule does not require every
+optional notebook/persistence dependency up front.
+"""
 
-__all__ = [
-    "apply_exact_trial_patch",
-    "build_dataset",
-    "build_graph_generator",
-    "build_zinc_dataset",
-    "benchmark_regression_guidance",
-    "campaign_status",
-    "collect_oracle_trace_rows",
-    "compare_real_vs_generated",
-    "describe_resume_checkpoint",
-    "find_latest_checkpoint",
-    "fit_graph_generator",
-    "format_campaign_status",
-    "infer_display_mode",
-    "list_saved_graph_generators",
-    "list_campaigns",
-    "list_training_checkpoints",
-    "load_graph_generator",
-    "load_artificial_hyperparameter_optimization_config",
-    "load_campaign_config",
-    "load_zinc_hyperparameter_optimization_config",
-    "offset_neg_graphs",
-    "oracle_trace_frame",
-    "parse_oracle_trace_title",
-    "plot_label_histogram_alignment",
-    "plot_networkx_graphs",
-    "plot_sample",
-    "plot_similarity_distribution_with_iqr",
-    "prepare_experiment",
-    "prepare_zinc_data_split",
-    "resolve_campaign_config",
-    "run_artificial_hyperparameter_optimization",
-    "run_campaign_once",
-    "run_label_histogram_analysis",
-    "run_zinc_hyperparameter_optimization",
-    "sample_hyperparameter_configuration",
-    "sample_positive_endpoint_pair",
-    "score_graph_generator_feasible_rate",
-    "save_graph_generator",
-    "select_pos_neg",
-    "show_molecules",
-    "show_samples",
-    "summarize_artificial_hyperparameter_results",
-    "summarize_zinc_hyperparameter_results",
-    "summarize_label_histogram_alignment",
-    "terminate_campaign",
-    "upsert_logbook_block",
-]
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
+
+
+_EXPORTS = {
+    "apply_exact_trial_patch": "...nodefield_campaign",
+    "benchmark_regression_guidance": ".pipeline",
+    "build_dataset": ".pipeline",
+    "build_graph_generator": ".pipeline",
+    "build_zinc_dataset": ".pipeline",
+    "campaign_status": "...nodefield_campaign",
+    "collect_oracle_trace_rows": ".oracle",
+    "compare_real_vs_generated": ".visualization",
+    "describe_resume_checkpoint": ".storage",
+    "find_latest_checkpoint": ".storage",
+    "fit_graph_generator": ".pipeline",
+    "format_campaign_status": "...nodefield_campaign",
+    "infer_display_mode": ".visualization",
+    "list_campaigns": "...nodefield_campaign",
+    "list_saved_graph_generators": "...persistence",
+    "list_training_checkpoints": ".storage",
+    "load_artificial_hyperparameter_optimization_config": ".artificial_hyperparameter_optimization",
+    "load_campaign_config": "...nodefield_campaign",
+    "load_graph_generator": "...persistence",
+    "load_zinc_hyperparameter_optimization_config": ".zinc_hyperparameter_optimization",
+    "offset_neg_graphs": ".visualization",
+    "oracle_trace_frame": ".oracle",
+    "parse_oracle_trace_title": ".oracle",
+    "plot_label_histogram_alignment": ".visualization",
+    "plot_networkx_graphs": ".visualization",
+    "plot_sample": ".visualization",
+    "plot_similarity_distribution_with_iqr": ".visualization",
+    "prepare_experiment": ".pipeline",
+    "prepare_zinc_data_split": ".pipeline",
+    "resolve_campaign_config": "...nodefield_campaign",
+    "run_artificial_hyperparameter_optimization": ".artificial_hyperparameter_optimization",
+    "run_campaign_once": "...nodefield_campaign",
+    "run_label_histogram_analysis": ".visualization",
+    "run_zinc_hyperparameter_optimization": ".zinc_hyperparameter_optimization",
+    "sample_hyperparameter_configuration": ".pipeline",
+    "sample_positive_endpoint_pair": ".visualization",
+    "score_graph_generator_feasible_rate": ".pipeline",
+    "save_graph_generator": "...persistence",
+    "select_pos_neg": ".visualization",
+    "show_molecules": ".visualization",
+    "show_samples": ".visualization",
+    "summarize_artificial_hyperparameter_results": ".artificial_hyperparameter_optimization",
+    "summarize_label_histogram_alignment": ".visualization",
+    "summarize_zinc_hyperparameter_results": ".zinc_hyperparameter_optimization",
+    "terminate_campaign": "...nodefield_campaign",
+    "upsert_logbook_block": "...nodefield_campaign",
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    """Load demo exports on first access."""
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(module_name, package=__name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+from datetime import datetime
 
 from .nodefield_campaign import (
     format_campaign_status,
     list_campaigns,
     load_campaign_config,
     resolve_campaign_config,
+    run_campaign_loop,
     run_campaign_once,
     terminate_campaign,
     campaign_status,
@@ -24,22 +27,64 @@ def _load_named_campaign(name: str) -> dict:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="run_nodefield_campaign")
+    parser = argparse.ArgumentParser(
+        prog="run_nodefield_campaign",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  ./run_nodefield_campaign list\n"
+            "  ./run_nodefield_campaign run artificial-graphs-small --once --dry-run\n"
+            "  ./run_nodefield_campaign status molecules-small\n"
+            "  ./run_nodefield_campaign terminate molecules-large"
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("list", help="List configured campaigns.")
 
+    run_parser = subparsers.add_parser("run", help="Start or resume a campaign agent loop.")
+    run_parser.add_argument("campaign", metavar="campaign")
+    run_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one campaign loop tick and exit.",
+    )
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect status without launching jobs, calling OpenAI, or mutating files.",
+    )
+    run_parser.add_argument(
+        "--device",
+        choices=("cpu", "auto", "cuda"),
+        default="cpu",
+        help="Training device policy. Defaults to cpu; use auto/cuda to allow CUDA.",
+    )
+    run_parser.add_argument("--config", type=Path, help="Override campaign config path.")
+
+    mini_batch_parser = subparsers.add_parser(
+        "run-mini-batch",
+        help="Run one deterministic campaign mini-batch (internal).",
+    )
+    mini_batch_parser.add_argument("campaign", metavar="campaign")
+    mini_batch_parser.add_argument("--config", type=Path, required=True)
+    mini_batch_parser.add_argument("--run-timestamp", required=True)
+    mini_batch_parser.add_argument("--run-id", required=True)
+    mini_batch_parser.add_argument(
+        "--device",
+        choices=("cpu", "auto", "cuda"),
+        default="cpu",
+    )
+    mini_batch_parser.add_argument("--dry-run", action="store_true")
+
     status_parser = subparsers.add_parser("status", help="Show latest campaign status.")
-    status_parser.add_argument("campaign", choices=["molecules", "artificial_graphs", "artificial-graphs"])
+    status_parser.add_argument("campaign", metavar="campaign")
 
-    terminate_parser = subparsers.add_parser("terminate", help="Mark latest campaign run for termination.")
-    terminate_parser.add_argument("campaign", choices=["molecules", "artificial_graphs", "artificial-graphs"])
-
-    for name in ("molecules", "artificial-graphs"):
-        run_parser = subparsers.add_parser(name, help=f"Run one {name} campaign batch.")
-        run_parser.add_argument("--once", action="store_true", help="Run one mini-batch and exit.")
-        run_parser.add_argument("--dry-run", action="store_true", help="Sample and print without executing.")
-        run_parser.add_argument("--config", type=Path, help="Override campaign config path.")
+    terminate_parser = subparsers.add_parser(
+        "terminate",
+        help="Mark latest campaign run for termination.",
+    )
+    terminate_parser.add_argument("campaign", metavar="campaign")
 
     return parser
 
@@ -68,17 +113,39 @@ def main(argv: list[str] | None = None) -> int:
         print(format_campaign_status({**result, "queued_trials": [], "latest_metrics": {}}))
         return 0
 
-    campaign_name = "artificial_graphs" if args.command == "artificial-graphs" else args.command
+    if args.command not in {"run", "run-mini-batch"}:
+        parser.error(f"Unsupported command: {args.command}")
+
+    campaign_name = args.campaign
+    if args.device == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    elif args.device == "cuda":
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
     repo_root = resolve_repo_root(Path.cwd())
     config_path = args.config or resolve_campaign_config(campaign_name, repo_root=repo_root)
     config = load_campaign_config(config_path, repo_root=repo_root)
-    if not args.once:
-        print("Only --once execution is currently supported.")
-        return 2
-    result = run_campaign_once(config, dry_run=bool(args.dry_run))
-    print(f"run_dir: {result['run_dir']}")
-    print(f"queued_trials: {len(result['proposal']['sampled_patches'])}")
-    print(f"status: {result['state']['status']}")
+    if args.command == "run-mini-batch":
+        now = datetime.strptime(args.run_timestamp, "%Y%m%d_%H%M%S")
+        result = run_campaign_once(
+            config,
+            dry_run=bool(args.dry_run),
+            now=now,
+            short_id=args.run_id,
+            allow_existing_run_dir=True,
+        )
+        print(f"run_dir: {result['run_dir']}")
+        print(f"queued_trials: {len(result['proposal']['sampled_patches'])}")
+        print(f"status: {result['state']['status']}")
+        return 0
+
+    run_campaign_loop(
+        config,
+        campaign_name=campaign_name,
+        once=bool(args.once),
+        dry_run=bool(args.dry_run),
+        device=args.device,
+    )
     return 0
 
 

@@ -14,20 +14,27 @@ The campaign implementation lives in:
 
 The default campaign configs live in:
 
-- [`../configs/campaigns/molecules.yaml`](../configs/campaigns/molecules.yaml)
-- [`../configs/campaigns/artificial_graphs.yaml`](../configs/campaigns/artificial_graphs.yaml)
+- [`../configs/campaigns/molecules_small.yaml`](../configs/campaigns/molecules_small.yaml)
+- [`../configs/campaigns/molecules_large.yaml`](../configs/campaigns/molecules_large.yaml)
+- [`../configs/campaigns/artificial_graphs_small.yaml`](../configs/campaigns/artificial_graphs_small.yaml)
+- [`../configs/campaigns/artificial_graphs_large.yaml`](../configs/campaigns/artificial_graphs_large.yaml)
 
 ## Goal
 
 The loop is designed for iterative hyperparameter campaigns, not one-off notebook
 experiments. Each campaign attempt:
 
-1. chooses a small batch of candidate configurations,
-2. trains/evaluates those candidates sequentially,
-3. scores them by feasibility violations,
-4. records artifacts and metrics under `artifact/`,
-5. appends an analysis block to the domain logbook,
-6. uses the results to inform the next proposal.
+1. checks the latest run state, metrics, proposal, and domain logbook context,
+2. records a reason for the next proposal,
+3. calls OpenAI at deterministic decision points,
+4. validates the strict JSON decision and any campaign YAML patch,
+5. chooses a small batch of candidate configurations,
+6. writes exact patched trial configs,
+7. trains/evaluates those candidates sequentially in a child process,
+8. scores them by feasibility violations,
+9. records artifacts and metrics under `artifact/`,
+10. appends an analysis block to the domain logbook,
+11. uses the results to inform the next proposal.
 
 For molecules, the primary score is `average_num_violations` on generated molecules.
 For artificial graphs, the same score is used to track graph validity and feasibility.
@@ -38,8 +45,10 @@ Lower is better.
 Campaigns are separated by domain:
 
 ```text
-artifact/molecules/molecules_YYYYMMDD_HHMMSS_<shortid>/
-artifact/artificial_graphs/artificial_graphs_YYYYMMDD_HHMMSS_<shortid>/
+artifact/molecules/molecules_small_YYYYMMDD_HHMMSS_<shortid>/
+artifact/molecules/molecules_large_YYYYMMDD_HHMMSS_<shortid>/
+artifact/artificial_graphs/artificial_graphs_small_YYYYMMDD_HHMMSS_<shortid>/
+artifact/artificial_graphs/artificial_graphs_large_YYYYMMDD_HHMMSS_<shortid>/
 ```
 
 Each run contains:
@@ -52,16 +61,141 @@ metrics/      summary JSON/CSV files
 samples/      generated graph or molecule previews
 state.json    machine-readable campaign status
 proposal.json proposed ranges/configs and sampled exact patches
+campaign_result.json strict mini-batch result summary
+agent_decision.json  strict OpenAI decision for this completed run
 ```
+
+Campaign-level strict JSON state is also kept beside the timestamped run
+folders:
+
+```text
+artifact/<domain>/<prefix>_campaign_state.json
+artifact/<domain>/<prefix>_agent_decisions.jsonl
+artifact/<domain>/logs/<run>.log
+```
+
+The main CLI output is intentionally terse. Full training, sampling, warnings,
+and traceback output for each candidate goes to per-trial logs:
+
+```text
+artifact/<domain>/<run>/logs/trial_001.log
+artifact/<domain>/<run>/logs/trial_002.log
+...
+```
+
+When a trained generator exposes metric plotting, the campaign exports loss
+curves beside the trial metrics:
+
+```text
+artifact/<domain>/<run>/trials/trial_001/metrics/loss_curves.pdf
+```
+
+The latest log directory and discovered loss PDFs are shown by `status`.
 
 The domain logbooks are:
 
 - [`../LOGBOOK_molecules.md`](../LOGBOOK_molecules.md)
 - [`../LOGBOOK_artificial_graphs.md`](../LOGBOOK_artificial_graphs.md)
 
+## OpenAI Decision Contract
+
+`./run_nodefield_campaign run <campaign>` starts or resumes the OpenAI-backed
+parent loop. The parent loop launches an internal `run-mini-batch` child process
+for deterministic execution, polls that child at `runner.poll_seconds`, and calls
+OpenAI only after a mini-batch completes, fails, or needs a retryable agent
+decision.
+
+OpenAI settings are configured under `agent`:
+
+```yaml
+agent:
+  model: gpt-5.3-codex
+  reasoning_effort: medium
+  max_output_tokens: 2000
+  api_key_env: OPENAI_API_KEY
+```
+
+The response uses the OpenAI Responses API with strict structured output:
+
+```json
+{
+  "decision": "no_action | update_logbook | propose_trial | stop_campaign",
+  "reason": "short rationale",
+  "logbook_markdown": "human-facing summary",
+  "campaign_patch": "{\"agent\": {...}}"
+}
+```
+
+`campaign_patch` is deliberately a JSON-encoded string. The controller decodes
+it locally, validates it, and only then mutates the tracked campaign YAML.
+Accepted patch paths are limited to:
+
+- `agent.reason`
+- `agent.next_attempt`
+- `agent.default_trial_patch_space`
+- `agent.default_trial_configs`
+
+Patches touching `dataset`, `generation`, `runner`, `artifacts`, `logbook`, or
+output roots are rejected. OpenAI quota or billing exhaustion is terminal for the
+loop and writes `openai_credits_exhausted`; transient OpenAI or parse failures
+write `agent_decision_failed` and are retried on the next poll.
+
 ## Proposal Modes
 
 The controller supports two proposal styles.
+
+Before creating a new proposal, the controller checks the latest timestamped run
+for the same named campaign. This latest-result context is written to
+`proposal.json` as `previous_result` and includes:
+
+- latest run directory,
+- latest status,
+- latest metrics or error,
+- previous proposal path,
+- summary CSV path when available,
+- recent logbook text.
+
+The proposal reason combines that latest-result context with the campaign
+config's `agent.reason`. This keeps the attempt reproducible even while the
+range proposal itself remains config-driven.
+
+## LLM Prompts And Polling
+
+The shared prompt templates live in:
+
+- [`../configs/campaigns/prompts/nodefield_campaign_proposal.md`](../configs/campaigns/prompts/nodefield_campaign_proposal.md)
+- [`../configs/campaigns/prompts/nodefield_campaign_logbook.md`](../configs/campaigns/prompts/nodefield_campaign_logbook.md)
+
+Campaign configs reference them under `agent.prompts`:
+
+```yaml
+agent:
+  prompts:
+    proposal: configs/campaigns/prompts/nodefield_campaign_proposal.md
+    logbook: configs/campaigns/prompts/nodefield_campaign_logbook.md
+```
+
+The controller includes those prompt files, the latest metrics, the latest
+campaign state, the resolved campaign config, and the recent logbook tail in the
+OpenAI decision request. The resolved prompt paths are also recorded in each
+run's `proposal.json`.
+
+Polling cadence is configured per named campaign under `runner.poll_seconds`:
+
+```yaml
+runner:
+  config_path: notebooks/configs/artificial_graph_hyperparameter_optimization.yaml
+  poll_seconds: 1800
+```
+
+Current defaults are:
+
+- small campaigns: `1800` seconds, 30 minutes
+- large campaigns: `3600` seconds, 1 hour
+
+`status` prints the resolved poll interval, campaign-level state, active child
+PID/run, child log path, latest metrics, discovered loss PDFs, and the latest
+decision/error.
 
 ### `range_search`
 
@@ -113,14 +247,10 @@ Example:
 agent:
   proposal_mode: exact_configs
   default_trial_configs:
-    - dataset:
-        num_graphs: 500
-      model:
+    - model:
         fixed:
           number_of_transformer_layers: 2
-    - dataset:
-        num_graphs: 750
-      model:
+    - model:
         fixed:
           number_of_transformer_layers: 3
 ```
@@ -138,8 +268,6 @@ Supported groups:
 ```yaml
 agent:
   mutable_groups:
-    - dataset
-    - generation
     - architecture
     - training
     - loss_weights
@@ -152,16 +280,16 @@ paths:
 ```yaml
 agent:
   allowed_paths:
-    - dataset
-    - generation
     - model.fixed
     - model.search_space
 ```
 
-This lets the agent change all model/training/search-space hyperparameters while
-keeping unsafe operational paths locked. In particular, campaign proposals should
-not mutate:
+This lets the agent change model/training/search-space hyperparameters while
+keeping dataset, generation, and unsafe operational paths locked. In particular,
+campaign proposals should not mutate:
 
+- `dataset`
+- `generation`
 - `outputs`
 - artifact roots
 - checkpoint roots
@@ -169,47 +297,55 @@ not mutate:
 
 Those are controlled by the campaign runner.
 
-## Dataset And Complexity Control
+## Fixed Dataset And Generation Campaigns
 
-Campaign configs may set fixed dataset settings directly:
+Dataset size, graph complexity, and generation settings are fixed by the named
+campaign. They are not agent-mutable trial parameters. This keeps trials within
+a campaign comparable and makes "small/simple" and "large/complex" results
+separate experimental conditions.
+
+The initial named campaigns are:
+
+```text
+molecules-small             100 ZINC graphs
+molecules-large            1000 ZINC graphs with larger molecular graphs
+artificial-graphs-small     100 artificial graphs
+artificial-graphs-large    1000 artificial graphs with larger cycle/path/star units
+```
+
+The old `molecules` and `artificial-graphs` commands remain aliases for the
+small campaigns. The older artificial `simple` and `complex` aliases are also
+accepted for compatibility, but new configs use `small` and `large`.
+
+Campaign configs set fixed dataset settings directly:
 
 ```yaml
 dataset:
-  num_graphs: 500
+  num_graphs: 100
   min_size: 4
   max_size: 10
   random_state: 42
+
+generation:
+  n_samples: 16
+  feasibility_effort: 2
+  feasibility_filter: none
 ```
 
 For artificial graphs, campaign-level complexity can include:
 
 ```yaml
 dataset:
-  num_graphs: 300
+  num_graphs: 1000
   cycle_length: 6
   path_length: 4
   num_rays: 3
   ray_length: 2
 ```
 
-The agent can also explore these as ranges:
-
-```yaml
-agent:
-  default_trial_patch_space:
-    dataset:
-      num_graphs:
-        type: int
-        low: 150
-        high: 600
-      cycle_length:
-        type: int
-        low: 4
-        high: 9
-```
-
-This supports curriculum-style campaigns: start with smaller/easier graphs,
-tune stability and feasibility, then expand graph size or structural complexity.
+To change dataset scale or complexity, create a new named campaign config rather
+than allowing the agent to modify `dataset` inside a campaign run. Use the same
+pattern for generation settings such as `n_samples` and `feasibility_effort`.
 
 ## Architecture Search
 
@@ -286,23 +422,52 @@ List campaigns:
 python run_nodefield_campaign.py list
 ```
 
-Run one molecule mini-batch:
+The `list` command prints campaign names. Use those names as arguments to
+`run`, `status`, and `terminate`.
+
+Campaign `run` defaults to CPU execution so local machines with visible but
+unsupported CUDA devices still work with the simple command. Use
+`--device auto` or `--device cuda` only on machines where the installed PyTorch
+build supports the available GPU.
+
+Start or resume a molecule campaign loop:
 
 ```bash
-python run_nodefield_campaign.py molecules --once
+./run_nodefield_campaign run molecules-small
+./run_nodefield_campaign run molecules-large
 ```
 
-Dry-run one artificial graph mini-batch:
+Run one parent-loop tick and exit:
 
 ```bash
-python run_nodefield_campaign.py artificial-graphs --once --dry-run
+./run_nodefield_campaign run artificial-graphs-small --once
+```
+
+Dry-run one artificial graph campaign status check without launching jobs,
+calling OpenAI, or mutating files:
+
+```bash
+./run_nodefield_campaign run artificial-graphs-small --dry-run
+./run_nodefield_campaign run artificial-graphs-large --dry-run
+```
+
+The internal child command is available for tests and debugging, but normal use
+should go through `run`:
+
+```bash
+./run_nodefield_campaign run-mini-batch artificial-graphs-small \
+  --config configs/campaigns/artificial_graphs_small.yaml \
+  --run-timestamp 20260625_091011 \
+  --run-id debug01
 ```
 
 Check status:
 
 ```bash
 python run_nodefield_campaign.py status molecules
+python run_nodefield_campaign.py status molecules-large
 python run_nodefield_campaign.py status artificial-graphs
+python run_nodefield_campaign.py status artificial-graphs-large
 ```
 
 Request termination of the latest run:
@@ -311,12 +476,14 @@ Request termination of the latest run:
 python run_nodefield_campaign.py terminate molecules
 ```
 
-Status reads only the latest `artifact/<campaign>/.../state.json`.
+Status reads the campaign-level `artifact/<domain>/<prefix>_campaign_state.json`
+and the latest timestamped run state.
 
 ## Logbook Contract
 
-After a completed run, the controller writes a marked block to the domain
-logbook. Each block records:
+After a completed run and OpenAI decision, the controller writes a marked block
+to the domain logbook from the strict `logbook_markdown` field. Each block
+records:
 
 - what was tried,
 - proposal mode,
@@ -344,6 +511,8 @@ Use `range_search` when the next step is exploratory. Keep `batch_size` small
 Use `exact_configs` when the next step is confirmatory, such as rechecking a
 promising configuration or running a controlled ablation.
 
-Expose broad hyperparameter paths when iterating locally, but keep operational
-paths locked. The current campaign design allows broad model and dataset changes
-without allowing proposals to redirect outputs or overwrite unrelated files.
+Expose broad model hyperparameter paths when iterating locally, but keep dataset,
+generation, and operational paths locked. The current campaign design allows
+broad model, training, loss-weight, and sampling changes without allowing
+proposals to change dataset/generation conditions, redirect outputs, or overwrite
+unrelated files.
