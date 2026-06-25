@@ -7,31 +7,82 @@ artifacts:
   root: artifact
 
 logbook:
-  path: LOGBOOK.md
+  path: LOGBOOK_molecules.md
 
 runner:
   config_path: notebooks/configs/zinc_molecule_hyperparameter_optimization.yaml
+
+dataset:
+  num_graphs: 500
+  min_size: 4
+  max_size: 10
+  random_state: 42
 
 random_search:
   batch_size: 3
   random_state: 101
 
 agent:
+  proposal_mode: range_search
+  mutable_groups:
+    - dataset
+    - architecture
+    - training
+    - loss_weights
+    - sampling
+    - generation
   allowed_paths:
-    - model.search_space.lambda_degree_importance
-    - model.search_space.lambda_node_exist_importance
-    - model.search_space.lambda_node_count_importance
-    - model.search_space.lambda_node_label_importance
-    - model.search_space.lambda_edge_label_importance
-    - model.search_space.lambda_direct_edge_importance
-    - model.search_space.lambda_auxiliary_edge_importance
-    - model.search_space.sparse_supervision_mask_ratio
-    - model.search_space.sampling_step_size
-  max_search_leaf_count: 9
-  reason: Keep the architecture fixed and sweep loss weights plus sampling step size for ZINC feasibility.
-  next_attempt: Compare average violations, then narrow weights around the best one-point ranges.
+    - dataset
+    - generation
+    - model.fixed
+    - model.search_space
+  max_search_leaf_count: 24
+  reason: Explore ZINC feasibility using dataset scale, architecture size, training budget, loss weights, and sampling controls.
+  next_attempt: Compare average violations, then narrow dataset complexity and architecture ranges around the best candidates.
   default_trial_patch_space:
+    dataset:
+      num_graphs:
+        type: int
+        low: 250
+        high: 750
+      max_size:
+        type: int
+        low: 8
+        high: 14
     model:
+      fixed:
+        latent_embedding_dimension:
+          type: choice
+          values: [32, 64, 128]
+        node_embedding_svd_dimension:
+          type: choice
+          values: [32, 64, 128]
+        graph_embedding_svd_dimension:
+          type: choice
+          values: [32, 64, 128]
+        number_of_transformer_layers:
+          type: int
+          low: 1
+          high: 4
+        transformer_attention_head_count:
+          type: choice
+          values: [2, 4, 8]
+        transformer_dropout:
+          type: real
+          low: 0.05
+          high: 0.25
+        learning_rate:
+          type: real
+          low: 0.00005
+          high: 0.0005
+          scale: log
+        batch_size:
+          type: choice
+          values: [8, 16, 24]
+        total_steps:
+          type: int
+          low: 40
+          high: 120
       search_space:
         lambda_degree_importance:
           type: real
@@ -69,3 +120,11 @@ agent:
           type: real
           low: 0.025
           high: 0.075
+    generation:
+      feasibility_effort:
+        type: int
+        low: 1
+        high: 4
+      n_samples:
+        type: choice
+        values: [8, 16, 24]

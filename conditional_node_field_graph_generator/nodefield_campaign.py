@@ -11,8 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, TextIO
 
-from .runtime_paths import make_timestamped_run_dir, resolve_campaign_artifact_root, resolve_repo_root
-from .campaign_search import sample_patch_space, validate_patch_space
+from .runtime_paths import (
+    make_timestamped_run_dir,
+    resolve_campaign_artifact_root,
+    resolve_repo_root,
+)
+from .campaign_search import flatten_leaf_paths, sample_patch_space, validate_patch_space
 
 
 CAMPAIGN_CONFIGS = {
@@ -22,6 +26,51 @@ CAMPAIGN_CONFIGS = {
 }
 
 RUN_SUBDIRECTORIES = ("configs", "trials", "logs", "metrics", "samples")
+
+MUTABLE_GROUP_PATHS = {
+    "dataset": ["dataset"],
+    "generation": ["generation"],
+    "loss_weights": [
+        "model.search_space.lambda_degree_importance",
+        "model.search_space.lambda_node_exist_importance",
+        "model.search_space.lambda_node_count_importance",
+        "model.search_space.lambda_node_label_importance",
+        "model.search_space.lambda_edge_label_importance",
+        "model.search_space.lambda_direct_edge_importance",
+        "model.search_space.lambda_auxiliary_edge_importance",
+        "model.search_space.lambda_edge_count_importance",
+        "model.search_space.lambda_degree_edge_consistency_importance",
+        "model.search_space.default_exist_pos_weight",
+    ],
+    "sampling": [
+        "model.search_space.sampling_step_size",
+        "model.search_space.sampling_steps",
+        "model.search_space.langevin_noise_scale",
+        "model.search_space.sparse_supervision_mask_ratio",
+        "generation",
+    ],
+    "training": [
+        "model.fixed.learning_rate",
+        "model.fixed.batch_size",
+        "model.fixed.maximum_epochs",
+        "model.fixed.total_steps",
+        "model.fixed.enable_early_stopping",
+        "model.fixed.early_stopping_patience",
+        "model.fixed.early_stopping_min_delta",
+    ],
+    "architecture": [
+        "model.fixed.latent_embedding_dimension",
+        "model.fixed.node_embedding_svd_dimension",
+        "model.fixed.graph_embedding_svd_dimension",
+        "model.fixed.number_of_transformer_layers",
+        "model.fixed.transformer_attention_head_count",
+        "model.fixed.transformer_dropout",
+        "model.fixed.locality_horizon",
+        "model.fixed.locality_sample_fraction",
+    ],
+}
+
+VALID_PROPOSAL_MODES = {"range_search", "exact_configs"}
 
 
 def _read_yaml_or_json(path: Path) -> dict[str, Any]:
@@ -88,7 +137,64 @@ def _resolve_repo_path(repo_root: Path, path: str | Path) -> Path:
     return resolved.resolve()
 
 
-def load_campaign_config(path: str | Path, *, repo_root: str | Path | None = None) -> dict[str, Any]:
+def _deduplicate_paths(paths: list[str]) -> list[str]:
+    deduplicated: list[str] = []
+    seen = set()
+    for path in paths:
+        text = str(path)
+        if text in seen:
+            continue
+        deduplicated.append(text)
+        seen.add(text)
+    return deduplicated
+
+
+def _resolve_allowed_paths(agent: Mapping[str, Any]) -> list[str]:
+    paths: list[str] = []
+    groups = agent.get("mutable_groups", [])
+    if groups is None:
+        groups = []
+    if not isinstance(groups, list):
+        raise ValueError("agent.mutable_groups must be a list when provided.")
+    unknown_groups = sorted(str(group) for group in groups if str(group) not in MUTABLE_GROUP_PATHS)
+    if unknown_groups:
+        raise ValueError("Unknown mutable group(s): " + ", ".join(unknown_groups))
+    for group in groups:
+        paths.extend(MUTABLE_GROUP_PATHS[str(group)])
+    explicit_paths = agent.get("allowed_paths", [])
+    if explicit_paths is None:
+        explicit_paths = []
+    if not isinstance(explicit_paths, list):
+        raise ValueError("agent.allowed_paths must be a list when provided.")
+    paths.extend(str(path) for path in explicit_paths)
+    return _deduplicate_paths(paths)
+
+
+def _path_allowed(path: str, allowed_paths: list[str]) -> bool:
+    return any(path == allowed or path.startswith(f"{allowed}.") for allowed in allowed_paths)
+
+
+def _validate_exact_patches(patches: list[Mapping[str, Any]], *, allowed_paths: list[str]) -> None:
+    for index, patch in enumerate(patches, start=1):
+        if not isinstance(patch, Mapping):
+            raise ValueError(f"Exact trial config {index} must be a mapping.")
+        rejected = sorted(
+            path
+            for path in flatten_leaf_paths(patch)
+            if not _path_allowed(path, allowed_paths)
+        )
+        if rejected:
+            raise ValueError(
+                f"Exact trial config {index} contains non-allowlisted path(s): "
+                + ", ".join(rejected)
+            )
+
+
+def load_campaign_config(
+    path: str | Path,
+    *,
+    repo_root: str | Path | None = None,
+) -> dict[str, Any]:
     """Load and normalize a NodeField campaign config."""
     root = resolve_repo_root(repo_root)
     config_path = _resolve_repo_path(root, path)
@@ -122,12 +228,27 @@ def load_campaign_config(path: str | Path, *, repo_root: str | Path | None = Non
     agent = config.setdefault("agent", {})
     if not isinstance(agent, dict):
         raise ValueError("agent section must be a mapping.")
-    if "default_trial_patch_space" not in agent:
-        raise ValueError("agent.default_trial_patch_space must be provided.")
-    allowed_paths = agent.get("allowed_paths")
-    if not isinstance(allowed_paths, list) or not allowed_paths:
-        raise ValueError("agent.allowed_paths must be a non-empty list.")
+    proposal_mode = str(agent.get("proposal_mode") or "range_search")
+    if proposal_mode not in VALID_PROPOSAL_MODES:
+        raise ValueError(f"agent.proposal_mode must be one of {sorted(VALID_PROPOSAL_MODES)}.")
+    agent["proposal_mode"] = proposal_mode
+    allowed_paths = _resolve_allowed_paths(agent)
+    if not allowed_paths:
+        raise ValueError(
+            "agent.allowed_paths or agent.mutable_groups must provide at least one path."
+        )
+    agent["allowed_paths"] = allowed_paths
     agent["max_search_leaf_count"] = int(agent.get("max_search_leaf_count", len(allowed_paths)))
+    if proposal_mode == "range_search":
+        if "default_trial_patch_space" not in agent:
+            raise ValueError("agent.default_trial_patch_space must be provided for range_search.")
+    else:
+        exact_configs = agent.get("default_trial_configs")
+        if not isinstance(exact_configs, list) or not exact_configs:
+            raise ValueError(
+                "agent.default_trial_configs must be a non-empty list for exact_configs."
+            )
+        _validate_exact_patches(exact_configs, allowed_paths=allowed_paths)
 
     artifacts = config.setdefault("artifacts", {})
     if not isinstance(artifacts, dict):
@@ -137,7 +258,8 @@ def load_campaign_config(path: str | Path, *, repo_root: str | Path | None = Non
     logbook = config.setdefault("logbook", {})
     if not isinstance(logbook, dict):
         raise ValueError("logbook section must be a mapping.")
-    logbook["path"] = str(_resolve_repo_path(root, logbook.get("path") or "LOGBOOK.md"))
+    default_logbook = f"LOGBOOK_{campaign['domain']}.md"
+    logbook["path"] = str(_resolve_repo_path(root, logbook.get("path") or default_logbook))
     config["_repo_root"] = str(root)
     return config
 
@@ -199,7 +321,10 @@ def _latest_run_dir(config: Mapping[str, Any]) -> Path | None:
     return matches[0] if matches else None
 
 
-def apply_exact_trial_patch(base_config: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+def apply_exact_trial_patch(
+    base_config: Mapping[str, Any],
+    patch: Mapping[str, Any],
+) -> dict[str, Any]:
     """Apply an exact candidate patch, preserving one-point model search-space specs."""
     patched = deepcopy(dict(base_config))
     model_patch = patch.get("model") if isinstance(patch, Mapping) else None
@@ -235,7 +360,26 @@ def _load_workflow_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return _read_yaml_or_json(Path(str(config["runner"]["config_path"])))
 
 
-def _domain_runner(domain: str) -> tuple[Callable[[str | Path], dict[str, Any]], Callable[..., dict[str, Any]]]:
+def _campaign_workflow_overrides(config: Mapping[str, Any]) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    for section in ("experiment", "dataset", "generation"):
+        value = config.get(section)
+        if isinstance(value, Mapping):
+            overrides[section] = deepcopy(dict(value))
+    model = config.get("model")
+    if isinstance(model, Mapping):
+        overrides["model"] = deepcopy(dict(model))
+    return overrides
+
+
+def _load_campaign_workflow_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Load the base workflow YAML and apply campaign-level fixed overrides."""
+    return _deep_merge(_load_workflow_config(config), _campaign_workflow_overrides(config))
+
+
+def _domain_runner(
+    domain: str,
+) -> tuple[Callable[[str | Path], dict[str, Any]], Callable[..., dict[str, Any]]]:
     if domain == "molecules":
         from .extensions.demo.zinc_hyperparameter_optimization import (
             load_zinc_hyperparameter_optimization_config,
@@ -280,17 +424,21 @@ def _format_logbook_entry(
         metric_text = ", ".join(f"{key}={value}" for key, value in sorted(metrics.items()))
     return (
         f"### {campaign} - {run_dir.name}\n\n"
-        f"- Tried: {sampled_count} sampled candidate(s) from the proposed range space.\n"
+        f"- Tried: {sampled_count} candidate(s) from "
+        f"`{proposal.get('proposal_mode', 'range_search')}`.\n"
         f"- Agent reasoning: {proposal.get('reason', 'Config-defined range proposal.')}\n"
-        f"- Sampled ranges/exact configs: `{run_dir / 'proposal.json'}`\n"
+        f"- Mutable groups: "
+        f"{', '.join(proposal.get('mutable_groups', [])) or 'explicit paths only'}\n"
+        f"- Ranges/exact configs: `{run_dir / 'proposal.json'}`\n"
         f"- Metrics: {metric_text}\n"
         f"- Artifacts: `{run_dir}`\n"
-        f"- Next attempt: {proposal.get('next_attempt', 'Review metrics and narrow the best ranges.')}\n"
+        f"- Next attempt: "
+        f"{proposal.get('next_attempt', 'Review metrics and narrow the best ranges.')}\n"
     )
 
 
 def upsert_logbook_block(logbook_path: str | Path, block_id: str, markdown: str) -> None:
-    """Create or replace one marked campaign block in ``LOGBOOK.md``."""
+    """Create or replace one marked campaign block in a domain logbook."""
     path = Path(logbook_path)
     begin = f"<!-- nodefield-campaign:{block_id}:begin -->"
     end = f"<!-- nodefield-campaign:{block_id}:end -->"
@@ -308,13 +456,18 @@ def upsert_logbook_block(logbook_path: str | Path, block_id: str, markdown: str)
     path.write_text(text, encoding="utf-8")
 
 
-def _initial_state(config: Mapping[str, Any], run_dir: Path, proposal: Mapping[str, Any]) -> dict[str, Any]:
+def _initial_state(
+    config: Mapping[str, Any],
+    run_dir: Path,
+    proposal: Mapping[str, Any],
+) -> dict[str, Any]:
     return {
         "campaign": config["campaign"]["domain"],
         "prefix": config["campaign"]["prefix"],
         "status": "queued",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "run_dir": str(run_dir),
+        "proposal_mode": proposal.get("proposal_mode", "range_search"),
         "queued_trials": [
             {"trial_id": idx + 1, "status": "queued"}
             for idx, _patch in enumerate(proposal.get("sampled_patches", []))
@@ -331,24 +484,39 @@ def _proposal_from_config(
     run_dir: Path,
 ) -> dict[str, Any]:
     agent = config["agent"]
-    patch_space = agent["default_trial_patch_space"]
-    flattened = validate_patch_space(
-        patch_space,
-        allowed_paths=list(agent["allowed_paths"]),
-        max_leaf_count=int(agent.get("max_search_leaf_count", 8)),
-    )
-    sampled = sample_patch_space(
-        patch_space,
-        n_samples=int(config["random_search"]["batch_size"]),
-        random_state=int(config["random_search"]["random_state"]),
-        allowed_paths=list(agent["allowed_paths"]),
-        max_leaf_count=int(agent.get("max_search_leaf_count", 8)),
-    )
+    proposal_mode = str(agent.get("proposal_mode") or "range_search")
+    patch_space = None
+    flattened = {}
+    if proposal_mode == "range_search":
+        patch_space = agent["default_trial_patch_space"]
+        flattened = validate_patch_space(
+            patch_space,
+            allowed_paths=list(agent["allowed_paths"]),
+            max_leaf_count=int(agent.get("max_search_leaf_count", 8)),
+        )
+        sampled = sample_patch_space(
+            patch_space,
+            n_samples=int(config["random_search"]["batch_size"]),
+            random_state=int(config["random_search"]["random_state"]),
+            allowed_paths=list(agent["allowed_paths"]),
+            max_leaf_count=int(agent.get("max_search_leaf_count", 8)),
+        )
+    elif proposal_mode == "exact_configs":
+        exact_configs = [deepcopy(dict(patch)) for patch in agent["default_trial_configs"]]
+        _validate_exact_patches(exact_configs, allowed_paths=list(agent["allowed_paths"]))
+        sampled = exact_configs[: int(config["random_search"]["batch_size"])]
+    else:
+        raise ValueError(f"Unsupported proposal mode: {proposal_mode!r}")
     return {
         "campaign": config["campaign"]["domain"],
         "run_dir": str(run_dir),
+        "proposal_mode": proposal_mode,
+        "mutable_groups": list(agent.get("mutable_groups", [])),
+        "allowed_paths": list(agent["allowed_paths"]),
         "reason": str(agent.get("reason") or "Config-defined range proposal."),
-        "next_attempt": str(agent.get("next_attempt") or "Review metrics and narrow the best ranges."),
+        "next_attempt": str(
+            agent.get("next_attempt") or "Review metrics and narrow the best ranges."
+        ),
         "patch_space": patch_space,
         "flattened_patch_space": flattened,
         "sampled_patches": sampled,
@@ -403,10 +571,13 @@ def run_campaign_once(
     _write_json(run_dir / "proposal.json", proposal)
     _write_json(run_dir / "state.json", state)
     shutil.copyfile(str(config["campaign"]["config_path"]), run_dir / "configs" / "campaign.yaml")
-    shutil.copyfile(str(config["runner"]["config_path"]), run_dir / "configs" / "base_workflow.yaml")
+    shutil.copyfile(
+        str(config["runner"]["config_path"]),
+        run_dir / "configs" / "base_workflow.yaml",
+    )
 
     loader, runner = _domain_runner(str(config["campaign"]["domain"]))
-    base_workflow_config = _load_workflow_config(config)
+    base_workflow_config = _load_campaign_workflow_config(config)
     metrics_rows: list[dict[str, Any]] = []
 
     state["status"] = "running"
@@ -442,7 +613,12 @@ def run_campaign_once(
     _write_json(run_dir / "state.json", state)
     _write_json(run_dir / "metrics" / "summary.json", {"trials": metrics_rows})
     _write_summary_csv(run_dir / "metrics" / "summary.csv", metrics_rows)
-    logbook_entry = _format_logbook_entry(config=config, run_dir=run_dir, proposal=proposal, state=state)
+    logbook_entry = _format_logbook_entry(
+        config=config,
+        run_dir=run_dir,
+        proposal=proposal,
+        state=state,
+    )
     upsert_logbook_block(config["logbook"]["path"], run_dir.name, logbook_entry)
     return {
         "run_dir": run_dir,
@@ -470,7 +646,10 @@ def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> d
     log_lines: list[str] = []
     log_root = run_dir / "logs"
     if log_root.is_dir():
-        log_files = sorted((path for path in log_root.glob("*.log") if path.is_file()), reverse=True)
+        log_files = sorted(
+            (path for path in log_root.glob("*.log") if path.is_file()),
+            reverse=True,
+        )
         if log_files:
             log_lines = log_files[0].read_text(encoding="utf-8", errors="replace").splitlines()
     return {
@@ -516,11 +695,16 @@ def terminate_campaign(config: Mapping[str, Any]) -> dict[str, Any]:
     state["status"] = "termination_requested"
     state["termination_requested_at"] = datetime.now().isoformat(timespec="seconds")
     _write_json(state_path, state)
-    return {"campaign": config["campaign"]["domain"], "status": "termination_requested", "run_dir": str(run_dir)}
+    return {
+        "campaign": config["campaign"]["domain"],
+        "status": "termination_requested",
+        "run_dir": str(run_dir),
+    }
 
 
 __all__ = [
     "CAMPAIGN_CONFIGS",
+    "MUTABLE_GROUP_PATHS",
     "apply_exact_trial_patch",
     "campaign_status",
     "format_campaign_status",

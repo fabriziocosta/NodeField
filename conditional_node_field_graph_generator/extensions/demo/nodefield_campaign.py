@@ -2,6 +2,7 @@
 
 from ...nodefield_campaign import (
     CAMPAIGN_CONFIGS,
+    MUTABLE_GROUP_PATHS,
     apply_exact_trial_patch,
     campaign_status,
     format_campaign_status,
@@ -16,6 +17,7 @@ from ...nodefield_campaign import (
 
 __all__ = [
     "CAMPAIGN_CONFIGS",
+    "MUTABLE_GROUP_PATHS",
     "apply_exact_trial_patch",
     "campaign_status",
     "format_campaign_status",

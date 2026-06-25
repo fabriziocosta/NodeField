@@ -27,6 +27,10 @@ This is the training-loss reference: auxiliary and structural losses, the total 
 
 This is the dedicated reference for the two supported target-guidance routes: classifier-free guidance (CFG) and separate post-hoc guidance through an auxiliary classifier or regressor.
 
+[`2E_AGENT_CAMPAIGN_OPTIMIZATION_README.md`](2E_AGENT_CAMPAIGN_OPTIMIZATION_README.md)
+
+This is the operational reference for agent-guided campaign optimization: proposal modes, mutable hyperparameter groups, dataset/architecture search, artifacts, logbooks, and CLI usage.
+
 [`4_MAIN_CLASS_INTERFACES_README.md`](4_MAIN_CLASS_INTERFACES_README.md)
 
 This is the API reference for the main public classes and their parameters.

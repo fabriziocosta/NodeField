@@ -23,6 +23,10 @@ This companion document covers optimization-facing practice: hyperparameters, la
 
 This document is the dedicated reference for the two supported target-guidance routes: classifier-free guidance (CFG) and separate post-hoc guidance through an auxiliary classifier or regressor.
 
+[`2E_AGENT_CAMPAIGN_OPTIMIZATION_README.md`](2E_AGENT_CAMPAIGN_OPTIMIZATION_README.md)
+
+This document explains the agent-guided campaign loop for molecule and artificial graph hyperparameter optimization, including range proposals, exact configs, mutable groups, artifacts, logbooks, and CLI status behavior.
+
 [`4_MAIN_CLASS_INTERFACES_README.md`](4_MAIN_CLASS_INTERFACES_README.md)
 
 This is the API reference. It collects the main public classes in one place, shows their primary constructors and workflow methods, explains the meaning of each important parameter, and summarizes the practical effect of increasing or decreasing those parameters. Use it when you want a user-facing interface guide rather than the modeling details.

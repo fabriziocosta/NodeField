@@ -47,6 +47,18 @@ def _set_nested_value(target: dict[str, Any], dotted_path: str, value: Any) -> N
     cursor[parts[-1]] = value
 
 
+def flatten_leaf_paths(value: Mapping[str, Any], *, prefix: str = "") -> list[str]:
+    """Return dotted leaf paths for an exact patch mapping."""
+    paths: list[str] = []
+    for key, item in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(item, Mapping) and not _is_range_spec(item):
+            paths.extend(flatten_leaf_paths(item, prefix=path))
+        else:
+            paths.append(path)
+    return paths
+
+
 def _validate_spec(path: str, spec: Mapping[str, Any]) -> None:
     spec_type = str(spec.get("type"))
     if spec_type not in _SPEC_TYPES:
@@ -78,7 +90,8 @@ def validate_patch_space(
     flattened = _flatten_patch_space(patch_space)
     if max_leaf_count is not None and len(flattened) > int(max_leaf_count):
         raise ValueError(
-            f"Patch space changes {len(flattened)} leaves, exceeding max_search_leaf_count={max_leaf_count}."
+            f"Patch space changes {len(flattened)} leaves, "
+            f"exceeding max_search_leaf_count={max_leaf_count}."
         )
     rejected = sorted(path for path in flattened if not _path_allowed(path, allowed_paths))
     if rejected:
@@ -128,4 +141,4 @@ def sample_patch_space(
     return patches
 
 
-__all__ = ["sample_patch_space", "validate_patch_space"]
+__all__ = ["flatten_leaf_paths", "sample_patch_space", "validate_patch_space"]

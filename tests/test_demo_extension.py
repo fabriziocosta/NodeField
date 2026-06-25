@@ -697,7 +697,9 @@ def test_campaign_dry_run_uses_artifact_root_without_legacy_artifacts(tmp_path):
         },
         "_repo_root": str(Path(__file__).resolve().parents[1]),
     }
-    (tmp_path / "workflow.yaml").write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
+    (tmp_path / "workflow.yaml").write_text(
+        json.dumps(_base_zinc_hyperparameter_optimization_config())
+    )
 
     result = nodefield_campaign.run_campaign_once(
         campaign_config,
@@ -711,6 +713,57 @@ def test_campaign_dry_run_uses_artifact_root_without_legacy_artifacts(tmp_path):
     assert len(result["proposal"]["sampled_patches"]) == 2
     assert ".artifacts" not in str(result["run_dir"])
     assert not result["run_dir"].exists()
+
+
+def test_campaign_loads_mutable_groups_and_exact_config_proposals(tmp_path):
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
+    campaign_path = tmp_path / "campaign.yaml"
+    campaign_path.write_text(
+        json.dumps(
+            {
+                "campaign": {"id": "molecules", "domain": "molecules", "prefix": "molecules"},
+                "artifacts": {"root": str(tmp_path / "artifact")},
+                "runner": {"config_path": str(workflow_path)},
+                "random_search": {"batch_size": 2, "random_state": 5},
+                "agent": {
+                    "proposal_mode": "exact_configs",
+                    "mutable_groups": ["dataset", "architecture"],
+                    "default_trial_configs": [
+                        {
+                            "dataset": {"num_graphs": 20},
+                            "model": {"fixed": {"number_of_transformer_layers": 2}},
+                        },
+                        {
+                            "dataset": {"num_graphs": 40},
+                            "model": {"fixed": {"number_of_transformer_layers": 3}},
+                        },
+                    ],
+                },
+            }
+        )
+    )
+
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    result = nodefield_campaign.run_campaign_once(
+        config,
+        dry_run=True,
+        now=pd.Timestamp("2026-06-25 09:10:11").to_pydatetime(),
+        short_id="exact1",
+    )
+
+    assert config["agent"]["proposal_mode"] == "exact_configs"
+    assert "dataset" in config["agent"]["allowed_paths"]
+    assert "model.fixed.number_of_transformer_layers" in config["agent"]["allowed_paths"]
+    assert config["logbook"]["path"].endswith("LOGBOOK_molecules.md")
+    assert result["proposal"]["sampled_patches"] == config["agent"]["default_trial_configs"]
+
+    bad_path = tmp_path / "bad_campaign.yaml"
+    bad = dict(json.loads(campaign_path.read_text()))
+    bad["agent"]["default_trial_configs"] = [{"outputs": {"artifact_root": "bad"}}]
+    bad_path.write_text(json.dumps(bad))
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        nodefield_campaign.load_campaign_config(bad_path)
 
 
 def test_campaign_logbook_upsert_replaces_existing_block(tmp_path):
@@ -736,12 +789,24 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
                 "artifacts": {"root": str(tmp_path / "artifact")},
                 "logbook": {"path": str(tmp_path / "LOGBOOK.md")},
                 "runner": {"config_path": str(workflow_path)},
+                "dataset": {"num_graphs": 8, "max_size": 7},
                 "random_search": {"batch_size": 2, "random_state": 5},
                 "agent": {
+                    "mutable_groups": ["dataset", "architecture"],
                     "allowed_paths": ["model.search_space.trial_quality"],
-                    "max_search_leaf_count": 1,
+                    "max_search_leaf_count": 3,
                     "default_trial_patch_space": {
+                        "dataset": {
+                            "num_graphs": {"type": "int", "low": 5, "high": 6},
+                        },
                         "model": {
+                            "fixed": {
+                                "number_of_transformer_layers": {
+                                    "type": "int",
+                                    "low": 1,
+                                    "high": 2,
+                                },
+                            },
                             "search_space": {
                                 "trial_quality": {"type": "real", "low": 0.0, "high": 1.0}
                             }
@@ -774,7 +839,9 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
                 "median_num_violations": value,
                 "feasible_rate": 1.0 - value,
             },
-            "results_csv_path": Path(config["outputs"]["run_dir"]) / "metrics" / "trial_results.csv",
+            "results_csv_path": (
+                Path(config["outputs"]["run_dir"]) / "metrics" / "trial_results.csv"
+            ),
         }
 
     monkeypatch.setattr(
@@ -798,6 +865,12 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
     assert all(
         item["model"]["search_space"]["trial_quality"]["low"]
         == item["model"]["search_space"]["trial_quality"]["high"]
+        for item in captured_configs
+    )
+    assert all(5 <= item["dataset"]["num_graphs"] <= 6 for item in captured_configs)
+    assert all(item["dataset"]["max_size"] == 7 for item in captured_configs)
+    assert all(
+        1 <= item["model"]["fixed"]["number_of_transformer_layers"] <= 2
         for item in captured_configs
     )
 

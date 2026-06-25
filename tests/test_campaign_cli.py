@@ -22,7 +22,10 @@ def _write_campaign_files(tmp_path):
                     "feasibility_effort": 1,
                     "feasibility_filter": "strict",
                 },
-                "outputs": {"artifact_root": str(tmp_path / "artifact"), "results_csv": "results.csv"},
+                "outputs": {
+                    "artifact_root": str(tmp_path / "artifact"),
+                    "results_csv": "results.csv",
+                },
             }
         )
     )
