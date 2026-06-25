@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import networkx as nx
@@ -5,6 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from conditional_node_field_graph_generator.extensions.demo import (
+    campaign_search,
+    nodefield_campaign,
+    zinc_hyperparameter_optimization as zinc_hopt,
+)
 from conditional_node_field_graph_generator.extensions.demo.pipeline import (
     FeasibilityEstimator,
     FeasibilityEstimatorFeatureCannotExist,
@@ -444,6 +450,381 @@ def test_sample_hyperparameter_configuration_respects_typed_ranges():
     assert 2 <= config["max_feasibility_attempts"] <= 5
     assert isinstance(config["sampling_step_size"], float)
     assert 0.01 <= config["sampling_step_size"] <= 0.1
+
+
+def _base_zinc_hyperparameter_optimization_config():
+    return {
+        "experiment": {
+            "name": "unit-zinc-search",
+            "n_trials": 2,
+            "random_state": 10,
+            "verbose": 0,
+        },
+        "dataset": {
+            "num_graphs": 4,
+            "min_size": 3,
+            "max_size": 6,
+            "random_state": 11,
+        },
+        "model": {
+            "fixed": {
+                "batch_size": 2,
+                "maximum_epochs": 1,
+            },
+            "search_space": {
+                "trial_quality": {"type": "real", "low": 0.0, "high": 1.0},
+            },
+        },
+        "generation": {
+            "n_samples": 3,
+            "feasibility_effort": 4,
+            "feasibility_filter": "strict",
+        },
+        "outputs": {
+            "artifact_subdir": "unit-zinc-search",
+            "results_csv": "results.csv",
+        },
+    }
+
+
+def test_load_zinc_hyperparameter_optimization_config_validates_sections(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config = _base_zinc_hyperparameter_optimization_config()
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = zinc_hopt.load_zinc_hyperparameter_optimization_config(config_path)
+
+    assert loaded["experiment"]["n_trials"] == 2
+    assert loaded["generation"]["feasibility_effort"] == 4
+    assert loaded["generation"]["feasibility_filter"] == "strict"
+
+    missing = dict(config)
+    missing.pop("dataset")
+    missing_path = tmp_path / "missing.yaml"
+    missing_path.write_text(json.dumps(missing), encoding="utf-8")
+    with pytest.raises(ValueError, match="Missing config sections: dataset"):
+        zinc_hopt.load_zinc_hyperparameter_optimization_config(missing_path)
+
+    bad_type = _base_zinc_hyperparameter_optimization_config()
+    bad_type["model"]["search_space"]["trial_quality"]["type"] = "choice"
+    bad_path = tmp_path / "bad_type.yaml"
+    bad_path.write_text(json.dumps(bad_type), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported hyperparameter type"):
+        zinc_hopt.load_zinc_hyperparameter_optimization_config(bad_path)
+
+
+def test_run_zinc_hyperparameter_optimization_ranks_average_violations(
+    monkeypatch,
+    tmp_path,
+):
+    calls = {
+        "build_zinc_dataset": None,
+        "build_graph_generator": [],
+        "fit_graph_generator": [],
+        "sample": [],
+    }
+    graphs = [nx.path_graph(3), nx.path_graph(4)]
+    metadata = pd.DataFrame({"zinc_id": ["z0", "z1"]})
+    sampled_params_by_call = [{"trial_quality": 5.0}, {"trial_quality": 1.0}]
+
+    def fake_build_zinc_dataset(**kwargs):
+        calls["build_zinc_dataset"] = kwargs
+        return list(graphs), metadata.copy(), {"dataset_name": "fake-zinc"}
+
+    class _FakeFeasibilityEstimator:
+        def __init__(self, trial_quality):
+            self.trial_quality = float(trial_quality)
+
+        def number_of_violations(self, decoded_graphs):
+            del decoded_graphs
+            if self.trial_quality == 5.0:
+                return np.asarray([4, 5, 6], dtype=int)
+            return np.asarray([0, 1, 1], dtype=int)
+
+    class _FakeGenerator:
+        def __init__(self, kwargs):
+            self.kwargs = kwargs
+            self.feasibility_estimator = _FakeFeasibilityEstimator(kwargs["trial_quality"])
+
+        def sample(self, **kwargs):
+            calls["sample"].append(kwargs)
+            return [nx.Graph() for _ in range(int(kwargs["n_samples"]))]
+
+    def fake_sample_hyperparameter_configuration(search_space, random_state=None):
+        assert search_space == {
+            "trial_quality": {"type": "real", "low": 0.0, "high": 1.0},
+        }
+        assert random_state in {11, 12}
+        return sampled_params_by_call.pop(0)
+
+    def fake_build_graph_generator(**kwargs):
+        calls["build_graph_generator"].append(kwargs)
+        return _FakeGenerator(kwargs)
+
+    def fake_fit_graph_generator(graph_generator, train_graphs, **kwargs):
+        calls["fit_graph_generator"].append((graph_generator, train_graphs, kwargs))
+        return graph_generator
+
+    monkeypatch.setattr(zinc_hopt, "build_zinc_dataset", fake_build_zinc_dataset)
+    monkeypatch.setattr(
+        zinc_hopt,
+        "sample_hyperparameter_configuration",
+        fake_sample_hyperparameter_configuration,
+    )
+    monkeypatch.setattr(zinc_hopt, "build_graph_generator", fake_build_graph_generator)
+    monkeypatch.setattr(zinc_hopt, "fit_graph_generator", fake_fit_graph_generator)
+
+    config = _base_zinc_hyperparameter_optimization_config()
+    config["outputs"]["artifact_root"] = str(tmp_path / "artifact")
+    config["outputs"]["run_timestamp"] = "20260625_091011"
+    config["outputs"]["run_id"] = "unit"
+
+    result = zinc_hopt.run_zinc_hyperparameter_optimization(
+        config,
+        notebook_context={
+            "ARTIFACT_ROOT": tmp_path / "artifacts",
+            "NOTEBOOK_DATA_ROOT": tmp_path / "datasets",
+        },
+    )
+
+    assert calls["build_zinc_dataset"] == {
+        "dataset_dir": tmp_path / "datasets" / "zinc",
+        "num_examples": 4,
+        "min_size": 3,
+        "max_size": 6,
+        "random_state": 11,
+    }
+    assert [call["batch_size"] for call in calls["build_graph_generator"]] == [2, 2]
+    assert [call["trial_quality"] for call in calls["build_graph_generator"]] == [5.0, 1.0]
+    assert calls["sample"] == [
+        {"n_samples": 3, "feasibility_effort": 4, "feasibility_filter": "strict"},
+        {"n_samples": 3, "feasibility_effort": 4, "feasibility_filter": "strict"},
+    ]
+    results_df = result["results_df"]
+    assert results_df["trial_id"].tolist() == [2, 1]
+    assert results_df.loc[0, "average_num_violations"] == pytest.approx(2 / 3)
+    assert results_df.loc[1, "average_num_violations"] == pytest.approx(5.0)
+    assert results_df.loc[0, "feasible_rate"] == pytest.approx(1 / 3)
+    assert results_df.loc[1, "feasible_rate"] == pytest.approx(0.0)
+    assert result["best_row"]["trial_id"] == 2
+    assert result["results_csv_path"].is_file()
+    assert ".artifacts" not in str(result["artifact_root"])
+    assert result["artifact_root"].name == "unit-zinc-search_20260625_091011_unit"
+    assert result["results_csv_path"].parent.name == "metrics"
+
+
+def test_campaign_patch_space_validation_and_sampling_is_deterministic():
+    patch_space = {
+        "model": {
+            "search_space": {
+                "sampling_step_size": {"type": "real", "low": 0.02, "high": 0.05},
+                "batch_size": {"type": "int", "low": 2, "high": 4},
+            }
+        }
+    }
+
+    first = campaign_search.sample_patch_space(
+        patch_space,
+        n_samples=2,
+        random_state=7,
+        allowed_paths=["model.search_space"],
+        max_leaf_count=2,
+    )
+    second = campaign_search.sample_patch_space(
+        patch_space,
+        n_samples=2,
+        random_state=7,
+        allowed_paths=["model.search_space"],
+        max_leaf_count=2,
+    )
+
+    assert first == second
+    assert len(first) == 2
+    assert 0.02 <= first[0]["model"]["search_space"]["sampling_step_size"] <= 0.05
+    assert 2 <= first[0]["model"]["search_space"]["batch_size"] <= 4
+
+    with pytest.raises(ValueError, match="non-allowlisted"):
+        campaign_search.validate_patch_space(
+            {"outputs": {"artifact_root": {"type": "choice", "values": ["bad"]}}},
+            allowed_paths=["model.search_space"],
+        )
+
+
+def test_campaign_apply_exact_trial_patch_preserves_search_space_specs():
+    base = {
+        "experiment": {"n_trials": 3},
+        "model": {
+            "fixed": {"batch_size": 8},
+            "search_space": {
+                "sampling_step_size": {"type": "real", "low": 0.01, "high": 0.1},
+            },
+        },
+    }
+    patch = {
+        "model": {
+            "fixed": {"batch_size": 4},
+            "search_space": {"sampling_step_size": 0.025},
+        }
+    }
+
+    resolved = nodefield_campaign.apply_exact_trial_patch(base, patch)
+
+    assert resolved["model"]["fixed"]["batch_size"] == 4
+    assert resolved["model"]["search_space"]["sampling_step_size"] == {
+        "type": "real",
+        "low": 0.025,
+        "high": 0.025,
+    }
+
+
+def test_campaign_dry_run_uses_artifact_root_without_legacy_artifacts(tmp_path):
+    campaign_config = {
+        "campaign": {"id": "molecules", "domain": "molecules", "prefix": "molecules"},
+        "artifacts": {"root": str(tmp_path / "artifact")},
+        "logbook": {"path": str(tmp_path / "LOGBOOK.md")},
+        "runner": {"config_path": str(tmp_path / "workflow.yaml")},
+        "random_search": {"batch_size": 2, "random_state": 3},
+        "agent": {
+            "allowed_paths": ["model.search_space.sampling_step_size"],
+            "max_search_leaf_count": 1,
+            "default_trial_patch_space": {
+                "model": {
+                    "search_space": {
+                        "sampling_step_size": {"type": "real", "low": 0.02, "high": 0.03}
+                    }
+                }
+            },
+        },
+        "_repo_root": str(Path(__file__).resolve().parents[1]),
+    }
+    (tmp_path / "workflow.yaml").write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
+
+    result = nodefield_campaign.run_campaign_once(
+        campaign_config,
+        dry_run=True,
+        now=pd.Timestamp("2026-06-25 09:10:11").to_pydatetime(),
+        short_id="dry001",
+    )
+
+    assert result["state"]["status"] == "dry_run"
+    assert result["run_dir"].name == "molecules_20260625_091011_dry001"
+    assert len(result["proposal"]["sampled_patches"]) == 2
+    assert ".artifacts" not in str(result["run_dir"])
+    assert not result["run_dir"].exists()
+
+
+def test_campaign_logbook_upsert_replaces_existing_block(tmp_path):
+    logbook_path = tmp_path / "LOGBOOK.md"
+
+    nodefield_campaign.upsert_logbook_block(logbook_path, "run-a", "first")
+    nodefield_campaign.upsert_logbook_block(logbook_path, "run-a", "second")
+
+    text = logbook_path.read_text()
+    assert "second" in text
+    assert "first" not in text
+    assert text.count("nodefield-campaign:run-a:begin") == 1
+
+
+def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp_path):
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(json.dumps(_base_zinc_hyperparameter_optimization_config()))
+    campaign_path = tmp_path / "campaign.yaml"
+    campaign_path.write_text(
+        json.dumps(
+            {
+                "campaign": {"id": "molecules", "domain": "molecules", "prefix": "molecules"},
+                "artifacts": {"root": str(tmp_path / "artifact")},
+                "logbook": {"path": str(tmp_path / "LOGBOOK.md")},
+                "runner": {"config_path": str(workflow_path)},
+                "random_search": {"batch_size": 2, "random_state": 5},
+                "agent": {
+                    "allowed_paths": ["model.search_space.trial_quality"],
+                    "max_search_leaf_count": 1,
+                    "default_trial_patch_space": {
+                        "model": {
+                            "search_space": {
+                                "trial_quality": {"type": "real", "low": 0.0, "high": 1.0}
+                            }
+                        }
+                    },
+                },
+            }
+        )
+    )
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    captured_configs = []
+
+    def fake_loader(path):
+        try:
+            import yaml
+        except ImportError:
+            data = json.loads(Path(path).read_text())
+        else:
+            data = yaml.safe_load(Path(path).read_text())
+        captured_configs.append(data)
+        return data
+
+    def fake_runner(config, *, notebook_context):
+        del notebook_context
+        value = float(config["model"]["search_space"]["trial_quality"]["low"])
+        return {
+            "best_row": {
+                "trial_id": 1,
+                "average_num_violations": value,
+                "median_num_violations": value,
+                "feasible_rate": 1.0 - value,
+            },
+            "results_csv_path": Path(config["outputs"]["run_dir"]) / "metrics" / "trial_results.csv",
+        }
+
+    monkeypatch.setattr(
+        nodefield_campaign,
+        "_domain_runner",
+        lambda domain: (fake_loader, fake_runner),
+    )
+
+    result = nodefield_campaign.run_campaign_once(
+        config,
+        now=pd.Timestamp("2026-06-25 09:10:11").to_pydatetime(),
+        short_id="batch1",
+    )
+
+    state = json.loads((result["run_dir"] / "state.json").read_text())
+    assert state["status"] == "completed"
+    assert [trial["status"] for trial in state["queued_trials"]] == ["completed", "completed"]
+    assert (result["run_dir"] / "proposal.json").is_file()
+    assert (result["run_dir"] / "metrics" / "summary.csv").is_file()
+    assert len(captured_configs) == 2
+    assert all(
+        item["model"]["search_space"]["trial_quality"]["low"]
+        == item["model"]["search_space"]["trial_quality"]["high"]
+        for item in captured_configs
+    )
+
+
+def test_campaign_status_reads_latest_state_only(tmp_path):
+    config = {
+        "campaign": {"domain": "molecules", "prefix": "molecules"},
+        "artifacts": {"root": str(tmp_path / "artifact")},
+        "_repo_root": str(Path(__file__).resolve().parents[1]),
+    }
+    run_dir = tmp_path / "artifact" / "molecules" / "molecules_20260625_091011_state1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "queued_trials": [{"trial_id": 1, "status": "running"}],
+                "latest_metrics": {"average_num_violations": 0.5},
+            }
+        )
+    )
+
+    status = nodefield_campaign.campaign_status(config)
+
+    assert status["status"] == "running"
+    assert status["latest_metrics"] == {"average_num_violations": 0.5}
+    assert "molecules_20260625_091011_state1" in status["run_dir"]
 
 
 def test_score_graph_generator_feasible_rate_forwards_to_member_function():

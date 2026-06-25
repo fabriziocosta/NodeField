@@ -26,8 +26,12 @@ dependencies = [
   "scikit-learn",
   "networkx",
   "pulp",
-  "dill"
+  "dill",
+  "pyyaml"
 ]
+
+[project.scripts]
+run_nodefield_campaign = "conditional_node_field_graph_generator.campaign_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "jupyterlab", "notebook"]
@@ -36,7 +40,8 @@ training = [
   "matplotlib"
 ]
 notebooks = [
-  "requests"
+  "requests",
+  "pyyaml"
 ]
 synthetic = [
   "toolz"

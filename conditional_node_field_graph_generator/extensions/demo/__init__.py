@@ -14,6 +14,22 @@ from .pipeline import (
     score_graph_generator_feasible_rate,
 )
 from .storage import describe_resume_checkpoint, find_latest_checkpoint, list_training_checkpoints
+from .artificial_hyperparameter_optimization import (
+    load_artificial_hyperparameter_optimization_config,
+    run_artificial_hyperparameter_optimization,
+    summarize_artificial_hyperparameter_results,
+)
+from .nodefield_campaign import (
+    apply_exact_trial_patch,
+    campaign_status,
+    format_campaign_status,
+    list_campaigns,
+    load_campaign_config,
+    resolve_campaign_config,
+    run_campaign_once,
+    terminate_campaign,
+    upsert_logbook_block,
+)
 from .visualization import (
     compare_real_vs_generated,
     infer_display_mode,
@@ -29,22 +45,33 @@ from .visualization import (
     show_samples,
     summarize_label_histogram_alignment,
 )
+from .zinc_hyperparameter_optimization import (
+    load_zinc_hyperparameter_optimization_config,
+    run_zinc_hyperparameter_optimization,
+    summarize_zinc_hyperparameter_results,
+)
 
 __all__ = [
+    "apply_exact_trial_patch",
     "build_dataset",
     "build_graph_generator",
-    "prepare_zinc_data_split",
     "build_zinc_dataset",
     "benchmark_regression_guidance",
+    "campaign_status",
     "collect_oracle_trace_rows",
     "compare_real_vs_generated",
     "describe_resume_checkpoint",
     "find_latest_checkpoint",
     "fit_graph_generator",
+    "format_campaign_status",
     "infer_display_mode",
-    "list_training_checkpoints",
     "list_saved_graph_generators",
+    "list_campaigns",
+    "list_training_checkpoints",
     "load_graph_generator",
+    "load_artificial_hyperparameter_optimization_config",
+    "load_campaign_config",
+    "load_zinc_hyperparameter_optimization_config",
     "offset_neg_graphs",
     "oracle_trace_frame",
     "parse_oracle_trace_title",
@@ -53,7 +80,12 @@ __all__ = [
     "plot_sample",
     "plot_similarity_distribution_with_iqr",
     "prepare_experiment",
+    "prepare_zinc_data_split",
+    "resolve_campaign_config",
+    "run_artificial_hyperparameter_optimization",
+    "run_campaign_once",
     "run_label_histogram_analysis",
+    "run_zinc_hyperparameter_optimization",
     "sample_hyperparameter_configuration",
     "sample_positive_endpoint_pair",
     "score_graph_generator_feasible_rate",
@@ -61,5 +93,9 @@ __all__ = [
     "select_pos_neg",
     "show_molecules",
     "show_samples",
+    "summarize_artificial_hyperparameter_results",
+    "summarize_zinc_hyperparameter_results",
     "summarize_label_histogram_alignment",
+    "terminate_campaign",
+    "upsert_logbook_block",
 ]

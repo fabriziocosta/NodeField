@@ -6,6 +6,7 @@ from conditional_node_field_graph_generator.notebooks import configure_notebook
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_ROOT = PROJECT_ROOT / "notebooks"
+SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 MAINTAINED_NOTEBOOKS = [
     NOTEBOOK_ROOT / "demo.ipynb",
     NOTEBOOK_ROOT / "demo_chem.ipynb",
@@ -13,6 +14,7 @@ MAINTAINED_NOTEBOOKS = [
     NOTEBOOK_ROOT / "demo_zinc_non_streaming.ipynb",
     NOTEBOOK_ROOT / "demo_zinc_guidance_bootstrap.ipynb",
     NOTEBOOK_ROOT / "demo_zinc_hyperparameter_search.ipynb",
+    NOTEBOOK_ROOT / "zinc_molecule_hyperparameter_optimization.ipynb",
 ]
 
 
@@ -42,3 +44,18 @@ def test_maintained_notebooks_use_standardized_bootstrap_and_no_inline_path_prob
         assert "sys.path.insert(0" not in source
         assert "_notebook_bootstrap" not in source
         assert "from conditional_node_field_graph_generator.notebooks import configure_notebook" in source
+
+
+def test_molecule_script_uses_same_config_and_helper_as_notebook():
+    notebook = json.loads((NOTEBOOK_ROOT / "zinc_molecule_hyperparameter_optimization.ipynb").read_text())
+    notebook_source = "\n".join(
+        "".join(cell.get("source", []))
+        for cell in notebook["cells"]
+        if cell.get("cell_type") == "code"
+    )
+    script_source = (SCRIPT_ROOT / "run_molecule_hyperparameter_optimization.py").read_text()
+
+    assert "zinc_molecule_hyperparameter_optimization.yaml" in notebook_source
+    assert "zinc_molecule_hyperparameter_optimization.yaml" in script_source
+    assert "run_zinc_hyperparameter_optimization" in notebook_source
+    assert "run_zinc_hyperparameter_optimization" in script_source

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 
@@ -79,6 +81,44 @@ def resolve_artifact_root(
         root = resolve_repo_root(repo_root) / ".artifacts"
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def resolve_campaign_artifact_root(
+    artifact_root: str | Path | None = None,
+    *,
+    repo_root: str | Path | None = None,
+) -> Path:
+    """Resolve the NodeField campaign artifact root.
+
+    New campaign workflows intentionally use ``artifact/`` instead of the legacy
+    ``.artifacts/`` root used by existing notebooks and demos.
+    """
+    if artifact_root is not None:
+        root = Path(artifact_root).expanduser()
+        if not root.is_absolute():
+            root = resolve_repo_root(repo_root) / root
+        root = root.resolve()
+    else:
+        root = resolve_repo_root(repo_root) / "artifact"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def make_timestamped_run_dir(
+    root: str | Path,
+    prefix: str,
+    *,
+    now: datetime | None = None,
+    short_id: str | None = None,
+    create: bool = True,
+) -> Path:
+    """Create ``<root>/<prefix>_YYYYMMDD_HHMMSS_<shortid>`` and return it."""
+    timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    token = short_id or uuid.uuid4().hex[:6]
+    run_dir = Path(root).expanduser().resolve() / f"{prefix}_{timestamp}_{token}"
+    if create:
+        run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
 
 
 def resolve_notebook_data_root(repo_root: str | Path | None = None) -> Path:

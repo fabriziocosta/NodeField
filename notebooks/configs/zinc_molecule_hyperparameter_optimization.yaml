@@ -1,0 +1,84 @@
+experiment:
+  name: zinc_molecule_hyperparameter_optimization
+  n_trials: 3
+  random_state: 42
+  verbose: 1
+
+dataset:
+  num_graphs: 500
+  min_size: 4
+  max_size: 10
+  random_state: 42
+
+model:
+  fixed:
+    nbits: 11
+    latent_embedding_dimension: 64
+    node_embedding_svd_dimension: 64
+    graph_embedding_svd_dimension: 64
+    number_of_transformer_layers: 2
+    transformer_attention_head_count: 4
+    transformer_dropout: 0.15
+    learning_rate: 0.0002
+    maximum_epochs: 80
+    batch_size: 16
+    total_steps: 80
+    verbose_epoch_interval: 10
+    enable_early_stopping: true
+    early_stopping_monitor: val_total
+    early_stopping_mode: min
+    early_stopping_patience: 15
+    early_stopping_min_delta: 5.0
+    restore_best_checkpoint: true
+    use_feasibility_filtering: true
+    feasibility_failure_mode: return_partial
+    decoder_enforce_connectivity: true
+    decoder_n_jobs: 1
+  search_space:
+    lambda_degree_importance:
+      type: real
+      low: 0.5
+      high: 4.0
+    lambda_node_exist_importance:
+      type: real
+      low: 0.5
+      high: 4.0
+    lambda_node_count_importance:
+      type: real
+      low: 0.0
+      high: 2.0
+    lambda_node_label_importance:
+      type: real
+      low: 0.5
+      high: 4.0
+    lambda_edge_label_importance:
+      type: real
+      low: 0.5
+      high: 4.0
+    lambda_direct_edge_importance:
+      type: real
+      low: 0.5
+      high: 4.0
+    lambda_auxiliary_edge_importance:
+      type: real
+      low: 0.5
+      high: 4.0
+    sparse_supervision_mask_ratio:
+      type: real
+      low: 0.0
+      high: 0.5
+    sampling_step_size:
+      type: real
+      low: 0.02
+      high: 0.08
+
+generation:
+  n_samples: 16
+  feasibility_effort: 3
+  feasibility_filter: fallback
+
+outputs:
+  artifact_root: artifact
+  artifact_subdir: molecules
+  artifact_prefix: molecules
+  results_csv: trial_results.csv
