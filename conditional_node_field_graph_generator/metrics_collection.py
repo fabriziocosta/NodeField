@@ -658,7 +658,6 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
             sample_conditions = getattr(owner, "_sample_conditions", None)
             predict_nodes = getattr(owner, "_predict_generated_nodes", None)
             decode_nodes = getattr(owner, "_decode_generated_nodes", None)
-            decode_oracle = getattr(owner, "_decode_generated_nodes_with_oracle", None)
             can_decode_incrementally = all(
                 callable(fn) for fn in (sample_conditions, predict_nodes, decode_nodes)
             )
@@ -680,13 +679,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                     feasibility_oracle_candidates_per_attempt=0,
                     use_ilp_decoder=True,
                 )
-                if getattr(owner, "feasibility_estimator", None) is None or not callable(decode_oracle):
-                    oracle_graphs = [None] * self.n_samples
-                else:
-                    oracle_graphs = decode_oracle(
-                        generated_nodes,
-                        graph_conditioning=sampled_conditioning,
-                    )
+                oracle_graphs = [None] * self.n_samples
             else:
                 sample = getattr(owner, "sample", None)
                 if callable(sample):
@@ -694,6 +687,7 @@ class GraphGeneratorTrainingSampleCallback(pl.callbacks.Callback):
                         variants = sample(
                             n_samples=self.n_samples,
                             return_decode_stages=True,
+                            feasibility_effort=1,
                         )
                     except TypeError:
                         variants = None

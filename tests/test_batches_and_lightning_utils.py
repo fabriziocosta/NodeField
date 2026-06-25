@@ -71,6 +71,27 @@ class _OkTrainer:
         self.called_with = (model, train_dataloaders, val_dataloaders, ckpt_path)
 
 
+class _WeightsOnlyTrainer:
+    def __init__(self):
+        self.called_with = None
+
+    def fit(
+        self,
+        model,
+        train_dataloaders=None,
+        val_dataloaders=None,
+        ckpt_path=None,
+        weights_only=None,
+    ):
+        self.called_with = (
+            model,
+            train_dataloaders,
+            val_dataloaders,
+            ckpt_path,
+            weights_only,
+        )
+
+
 class _ExitTrainer:
     def fit(self, model, train_dataloaders=None, val_dataloaders=None, ckpt_path=None):
         raise SystemExit(2)
@@ -111,6 +132,30 @@ def test_run_trainer_fit_forwards_checkpoint_path():
     )
 
     assert trainer.called_with == (model, train_loader, val_loader, "/tmp/resume.ckpt")
+
+
+def test_run_trainer_fit_disables_weights_only_for_checkpoint_resume():
+    trainer = _WeightsOnlyTrainer()
+    model = object()
+    train_loader = object()
+    val_loader = object()
+
+    run_trainer_fit(
+        trainer,
+        model,
+        train_loader,
+        val_loader,
+        context="unit-test",
+        ckpt_path="/tmp/resume.ckpt",
+    )
+
+    assert trainer.called_with == (
+        model,
+        train_loader,
+        val_loader,
+        "/tmp/resume.ckpt",
+        False,
+    )
 
 
 def test_run_trainer_fit_wraps_system_exit():
@@ -695,7 +740,7 @@ def test_training_sample_callback_uses_sample_return_decode_stages(monkeypatch, 
             self.calls = 0
 
         def sample(self, n_samples=1, return_decode_stages=False, **kwargs):
-            del kwargs
+            assert kwargs["feasibility_effort"] == 1
             assert return_decode_stages is True
             self.calls += 1
             variants = {}
@@ -728,6 +773,61 @@ def test_training_sample_callback_uses_sample_return_decode_stages(monkeypatch, 
     assert len(write_calls[0]["ilp"]) == 3
     assert len(write_calls[0]["oracle"]) == 3
     assert callback.epoch_samples == [{"epoch": 1}]
+
+
+def test_training_sample_callback_incremental_path_skips_oracle_decode(monkeypatch, tmp_path):
+    write_calls = []
+
+    monkeypatch.setattr(
+        GraphGeneratorTrainingSampleCallback,
+        "_write_pdf_page",
+        lambda self, epoch_record: write_calls.append(epoch_record),
+    )
+
+    class _Owner:
+        def __init__(self):
+            self.is_fitted_ = False
+            self.decode_calls = []
+            self.feasibility_estimator = object()
+
+        def _sample_conditions(self, n_samples):
+            return GraphConditioningBatch(
+                graph_embeddings=np.zeros((int(n_samples), 2), dtype=float),
+                node_counts=np.ones(int(n_samples), dtype=np.int64),
+                edge_counts=np.zeros(int(n_samples), dtype=np.int64),
+            )
+
+        def _predict_generated_nodes(self, conditioning, **kwargs):
+            del conditioning, kwargs
+            return object()
+
+        def _decode_generated_nodes(self, generated_nodes, **kwargs):
+            del generated_nodes
+            self.decode_calls.append(kwargs)
+            graph = nx.Graph()
+            graph.add_node(0, label="C")
+            return [graph]
+
+        def _decode_generated_nodes_with_oracle(self, *args, **kwargs):
+            raise AssertionError("training progress sampling must not run oracle decode")
+
+    class _Trainer:
+        sanity_checking = False
+        is_global_zero = True
+        current_epoch = 0
+
+    owner = _Owner()
+    callback = GraphGeneratorTrainingSampleCallback(
+        owner,
+        n_samples=1,
+        every_n_epochs=1,
+        output_path=tmp_path / "samples.pdf",
+    )
+
+    callback.on_validation_epoch_end(_Trainer(), object())
+
+    assert [call["use_ilp_decoder"] for call in owner.decode_calls] == [False, True]
+    assert write_calls[0]["oracle"] == [None]
 
 
 def test_training_sample_callback_respects_epoch_interval(monkeypatch, tmp_path):

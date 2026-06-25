@@ -1,5 +1,6 @@
 """Runtime helpers for verbose logging and trainer execution."""
 
+import inspect
 import logging
 import multiprocessing as mp
 import os
@@ -84,12 +85,19 @@ def run_trainer_fit(trainer, model, train_loader, val_loader, context: str, ckpt
                 "ignore",
                 message=r"Starting from v1\.9\.0, `tensorboardX` has been removed as a dependency.*",
             )
-            trainer.fit(
-                model,
-                train_dataloaders=train_loader,
-                val_dataloaders=val_loader,
-                ckpt_path=ckpt_path,
-            )
+            fit_kwargs = {
+                "train_dataloaders": train_loader,
+                "val_dataloaders": val_loader,
+                "ckpt_path": ckpt_path,
+            }
+            try:
+                fit_signature = inspect.signature(trainer.fit)
+                supports_weights_only = "weights_only" in fit_signature.parameters
+            except (TypeError, ValueError):
+                supports_weights_only = False
+            if ckpt_path is not None and supports_weights_only:
+                fit_kwargs["weights_only"] = False
+            trainer.fit(model, **fit_kwargs)
     except KeyboardInterrupt:
         raise
     except SystemExit as exc:
