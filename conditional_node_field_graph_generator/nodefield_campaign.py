@@ -546,7 +546,7 @@ def _read_lock_pid(path: Path) -> int | None:
         return None
 
 
-def _acquire_campaign_lock(config: Mapping[str, Any]) -> Path:
+def _acquire_campaign_lock(config: Mapping[str, Any], *, force: bool = False) -> Path:
     path = _campaign_lock_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     pid = os.getpid()
@@ -555,6 +555,14 @@ def _acquire_campaign_lock(config: Mapping[str, Any]) -> Path:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError:
             existing_pid = _read_lock_pid(path)
+            if force:
+                if existing_pid is not None and existing_pid != pid and _is_process_running(existing_pid):
+                    try:
+                        os.kill(existing_pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                path.unlink(missing_ok=True)
+                continue
             if attempt == 0 and existing_pid is not None and not _is_process_running(existing_pid):
                 path.unlink(missing_ok=True)
                 continue
@@ -1743,6 +1751,81 @@ def _terminate_campaign_state_for_interrupt(
     return next_state
 
 
+def _force_cleanup_campaign_state(
+    config: Mapping[str, Any],
+    *,
+    stream: TextIO,
+) -> dict[str, Any]:
+    state_path = _campaign_state_path(config)
+    campaign_state = _read_json_if_exists(state_path)
+    run_dir_text = campaign_state.get("run_dir")
+    pid = campaign_state.get("pid")
+    try:
+        pid_int = int(pid) if pid is not None else None
+    except (TypeError, ValueError):
+        pid_int = None
+    process_was_running = _is_process_running(pid_int)
+    if process_was_running:
+        _terminate_process_group(pid_int)
+    previous_status = campaign_state.get("status", "not_started")
+    cleanup = {
+        "previous_status": previous_status,
+        "previous_run_dir": run_dir_text,
+        "previous_pid": pid_int,
+        "terminated_process": bool(process_was_running),
+        "cleaned_at": _now_iso(),
+    }
+    if run_dir_text and previous_status in {
+        "running",
+        "termination_requested",
+        "terminated",
+    }:
+        run_dir = Path(str(run_dir_text))
+        run_state = _read_json_if_exists(run_dir / "state.json")
+        if run_state:
+            run_state["status"] = "terminated_by_force_restart"
+            run_state["terminated_at"] = _now_iso()
+            run_state["force_restart_cleanup"] = cleanup
+            _write_json(run_dir / "state.json", run_state)
+    if campaign_state:
+        archived_state = dict(campaign_state)
+        archived_state.update(
+            {
+                "status": "force_restarted",
+                "process_running": False,
+                "force_restart_cleanup": cleanup,
+                "updated_at": _now_iso(),
+            }
+        )
+        _write_json(state_path, archived_state)
+    print(
+        "force-restart cleanup: "
+        f"previous_status={previous_status}; "
+        f"terminated_process={bool(process_was_running)}; "
+        f"previous_run={run_dir_text or '-'}",
+        file=stream,
+    )
+    return cleanup
+
+
+def force_restart_campaign(
+    config: Mapping[str, Any],
+    *,
+    campaign_name: str,
+    device: str = "cpu",
+    stream: TextIO | None = None,
+) -> dict[str, Any]:
+    """Terminate stale/running campaign state and launch a fresh mini-batch child."""
+    stream = stream or sys.stdout
+    cleanup = _force_cleanup_campaign_state(config, stream=stream)
+    state = _launch_mini_batch_child(config, campaign_name=campaign_name, device=device)
+    state["force_restarted_from"] = cleanup
+    _write_json(_campaign_state_path(config), state)
+    print(f"launched: {state['run_dir']}", file=stream)
+    print(f"logs: {state['child_log_path']}", file=stream)
+    return {"state": state, "cleanup": cleanup, "config": dict(config)}
+
+
 def _handle_agent_decision(
     config: Mapping[str, Any],
     *,
@@ -1871,6 +1954,7 @@ def run_campaign_loop(
     campaign_name: str,
     once: bool = False,
     dry_run: bool = False,
+    force_restart: bool = False,
     device: str = "cpu",
     client: Any | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -1884,11 +1968,22 @@ def run_campaign_loop(
         print(format_campaign_status(status), file=stream)
         return {"state": {"status": "dry_run"}, "status": status, "dry_run": True}
 
-    lock_path = _acquire_campaign_lock(config)
+    lock_path = _acquire_campaign_lock(config, force=force_restart)
     active_config = dict(config)
     campaign_state: dict[str, Any] = {}
     log_offsets: dict[str, int] = {}
     try:
+        if force_restart:
+            restart_result = force_restart_campaign(
+                active_config,
+                campaign_name=campaign_name,
+                device=device,
+                stream=stream,
+            )
+            campaign_state = dict(restart_result["state"])
+            if once:
+                return restart_result
+
         while True:
             next_sleep_seconds = int(active_config["runner"]["poll_seconds"])
             state_path = _campaign_state_path(active_config)
@@ -2335,6 +2430,7 @@ __all__ = [
     "campaign_decision_text_format",
     "campaign_status",
     "format_campaign_status",
+    "force_restart_campaign",
     "list_campaigns",
     "load_campaign_config",
     "parse_agent_campaign_decision",

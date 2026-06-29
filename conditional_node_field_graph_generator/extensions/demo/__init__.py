@@ -25,6 +25,7 @@ _EXPORTS = {
     "find_latest_campaign_state": ".campaign_best_model",
     "fit_graph_generator": ".pipeline",
     "format_campaign_status": "...nodefield_campaign",
+    "force_restart_campaign": "...nodefield_campaign",
     "infer_display_mode": ".visualization",
     "list_campaigns": "...nodefield_campaign",
     "list_saved_graph_generators": "...persistence",

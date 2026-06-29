@@ -433,7 +433,7 @@ python run_nodefield_campaign.py list
 ```
 
 The `list` command prints campaign names. Use those names as arguments to
-`run`, `status`, and `terminate`.
+`run`, `status`, `terminate`, and `force-restart`.
 
 Campaign `run` defaults to CPU execution so local machines with visible but
 unsupported CUDA devices still work with the simple command. Use
@@ -452,6 +452,20 @@ Run one parent-loop tick and exit:
 ```bash
 ./run_nodefield_campaign run artificial-graphs-small --once
 ```
+
+Start a clean new run even when the campaign state is stale or already running:
+
+```bash
+./run_nodefield_campaign force-restart artificial-graphs-large
+./run_nodefield_campaign run artificial-graphs-large --force-restart
+```
+
+`force-restart` terminates the recorded child process if it is still alive,
+marks an active old run as `terminated_by_force_restart`, preserves all old
+artifact folders, writes the previous run pointer into the new campaign state,
+and then launches a fresh timestamped run. By default it stays attached like
+normal `run`, streaming bounded child-log updates until the next poll. Add
+`--once` to launch the clean run and return to the shell immediately.
 
 Dry-run one artificial graph campaign status check without launching jobs,
 calling OpenAI, or mutating files:

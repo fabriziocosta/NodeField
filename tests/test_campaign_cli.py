@@ -85,6 +85,28 @@ def test_campaign_cli_dry_run_with_config_override(tmp_path, capsys, monkeypatch
     assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
 
 
+def test_campaign_cli_force_restart_dry_run_with_config_override(tmp_path, capsys):
+    campaign_path = _write_campaign_files(tmp_path)
+
+    assert (
+        main(
+            [
+                "force-restart",
+                "molecules",
+                "--dry-run",
+                "--config",
+                str(campaign_path),
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+
+    assert "status: dry_run" in output
+    assert "Campaign status" in output
+    assert not any(Path(tmp_path / "artifact").glob("molecules/molecules_*"))
+
+
 def test_campaign_cli_internal_mini_batch_dry_run_samples_trials(tmp_path, capsys):
     campaign_path = _write_campaign_files(tmp_path)
 

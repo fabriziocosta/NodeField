@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  ./run_nodefield_campaign list\n"
             "  ./run_nodefield_campaign run artificial-graphs-small --once --dry-run\n"
+            "  ./run_nodefield_campaign force-restart artificial-graphs-large\n"
             "  ./run_nodefield_campaign status molecules-small\n"
             "  ./run_nodefield_campaign terminate molecules-large"
         ),
@@ -53,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Inspect status without launching jobs, calling OpenAI, or mutating files.",
+    )
+    run_parser.add_argument(
+        "--force-restart",
+        action="store_true",
+        help="Terminate stale/running campaign state and start a clean new run.",
     )
     run_parser.add_argument(
         "--device",
@@ -86,6 +92,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     terminate_parser.add_argument("campaign", metavar="campaign")
 
+    force_restart_parser = subparsers.add_parser(
+        "force-restart",
+        help="Terminate stale/running state and start a clean new campaign run.",
+    )
+    force_restart_parser.add_argument("campaign", metavar="campaign")
+    force_restart_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Launch the clean run and exit instead of monitoring it.",
+    )
+    force_restart_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect status without launching jobs or mutating files.",
+    )
+    force_restart_parser.add_argument(
+        "--device",
+        choices=("cpu", "auto", "cuda"),
+        default="cpu",
+        help="Training device policy. Defaults to cpu; use auto/cuda to allow CUDA.",
+    )
+    force_restart_parser.add_argument("--config", type=Path, help="Override campaign config path.")
+
     return parser
 
 
@@ -113,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
         print(format_campaign_status({**result, "queued_trials": [], "latest_metrics": {}}))
         return 0
 
-    if args.command not in {"run", "run-mini-batch"}:
+    if args.command not in {"run", "run-mini-batch", "force-restart"}:
         parser.error(f"Unsupported command: {args.command}")
 
     campaign_name = args.campaign
@@ -144,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         campaign_name=campaign_name,
         once=bool(args.once),
         dry_run=bool(args.dry_run),
+        force_restart=bool(getattr(args, "force_restart", False) or args.command == "force-restart"),
         device=args.device,
     )
     return 0

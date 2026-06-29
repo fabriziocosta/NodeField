@@ -1054,6 +1054,77 @@ def test_campaign_loop_foreground_streams_child_log_and_ctrl_c_terminates(
     assert run_state["status"] == "terminated_by_user"
 
 
+def test_campaign_loop_force_restart_cleans_existing_state_and_launches(
+    monkeypatch,
+    tmp_path,
+):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    old_run_dir = tmp_path / "artifact" / "molecules" / "molecules_old"
+    new_run_dir = tmp_path / "artifact" / "molecules" / "molecules_new"
+    old_run_dir.mkdir(parents=True)
+    core_nodefield_campaign._write_json(
+        old_run_dir / "state.json",
+        {"status": "running", "queued_trials": [{"trial_id": 1, "status": "running"}]},
+    )
+    core_nodefield_campaign._write_json(
+        core_nodefield_campaign._campaign_state_path(config),
+        {
+            "campaign": "molecules",
+            "campaign_id": "molecules",
+            "prefix": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(old_run_dir),
+            "pid": 22222,
+            "process_running": True,
+            "poll_seconds": 1,
+        },
+    )
+    terminated = []
+
+    def fake_launch(config, *, campaign_name, device, run_timestamp=None, run_id=None):
+        del campaign_name, device, run_timestamp, run_id
+        state = {
+            "campaign": "molecules",
+            "campaign_id": "molecules",
+            "prefix": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(new_run_dir),
+            "child_log_path": str(new_run_dir / "logs" / "mini_batch.log"),
+            "pid": 33333,
+            "process_running": True,
+            "poll_seconds": 1,
+        }
+        core_nodefield_campaign._write_json(
+            core_nodefield_campaign._campaign_state_path(config),
+            state,
+        )
+        return state
+
+    monkeypatch.setattr(core_nodefield_campaign, "_is_process_running", lambda pid: pid == 22222)
+    monkeypatch.setattr(core_nodefield_campaign, "_terminate_process_group", terminated.append)
+    monkeypatch.setattr(core_nodefield_campaign, "_launch_mini_batch_child", fake_launch)
+    stream = io.StringIO()
+
+    result = nodefield_campaign.run_campaign_loop(
+        config,
+        campaign_name="molecules",
+        once=True,
+        force_restart=True,
+        sleep_fn=lambda seconds: None,
+        stream=stream,
+    )
+
+    assert terminated == [22222]
+    assert result["state"]["run_dir"] == str(new_run_dir)
+    assert result["state"]["force_restarted_from"]["previous_run_dir"] == str(old_run_dir)
+    old_run_state = json.loads((old_run_dir / "state.json").read_text())
+    assert old_run_state["status"] == "terminated_by_force_restart"
+    assert "force-restart cleanup" in stream.getvalue()
+
+
 def test_campaign_child_process_log_lives_inside_run_directory(tmp_path):
     campaign_path = _write_agent_loop_campaign(tmp_path)
     config = nodefield_campaign.load_campaign_config(campaign_path)
