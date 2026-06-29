@@ -1648,8 +1648,11 @@ def test_campaign_status_reads_latest_state_only(tmp_path):
     }
     assert status["logs_dir"] == str(run_dir / "logs")
     assert status["loss_pdf_paths"] == [str(run_dir / "metrics" / "loss_curves.pdf")]
-    assert "latest_error" in nodefield_campaign.format_campaign_status(status)
-    assert "loss_pdfs:" in nodefield_campaign.format_campaign_status(status)
+    formatted = nodefield_campaign.format_campaign_status(status)
+    assert "Campaign status" in formatted
+    assert "Latest error" in formatted
+    assert "Files to inspect" in formatted
+    assert "| `average_num_violations` | 0.5 |" in formatted
     assert "molecules_20260625_091011_state1" in status["run_dir"]
 
 

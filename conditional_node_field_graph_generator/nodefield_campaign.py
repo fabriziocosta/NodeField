@@ -1898,6 +1898,7 @@ def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> d
     if run_dir is None:
         return {
             "campaign": config["campaign"]["domain"],
+            "prefix": config["campaign"].get("prefix"),
             "status": campaign_state.get("status", "not_started"),
             "campaign_state_path": str(_campaign_state_path(config)),
             "run_dir": campaign_state.get("run_dir"),
@@ -1928,6 +1929,7 @@ def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> d
             log_lines = log_files[0].read_text(encoding="utf-8", errors="replace").splitlines()
     return {
         "campaign": config["campaign"]["domain"],
+        "prefix": config["campaign"].get("prefix"),
         "status": campaign_state.get("status") or state.get("status", "unknown"),
         "campaign_state_path": str(_campaign_state_path(config)),
         "run_dir": str(run_dir),
@@ -1952,37 +1954,199 @@ def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> d
 
 def format_campaign_status(status: Mapping[str, Any]) -> str:
     """Format campaign status for CLI output."""
+    def _display_path(value: Any) -> str:
+        if not value:
+            return "-"
+        text = str(value)
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            return text
+        try:
+            return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+        except (OSError, ValueError):
+            return text
+
+    def _format_seconds(value: Any) -> str:
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            return "-"
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes = seconds // 60
+        if seconds % 60 == 0 and minutes < 60:
+            return f"{seconds}s ({minutes} min)"
+        hours = seconds / 3600
+        return f"{seconds}s ({hours:.1f} h)"
+
+    def _shorten_text_paths(text: str) -> str:
+        shortened = str(text)
+        roots = [Path.cwd(), Path.cwd().resolve()]
+        for root in roots:
+            root_text = root.as_posix().rstrip("/")
+            if root_text:
+                shortened = shortened.replace(root_text + "/", "")
+        return shortened
+
+    def _state_explanation(state: str) -> str:
+        explanations = {
+            "not_started": "No campaign run has been started yet.",
+            "running": "A mini-batch is currently running or waiting for the next poll.",
+            "completed": "The latest mini-batch completed.",
+            "failed": "The latest mini-batch failed during execution.",
+            "agent_decision_failed": (
+                "Training is not running. The last agent decision failed, usually because "
+                "the OpenAI response could not be parsed. Run the campaign again with "
+                "`--once` to retry the decision."
+            ),
+            "openai_credits_exhausted": "The loop stopped because OpenAI quota or billing is exhausted.",
+            "campaign_completed": "The agent stopped the campaign.",
+            "analysis_completed": "The agent wrote analysis and did not launch another run.",
+            "termination_requested": "Termination has been requested for the active child process.",
+            "terminated": "The previous child process was terminated.",
+        }
+        return explanations.get(state, "See state and logs below for details.")
+
+    def _next_action(state: str) -> str:
+        prefix = status.get("prefix") or status.get("campaign") or "<campaign>"
+        command = f"./run_nodefield_campaign run {prefix} --once"
+        if state == "agent_decision_failed":
+            return f"Retry the agent decision with `{command}`."
+        if state == "running" and status.get("process_running"):
+            return "Wait for the next poll, or inspect the mini-batch log listed below."
+        if state == "running":
+            return f"The process is not running; use `{command}` to let the controller reconcile state."
+        if state in {"analysis_completed", "not_started", "terminated"}:
+            return f"Start the next campaign tick with `{command}`."
+        if state == "openai_credits_exhausted":
+            return "Fix OpenAI billing/quota before retrying the campaign loop."
+        return "Inspect the files below before deciding whether to retry or terminate."
+
+    def _metric_rows(metrics: Mapping[str, Any]) -> list[tuple[str, Any]]:
+        preferred = [
+            "average_num_violations",
+            "median_num_violations",
+            "feasible_rate",
+            "campaign_trial_id",
+            "trial_id",
+        ]
+        rows = [(key, metrics[key]) for key in preferred if key in metrics]
+        for key in sorted(metrics):
+            if key in preferred or key.endswith("_path"):
+                continue
+            rows.append((key, metrics[key]))
+        return rows
+
+    def _summarize_decision(decision: Mapping[str, Any]) -> list[str]:
+        if not decision:
+            return ["- No agent decision recorded yet."]
+        lines = [
+            f"- Decision: `{decision.get('decision', 'unknown')}`",
+        ]
+        if decision.get("created_at"):
+            lines.append(f"- Time: {decision['created_at']}")
+        if decision.get("previous_status"):
+            lines.append(f"- Previous state: `{decision['previous_status']}`")
+        if decision.get("run_dir"):
+            lines.append(f"- Decision run: {_display_path(decision['run_dir'])}")
+        reason = str(decision.get("reason") or "").strip()
+        if reason:
+            lines.append(f"- Reason: {reason}")
+        patch = decision.get("campaign_patch")
+        if isinstance(patch, Mapping):
+            agent_patch = patch.get("agent")
+            if isinstance(agent_patch, Mapping):
+                next_attempt = str(agent_patch.get("next_attempt") or "").strip()
+                if next_attempt:
+                    lines.append(f"- Next attempt: {next_attempt}")
+                touched = sorted(flatten_leaf_paths(agent_patch))
+                if touched:
+                    lines.append(
+                        f"- Patch summary: updates {len(touched)} agent field(s), "
+                        "mostly under `agent.default_trial_patch_space`."
+                    )
+        return lines
+
+    state = str(status.get("status") or "unknown")
+    prefix = status.get("prefix")
     lines = [
-        f"campaign: {status.get('campaign')}",
-        f"status: {status.get('status')}",
-        f"run_dir: {status.get('run_dir') or '-'}",
-        f"logs: {status.get('logs_dir') or '-'}",
-        f"child_log: {status.get('child_log_path') or '-'}",
-        f"pid: {status.get('pid') or '-'}",
-        f"process_running: {status.get('process_running')}",
-        f"poll_seconds: {status.get('poll_seconds')}",
+        "Campaign status",
+        f"- Campaign: {status.get('campaign')}" + (f" (`{prefix}`)" if prefix else ""),
+        f"- State: `{state}`",
+        f"- Meaning: {_state_explanation(state)}",
+        f"- Next action: {_next_action(state)}",
+        f"- Process: {'running' if status.get('process_running') else 'not running'}"
+        f" (pid: {status.get('pid') or '-'})",
+        f"- Poll interval: {_format_seconds(status.get('poll_seconds'))}",
+        "",
+        "Run files",
+        f"- Run directory: {_display_path(status.get('run_dir'))}",
+        f"- Logs directory: {_display_path(status.get('logs_dir'))}",
+        f"- Mini-batch log: {_display_path(status.get('child_log_path'))}",
+        f"- Campaign state: {_display_path(status.get('campaign_state_path'))}",
     ]
+
     queued = status.get("queued_trials") or []
+    lines.extend(["", "Trials"])
     if queued:
-        queued_text = ", ".join(
-            f"{trial.get('trial_id')}:{trial.get('status')}" for trial in queued
-        )
+        lines.extend(["| Trial | Status | Log |", "| --- | --- | --- |"])
+        for trial in queued:
+            trial_id = trial.get("trial_id")
+            trial_name = f"trial_{int(trial_id):03d}" if trial_id is not None else "trial"
+            lines.append(
+                "| {trial} | {status} | {log} |".format(
+                    trial=trial_name,
+                    status=trial.get("status", "-"),
+                    log=_display_path(trial.get("log_path")),
+                )
+            )
     else:
-        queued_text = "-"
-    lines.append(f"queued_trials: {queued_text}")
+        lines.append("- No queued trials recorded.")
+
     metrics = status.get("latest_metrics") or {}
-    lines.append("latest_metrics: " + (json.dumps(metrics, sort_keys=True) if metrics else "-"))
+    lines.extend(["", "Latest metrics"])
+    if metrics:
+        lines.extend(["| Metric | Value |", "| --- | ---: |"])
+        for key, value in _metric_rows(metrics):
+            lines.append(f"| `{key}` | {value} |")
+        for label, key in (
+            ("Loss PDF", "loss_pdf_path"),
+            ("Results CSV", "results_csv_path"),
+        ):
+            if metrics.get(key):
+                lines.append(f"- {label}: {_display_path(metrics[key])}")
+    else:
+        lines.append("- No metrics recorded yet.")
+
     loss_pdf_paths = status.get("loss_pdf_paths") or []
-    lines.append("loss_pdfs: " + (", ".join(str(path) for path in loss_pdf_paths) if loss_pdf_paths else "-"))
+    lines.extend(["", "Files to inspect"])
+    if loss_pdf_paths:
+        for index, path in enumerate(loss_pdf_paths, start=1):
+            lines.append(f"- Loss PDF {index}: {_display_path(path)}")
+    else:
+        lines.append("- No loss PDFs recorded yet.")
+
     latest_decision = status.get("latest_decision") or {}
-    if latest_decision:
-        lines.append("latest_decision: " + json.dumps(latest_decision, sort_keys=True))
+    lines.extend(["", "Latest agent decision"])
+    lines.extend(_summarize_decision(latest_decision))
+
     latest_error = status.get("latest_error") or {}
+    lines.extend(["", "Latest error"])
     if latest_error:
-        lines.append("latest_error: " + json.dumps(latest_error, sort_keys=True))
+        if latest_error.get("type"):
+            lines.append(f"- Type: `{latest_error['type']}`")
+        if latest_error.get("at"):
+            lines.append(f"- Time: {latest_error['at']}")
+        if latest_error.get("message"):
+            lines.append(f"- Message: {latest_error['message']}")
+        if latest_error.get("log_path"):
+            lines.append(f"- Log: {_display_path(latest_error['log_path'])}")
+    else:
+        lines.append("- No error recorded.")
+
     log_tail = status.get("log_tail")
     if log_tail:
-        lines.extend(["log_tail:", str(log_tail)])
+        lines.extend(["", "Recent log tail", _shorten_text_paths(str(log_tail))])
     return "\n".join(lines)
 
 

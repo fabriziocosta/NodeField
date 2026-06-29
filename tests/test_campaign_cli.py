@@ -66,8 +66,9 @@ def test_campaign_cli_list_and_status(capsys):
 
     assert main(["status", "molecules"]) == 0
     status_output = capsys.readouterr().out
-    assert "campaign: molecules" in status_output
-    assert "status:" in status_output
+    assert "Campaign status" in status_output
+    assert "- Campaign: molecules" in status_output
+    assert "- State:" in status_output
 
 
 def test_campaign_cli_dry_run_with_config_override(tmp_path, capsys, monkeypatch):
@@ -78,7 +79,7 @@ def test_campaign_cli_dry_run_with_config_override(tmp_path, capsys, monkeypatch
     output = capsys.readouterr().out
 
     assert "status: dry_run" in output
-    assert "queued_trials: -" in output
+    assert "No queued trials recorded" in output
     assert ".artifacts" not in output
     assert not any(Path(tmp_path / "artifact").glob("molecules/molecules_*"))
     assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
