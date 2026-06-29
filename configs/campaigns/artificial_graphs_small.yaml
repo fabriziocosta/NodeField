@@ -2,17 +2,13 @@ campaign:
   id: artificial_graphs_small
   domain: artificial_graphs
   prefix: artificial_graphs_small
-
 artifacts:
   root: artifact
-
 logbook:
   path: LOGBOOK_artificial_graphs.md
-
 runner:
   config_path: notebooks/configs/artificial_graph_hyperparameter_optimization.yaml
   poll_seconds: 1800
-
 dataset:
   num_graphs: 100
   cycle_length: 6
@@ -25,16 +21,13 @@ dataset:
   edge_alphabet_kind: int
   component_specific_alphabets: true
   seed: 42
-
 generation:
   n_samples: 16
   feasibility_effort: 2
   feasibility_filter: none
-
 random_search:
-  batch_size: 3
+  batch_size: 1
   random_state: 202
-
 agent:
   model: gpt-5.3-codex
   reasoning_effort: medium
@@ -45,85 +38,95 @@ agent:
     logbook: configs/campaigns/prompts/nodefield_campaign_logbook.md
   proposal_mode: range_search
   mutable_groups:
-    - architecture
-    - training
-    - loss_weights
-    - sampling
+  - architecture
+  - training
+  - loss_weights
+  - sampling
   allowed_paths:
-    - model.fixed
-    - model.search_space
+  - model.fixed
+  - model.search_space
   max_search_leaf_count: 23
-  reason: Explore validity on the fixed small 100-graph artificial campaign.
-  next_attempt: Compare feasibility violations, then tighten architecture, training, loss-weight, and sampling ranges.
+  reason: Latest run set a new best (avg/median violations 33.875/33.0 at trial_001)
+    but feasible_rate is still 0.0 and one trial collapsed badly (114.4/118.0), showing
+    a narrow unstable region. Exploit tightly around trial_001 and prune low auxiliary/node_count/sampling
+    and high-degree edges.
+  next_attempt: 'Run 3 very tight exploit trials around trial_001: keep compact 1-layer/4-head
+    setup, keep LR/steps near current values, raise floors for auxiliary/node_count/sampling_step_size,
+    and cap degree away from the high edge.'
   default_trial_patch_space:
     model:
       fixed:
         latent_embedding_dimension:
           type: choice
-          values: [32, 64, 128]
+          values:
+          - 64
         node_embedding_svd_dimension:
           type: choice
-          values: [32, 64, 128]
+          values:
+          - 32
         graph_embedding_svd_dimension:
           type: choice
-          values: [32, 64, 128]
+          values:
+          - 32
         number_of_transformer_layers:
           type: int
           low: 1
-          high: 4
+          high: 1
         transformer_attention_head_count:
           type: choice
-          values: [2, 4, 8]
+          values:
+          - 4
         transformer_dropout:
           type: real
-          low: 0.05
-          high: 0.25
+          low: 0.072305
+          high: 0.072315
         learning_rate:
           type: real
-          low: 0.00005
-          high: 0.0005
+          low: 0.0001749
+          high: 0.0001751
           scale: log
         batch_size:
           type: choice
-          values: [8, 16, 24]
+          values:
+          - 16
         total_steps:
           type: int
-          low: 40
-          high: 120
+          low: 306
+          high: 308
       search_space:
         lambda_degree_importance:
           type: real
-          low: 0.5
-          high: 3.0
+          low: 0.74145
+          high: 0.7419
         lambda_node_exist_importance:
           type: real
-          low: 0.5
-          high: 3.0
+          low: 2.6433
+          high: 2.64365
         lambda_node_count_importance:
           type: real
-          low: 0.0
-          high: 1.5
+          low: 0.9135
+          high: 0.91425
         lambda_node_label_importance:
           type: real
-          low: 0.5
-          high: 3.0
+          low: 2.9183
+          high: 2.91895
         lambda_edge_label_importance:
           type: real
-          low: 0.5
-          high: 3.0
+          low: 2.32875
+          high: 2.32895
         lambda_direct_edge_importance:
           type: real
-          low: 0.5
-          high: 3.0
+          low: 1.60805
+          high: 1.60825
         lambda_auxiliary_edge_importance:
           type: real
-          low: 0.5
-          high: 3.0
+          low: 1.8444
+          high: 1.8453
         sparse_supervision_mask_ratio:
           type: real
-          low: 0.0
-          high: 0.35
+          low: 0.181082
+          high: 0.18109
         sampling_step_size:
           type: real
-          low: 0.025
-          high: 0.075
+          low: 0.0192172
+          high: 0.019223

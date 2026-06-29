@@ -93,7 +93,13 @@ MUTABLE_GROUP_PATHS = {
 }
 
 VALID_PROPOSAL_MODES = {"range_search", "exact_configs"}
-ALLOWED_AGENT_DECISIONS = {"no_action", "update_logbook", "propose_trial", "stop_campaign"}
+ALLOWED_AGENT_DECISIONS = {
+    "no_action",
+    "update_logbook",
+    "propose_trial",
+    "stop_campaign",
+    "terminate_run_and_propose_trial",
+}
 ALLOWED_CAMPAIGN_PATCH_PATHS = {
     "agent.reason",
     "agent.next_attempt",
@@ -294,7 +300,9 @@ def campaign_decision_text_format() -> dict[str, Any]:
                         "description": (
                             "JSON-encoded object patching only agent.reason, "
                             "agent.next_attempt, agent.default_trial_patch_space, or "
-                            "agent.default_trial_configs. Use {} when no patch is proposed."
+                            "agent.default_trial_configs. Use {} when no patch is proposed. "
+                            "When an active run is going nowhere, use "
+                            "terminate_run_and_propose_trial with a patch for the next run."
                         ),
                     },
                 },
@@ -368,7 +376,7 @@ def load_campaign_config(
     random_search = config.setdefault("random_search", {})
     if not isinstance(random_search, dict):
         raise ValueError("random_search section must be a mapping.")
-    random_search["batch_size"] = int(random_search.get("batch_size", 3))
+    random_search["batch_size"] = int(random_search.get("batch_size", 1))
     if random_search["batch_size"] < 1:
         raise ValueError("random_search.batch_size must be >= 1.")
     random_search["random_state"] = int(random_search.get("random_state", 0))
@@ -515,6 +523,19 @@ def _is_process_running(pid: int | None) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _terminate_process_group(pid: int | None) -> None:
+    if pid is None or pid <= 0:
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        os.kill(pid, signal.SIGTERM)
 
 
 def _read_lock_pid(path: Path) -> int | None:
@@ -669,6 +690,7 @@ def _campaign_result_summary(config: Mapping[str, Any], run_dir: Path | None = N
         "summary": summary,
         "log_tail": log_tail,
         "loss_pdf_paths": state.get("loss_pdf_paths", []),
+        "artifact_links_markdown": _format_logbook_artifact_links(config, run_dir, state),
     }
 
 
@@ -698,6 +720,17 @@ def _agent_prompt_text(config: Mapping[str, Any], campaign_state: Mapping[str, A
         [
             "You are managing a NodeField graph-generation hyperparameter campaign.",
             "The deterministic controller handles launching, polling, and validation.",
+            (
+                "If the campaign state shows an active running mini-batch, you may return "
+                "`no_action` to keep waiting, `update_logbook` to record analysis only, "
+                "`terminate_run_and_propose_trial` to stop an unpromising active child "
+                "and launch a patched next run, or `stop_campaign` to stop the campaign."
+            ),
+            (
+                "Use semantic early stopping only when partial metrics, logs, or repeated "
+                "failure patterns make the active run clearly uninformative; otherwise "
+                "continue and wait for more evidence."
+            ),
             "Return only the strict JSON object requested by the response schema.",
             "Proposal prompt:",
             proposal_prompt,
@@ -899,6 +932,171 @@ def _notebook_context(config: Mapping[str, Any]) -> dict[str, Path]:
     }
 
 
+def _logbook_link(config: Mapping[str, Any], path: str | Path, label: str | None = None) -> str:
+    repo_root = Path(str(config["_repo_root"]))
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = (repo_root / resolved).resolve()
+    else:
+        resolved = resolved.resolve()
+    try:
+        target = resolved.relative_to(repo_root)
+    except ValueError:
+        target = resolved
+    text = label or resolved.name
+    return f"[{text}]({target.as_posix()})"
+
+
+def _existing_logbook_links(
+    config: Mapping[str, Any],
+    entries: list[tuple[str, str | Path]],
+) -> list[str]:
+    links = []
+    for label, path in entries:
+        resolved = Path(path).expanduser()
+        if not resolved.is_absolute():
+            resolved = Path(str(config["_repo_root"])) / resolved
+        if resolved.exists():
+            links.append(f"{label}: {_logbook_link(config, resolved)}")
+    return links
+
+
+def _format_logbook_artifact_links(
+    config: Mapping[str, Any],
+    run_dir: str | Path,
+    state: Mapping[str, Any] | None = None,
+) -> str:
+    """Return deterministic Markdown links to the files worth inspecting for a run."""
+    run_path = Path(run_dir).expanduser().resolve()
+    state = state or _read_json_if_exists(run_path / "state.json")
+    primary_links = _existing_logbook_links(
+        config,
+        [
+            ("run", run_path),
+            ("state", run_path / "state.json"),
+            ("proposal", run_path / "proposal.json"),
+            ("campaign result", run_path / "campaign_result.json"),
+            ("agent decision", run_path / "agent_decision.json"),
+            ("metrics csv", run_path / "metrics" / "summary.csv"),
+            ("metrics json", run_path / "metrics" / "summary.json"),
+            ("campaign config", run_path / "configs" / "campaign.yaml"),
+            ("base workflow", run_path / "configs" / "base_workflow.yaml"),
+            ("mini-batch log", run_path / "logs" / "mini_batch.log"),
+        ],
+    )
+    trial_links: list[str] = []
+    for trial_state in state.get("queued_trials", []) or []:
+        if not isinstance(trial_state, Mapping):
+            continue
+        trial_id = trial_state.get("trial_id")
+        trial_name = f"trial_{int(trial_id):03d}" if trial_id is not None else "trial"
+        log_path = trial_state.get("log_path")
+        if log_path:
+            trial_links.extend(_existing_logbook_links(config, [(f"{trial_name} log", log_path)]))
+        loss_pdf_path = trial_state.get("loss_pdf_path")
+        if loss_pdf_path:
+            trial_links.extend(
+                _existing_logbook_links(config, [(f"{trial_name} loss PDF", loss_pdf_path)])
+            )
+        trial_dir = run_path / "trials" / trial_name
+        trial_links.extend(
+            _existing_logbook_links(
+                config,
+                [
+                    (f"{trial_name} config", trial_dir / "config.yaml"),
+                    (f"{trial_name} metrics", trial_dir / "metrics.json"),
+                    (f"{trial_name} results CSV", trial_dir / "metrics" / "trial_results.csv"),
+                    (f"{trial_name} loss PDF", trial_dir / "metrics" / "loss_curves.pdf"),
+                ],
+            )
+        )
+    for pdf_path in state.get("loss_pdf_paths", []) or []:
+        trial_links.extend(_existing_logbook_links(config, [("loss PDF", pdf_path)]))
+    seen = set()
+    unique_lines = []
+    for line in [*primary_links, *trial_links]:
+        if line in seen:
+            continue
+        seen.add(line)
+        unique_lines.append(f"- {line}")
+    if not unique_lines:
+        return ""
+    return "#### Files to inspect\n\n" + "\n".join(unique_lines)
+
+
+def _format_logbook_metrics_table(state: Mapping[str, Any]) -> str:
+    rows: list[Mapping[str, Any]] = []
+    latest_metrics = state.get("latest_metrics")
+    completed_by_id = {
+        int(trial.get("trial_id")): trial
+        for trial in state.get("completed_trials", []) or []
+        if isinstance(trial, Mapping) and trial.get("trial_id") is not None
+    }
+    for trial in state.get("queued_trials", []) or []:
+        if not isinstance(trial, Mapping):
+            continue
+        trial_id = trial.get("trial_id")
+        if trial_id is None:
+            continue
+        completed_trial_dir = completed_by_id.get(int(trial_id), {}).get("trial_dir")
+        metrics_path = Path(str(completed_trial_dir)) / "metrics.json" if completed_trial_dir else None
+        metrics = _read_json_if_exists(metrics_path) if metrics_path and metrics_path.is_file() else {}
+        if not metrics and isinstance(latest_metrics, Mapping):
+            latest_trial_id = latest_metrics.get("campaign_trial_id") or latest_metrics.get("trial_id")
+            if latest_trial_id == trial_id:
+                metrics = latest_metrics
+        rows.append(
+            {
+                "trial": f"trial_{int(trial_id):03d}",
+                "status": trial.get("status", ""),
+                "average": metrics.get("average_num_violations", ""),
+                "median": metrics.get("median_num_violations", ""),
+                "feasible_rate": metrics.get("feasible_rate", ""),
+            }
+        )
+    if not rows:
+        return ""
+    lines = [
+        "| Trial | Status | Avg violations | Median violations | Feasible rate |",
+        "| --- | --- | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        lines.append(
+            "| {trial} | {status} | {average} | {median} | {feasible_rate} |".format(**row)
+        )
+    return "\n".join(lines)
+
+
+def _best_metric_row(state: Mapping[str, Any]) -> Mapping[str, Any]:
+    rows: list[Mapping[str, Any]] = []
+    for trial in state.get("completed_trials", []) or []:
+        if not isinstance(trial, Mapping):
+            continue
+        trial_dir = trial.get("trial_dir")
+        if not trial_dir:
+            continue
+        metrics = _read_json_if_exists(Path(str(trial_dir)) / "metrics.json")
+        if metrics:
+            rows.append(metrics)
+    latest_metrics = state.get("latest_metrics")
+    if isinstance(latest_metrics, Mapping) and latest_metrics:
+        rows.append(latest_metrics)
+    numeric_rows = [
+        row
+        for row in rows
+        if row.get("average_num_violations") is not None
+    ]
+    if not numeric_rows:
+        return latest_metrics if isinstance(latest_metrics, Mapping) else {}
+    return sorted(
+        numeric_rows,
+        key=lambda row: (
+            float(row.get("average_num_violations", float("inf"))),
+            -float(row.get("feasible_rate", 0.0) or 0.0),
+        ),
+    )[0]
+
+
 def _format_logbook_entry(
     *,
     config: Mapping[str, Any],
@@ -908,22 +1106,38 @@ def _format_logbook_entry(
 ) -> str:
     campaign = config["campaign"]["domain"]
     sampled_count = len(proposal.get("sampled_patches", []))
-    metrics = state.get("latest_metrics") or {}
-    metric_text = "pending"
-    if metrics:
-        metric_text = ", ".join(f"{key}={value}" for key, value in sorted(metrics.items()))
+    status = str(state.get("status", "unknown"))
+    best_metrics = _best_metric_row(state)
+    best_trial = best_metrics.get("campaign_trial_id") or best_metrics.get("trial_id")
+    metrics_table = _format_logbook_metrics_table(state)
+    if best_metrics:
+        best_trial_name = f"trial_{int(best_trial):03d}" if best_trial is not None else "the best trial"
+        conclusion = (
+            f"This run {status} after testing {sampled_count} candidate(s). "
+            f"The best candidate was {best_trial_name} with "
+            f"average violations {best_metrics.get('average_num_violations')}, "
+            f"median violations {best_metrics.get('median_num_violations')}, and "
+            f"feasible rate {best_metrics.get('feasible_rate')}; use the table below "
+            "to compare the sampled candidates."
+        )
+    else:
+        conclusion = (
+            f"This run {status} after queueing {sampled_count} candidate(s), but no "
+            "completed metric row was available yet. Check the logs and state file "
+            "linked below before changing ranges."
+        )
+    next_attempt = str(
+        proposal.get("next_attempt") or "Review metrics and narrow the best ranges."
+    )
+    reasoning = str(proposal.get("reason") or "Config-defined range proposal.")
     return (
         f"### {campaign} - {run_dir.name}\n\n"
-        f"- Tried: {sampled_count} candidate(s) from "
-        f"`{proposal.get('proposal_mode', 'range_search')}`.\n"
-        f"- Agent reasoning: {proposal.get('reason', 'Config-defined range proposal.')}\n"
-        f"- Mutable groups: "
-        f"{', '.join(proposal.get('mutable_groups', [])) or 'explicit paths only'}\n"
-        f"- Ranges/exact configs: `{run_dir / 'proposal.json'}`\n"
-        f"- Metrics: {metric_text}\n"
-        f"- Artifacts: `{run_dir}`\n"
-        f"- Next attempt: "
-        f"{proposal.get('next_attempt', 'Review metrics and narrow the best ranges.')}\n"
+        f"{conclusion}\n\n"
+        f"{reasoning}\n\n"
+        f"Next, {next_attempt}\n\n"
+        f"#### Metrics\n\n"
+        f"{metrics_table or '_No completed trial metrics yet._'}\n\n"
+        f"{_format_logbook_artifact_links(config, run_dir, state)}\n"
     )
 
 
@@ -1341,10 +1555,14 @@ def _write_agent_decision(
     _write_json(run_dir / "agent_decision.json", row)
     _append_jsonl(_agent_decisions_path(config), row)
     if decision.logbook_markdown:
+        artifact_links = _format_logbook_artifact_links(config, run_dir, campaign_state)
+        logbook_markdown = decision.logbook_markdown
+        if artifact_links:
+            logbook_markdown = logbook_markdown.rstrip() + "\n\n" + artifact_links
         upsert_logbook_block(
             config["logbook"]["path"],
             f"{run_dir.name}:agent",
-            decision.logbook_markdown,
+            logbook_markdown,
         )
     return row
 
@@ -1355,6 +1573,7 @@ def _campaign_state_for_decision(
     *,
     status: str,
     phase: str,
+    process_running: bool = False,
     decision_row: Mapping[str, Any] | None = None,
     error: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1366,7 +1585,7 @@ def _campaign_state_for_decision(
             "prefix": config["campaign"]["prefix"],
             "status": status,
             "phase": phase,
-            "process_running": False,
+            "process_running": process_running,
             "poll_seconds": int(config["runner"]["poll_seconds"]),
             "updated_at": _now_iso(),
             "config_path": str(config["campaign"]["config_path"]),
@@ -1380,12 +1599,44 @@ def _campaign_state_for_decision(
     return next_state
 
 
+def _mark_run_terminated_by_agent(
+    run_dir: Path,
+    *,
+    decision_row: Mapping[str, Any],
+) -> dict[str, Any]:
+    run_state = _read_json_if_exists(run_dir / "state.json")
+    run_state.update(
+        {
+            "status": "terminated_by_agent",
+            "terminated_at": _now_iso(),
+            "termination_reason": decision_row.get("reason", ""),
+            "latest_decision": dict(decision_row),
+        }
+    )
+    _write_json(run_dir / "state.json", run_state)
+    _write_json(
+        run_dir / "campaign_result.json",
+        {
+            "run_dir": str(run_dir),
+            "status": "terminated_by_agent",
+            "state": run_state,
+            "proposal": _read_json_if_exists(run_dir / "proposal.json"),
+            "metrics": _read_json_if_exists(run_dir / "metrics" / "summary.json").get(
+                "trials", []
+            ),
+        },
+    )
+    return run_state
+
+
 def _handle_agent_decision(
     config: Mapping[str, Any],
     *,
     campaign_state: Mapping[str, Any],
     campaign_name: str,
     device: str = "cpu",
+    active_process_pid: int | None = None,
+    active_run_running: bool = False,
     client: Any | None = None,
     stream: TextIO | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1423,6 +1674,50 @@ def _handle_agent_decision(
 
     decision_row = _write_agent_decision(config, run_dir, campaign_state, decision)
     print(f"agent_decision: {decision.decision}", file=stream)
+    if active_run_running and decision.decision in {"no_action", "update_logbook"}:
+        state = _campaign_state_for_decision(
+            config,
+            campaign_state,
+            status="running",
+            phase="mini_batch",
+            process_running=True,
+            decision_row=decision_row,
+        )
+        print(f"status: running; continuing active run {run_dir}", file=stream)
+        return state, config
+
+    if active_run_running and decision.decision == "stop_campaign":
+        _terminate_process_group(active_process_pid)
+        _mark_run_terminated_by_agent(run_dir, decision_row=decision_row)
+        state = _campaign_state_for_decision(
+            config,
+            campaign_state,
+            status="campaign_completed",
+            phase="stopped",
+            decision_row=decision_row,
+        )
+        print(f"terminated: {run_dir}", file=stream)
+        return state, config
+
+    if active_run_running and decision.decision in {
+        "propose_trial",
+        "terminate_run_and_propose_trial",
+    }:
+        _terminate_process_group(active_process_pid)
+        _mark_run_terminated_by_agent(run_dir, decision_row=decision_row)
+        patched_config = apply_campaign_patch(config, decision.campaign_patch)
+        state = _launch_mini_batch_child(
+            patched_config,
+            campaign_name=campaign_name,
+            device=device,
+        )
+        state["latest_decision"] = decision_row
+        _write_json(_campaign_state_path(patched_config), state)
+        print(f"terminated: {run_dir}", file=stream)
+        print(f"launched: {state['run_dir']}", file=stream)
+        print(f"logs: {state['child_log_path']}", file=stream)
+        return state, patched_config
+
     if decision.decision == "stop_campaign":
         state = _campaign_state_for_decision(
             config,
@@ -1441,7 +1736,7 @@ def _handle_agent_decision(
             decision_row=decision_row,
         )
         return state, config
-    if decision.decision == "propose_trial":
+    if decision.decision in {"propose_trial", "terminate_run_and_propose_trial"}:
         patched_config = apply_campaign_patch(config, decision.campaign_patch)
         state = _launch_mini_batch_child(
             patched_config,
@@ -1528,6 +1823,19 @@ def run_campaign_loop(
                     client=client,
                     stream=stream,
                 )
+            elif campaign_state.get("status") == "running" and running:
+                campaign_state["child_status"] = child_status or "running"
+                campaign_state["process_running"] = True
+                campaign_state, active_config = _handle_agent_decision(
+                    active_config,
+                    campaign_state=campaign_state,
+                    campaign_name=campaign_name,
+                    device=device,
+                    active_process_pid=pid_int,
+                    active_run_running=True,
+                    client=client,
+                    stream=stream,
+                )
             elif campaign_state.get("status") == "agent_decision_failed":
                 campaign_state, active_config = _handle_agent_decision(
                     active_config,
@@ -1539,14 +1847,7 @@ def run_campaign_loop(
                 )
             elif campaign_state.get("status") in {"termination_requested", "terminated"}:
                 if running and pid_int is not None:
-                    try:
-                        os.killpg(pid_int, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    except PermissionError:
-                        os.kill(pid_int, signal.SIGTERM)
-                    except OSError:
-                        os.kill(pid_int, signal.SIGTERM)
+                    _terminate_process_group(pid_int)
                 campaign_state["status"] = "terminated"
                 campaign_state["process_running"] = False
                 campaign_state["terminated_at"] = _now_iso()
@@ -1692,14 +1993,7 @@ def terminate_campaign(config: Mapping[str, Any]) -> dict[str, Any]:
     pid = campaign_state.get("pid")
     pid_int = int(pid) if str(pid).isdigit() else None
     if pid_int and _is_process_running(pid_int):
-        try:
-            os.killpg(pid_int, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            os.kill(pid_int, signal.SIGTERM)
-        except OSError:
-            os.kill(pid_int, signal.SIGTERM)
+        _terminate_process_group(pid_int)
         campaign_state["status"] = "termination_requested"
         campaign_state["termination_requested_at"] = _now_iso()
         campaign_state["process_running"] = _is_process_running(pid_int)

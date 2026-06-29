@@ -102,8 +102,10 @@ The domain logbooks are:
 `./run_nodefield_campaign run <campaign>` starts or resumes the OpenAI-backed
 parent loop. The parent loop launches an internal `run-mini-batch` child process
 for deterministic execution, polls that child at `runner.poll_seconds`, and calls
-OpenAI only after a mini-batch completes, fails, or needs a retryable agent
-decision.
+OpenAI at deterministic polling points. When the child is still active, the
+agent can continue waiting or semantically stop an uninformative run; when the
+child has completed or failed, the agent decides whether to patch the campaign
+YAML and launch the next mini-batch.
 
 OpenAI settings are configured under `agent`:
 
@@ -119,7 +121,7 @@ The response uses the OpenAI Responses API with strict structured output:
 
 ```json
 {
-  "decision": "no_action | update_logbook | propose_trial | stop_campaign",
+  "decision": "no_action | update_logbook | propose_trial | terminate_run_and_propose_trial | stop_campaign",
   "reason": "short rationale",
   "logbook_markdown": "human-facing summary",
   "campaign_patch": "{\"agent\": {...}}"
@@ -139,6 +141,14 @@ Patches touching `dataset`, `generation`, `runner`, `artifacts`, `logbook`, or
 output roots are rejected. OpenAI quota or billing exhaustion is terminal for the
 loop and writes `openai_credits_exhausted`; transient OpenAI or parse failures
 write `agent_decision_failed` and are retried on the next poll.
+
+For an active mini-batch, `no_action` keeps the child running until the next
+poll. `terminate_run_and_propose_trial` sends `SIGTERM` to the active child
+process group, marks the run state as `terminated_by_agent`, writes
+`agent_decision.json`, applies the validated patch to the named campaign YAML,
+and immediately launches the next timestamped run. This is semantic early
+stopping: it should be used only when partial metrics, logs, or repeated failure
+patterns make the current run clearly uninformative.
 
 ## Proposal Modes
 
@@ -230,7 +240,7 @@ The mini-batch size is controlled by:
 
 ```yaml
 random_search:
-  batch_size: 3
+  batch_size: 1
   random_state: 101
 ```
 
@@ -482,17 +492,17 @@ and the latest timestamped run state.
 ## Logbook Contract
 
 After a completed run and OpenAI decision, the controller writes a marked block
-to the domain logbook from the strict `logbook_markdown` field. Each block
-records:
+to the domain logbook from the strict `logbook_markdown` field. Controller-only
+mini-batch entries use the same readable structure:
 
-- what was tried,
-- proposal mode,
-- mutable groups,
-- agent reasoning,
-- link to `proposal.json`,
-- latest metrics,
-- artifact path,
-- next proposed attempt.
+- one plain-English paragraph explaining how the run went,
+- a compact Markdown metrics table,
+- one plain-English paragraph explaining what to try next and why,
+- a deterministic `Files to inspect` section with links to `proposal.json`,
+  configs, logs, metrics, loss PDFs, and `agent_decision.json` when present.
+
+Long absolute paths should not appear in the narrative text; they belong in the
+linked `Files to inspect` section.
 
 The markers allow the same run block to be upserted if a run is retried or
 updated:
@@ -505,8 +515,8 @@ updated:
 
 ## Practical Guidance
 
-Use `range_search` when the next step is exploratory. Keep `batch_size` small
-(usually 2 or 3) so the campaign can react after each mini-batch.
+Use `range_search` when the next step is exploratory. The default `batch_size`
+is `1`, so the campaign can react after every completed trial.
 
 Use `exact_configs` when the next step is confirmatory, such as rechecking a
 promising configuration or running a controlled ablation.

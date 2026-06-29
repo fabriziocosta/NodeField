@@ -17,10 +17,11 @@ Rules:
 - Keep the mini-batch small; the controller samples `random_search.batch_size` exact trials.
 - Prefer changes that can be explained from the latest metrics, failures, and loss curves.
 - If the latest run failed, first propose the smallest recovery change that makes the next run informative.
+- If the current run is still active, use `no_action` unless partial metrics or logs show that continuing is clearly uninformative.
+- If an active run is clearly going nowhere, use `terminate_run_and_propose_trial` with a validated patch for the next run.
 - Preserve the campaign domain and fixed small/large condition.
 
 Output:
 1. A short reason for the next attempt.
 2. A patch to `agent.default_trial_patch_space` or `agent.default_trial_configs`.
 3. A short `next_attempt` note for the logbook.
-

@@ -9,6 +9,7 @@ import pytest
 
 from conditional_node_field_graph_generator import nodefield_campaign as core_nodefield_campaign
 from conditional_node_field_graph_generator.extensions.demo import (
+    campaign_best_model,
     campaign_search,
     nodefield_campaign,
     zinc_hyperparameter_optimization as zinc_hopt,
@@ -788,6 +789,7 @@ def test_builtin_campaign_configs_define_prompts_and_poll_intervals():
     assert small["runner"]["poll_seconds"] == 1800
     assert large["runner"]["poll_seconds"] == 3600
     for config in (small, large):
+        assert config["random_search"]["batch_size"] == 1
         proposal_prompt = Path(config["agent"]["prompts"]["proposal"])
         logbook_prompt = Path(config["agent"]["prompts"]["logbook"])
         assert proposal_prompt.name == "nodefield_campaign_proposal.md"
@@ -847,7 +849,7 @@ def test_agent_decision_schema_and_parser_validate_strict_contract():
     decision = nodefield_campaign.parse_agent_campaign_decision(
         json.dumps(
             {
-                "decision": "propose_trial",
+                "decision": "terminate_run_and_propose_trial",
                 "reason": "Narrow the range after the latest result.",
                 "logbook_markdown": "### analysis\n\nUse a smaller range.",
                 "campaign_patch": json.dumps(
@@ -871,7 +873,7 @@ def test_agent_decision_schema_and_parser_validate_strict_contract():
         )
     )
 
-    assert decision.decision == "propose_trial"
+    assert decision.decision == "terminate_run_and_propose_trial"
     assert decision.campaign_patch["agent"]["default_trial_patch_space"]["model"][
         "search_space"
     ]["trial_quality"]["low"] == 0.1
@@ -1048,6 +1050,124 @@ def test_campaign_loop_restarts_after_stale_termination_request(monkeypatch, tmp
     assert launches == [{"campaign_name": "molecules", "device": "cpu"}]
 
 
+def _write_campaign_best_trial_fixture(tmp_path):
+    repo_root = tmp_path
+    (repo_root / "conditional_node_field_graph_generator").mkdir()
+    domain_root = repo_root / "artifact" / "artificial_graphs"
+    state_path = domain_root / "artificial_graphs_small_campaign_state.json"
+    active_run = domain_root / "artificial_graphs_small_20260626_010203_active"
+    older_run = domain_root / "artificial_graphs_small_20260625_010203_old"
+    for run_dir, values in (
+        (active_run, [3.0, 1.0]),
+        (older_run, [0.5]),
+    ):
+        for index, average in enumerate(values, start=1):
+            trial_dir = run_dir / "trials" / f"trial_{index:03d}"
+            ckpt_dir = trial_dir / "trials" / "trial_001" / "checkpoints" / "model"
+            ckpt_dir.mkdir(parents=True)
+            (ckpt_dir / f"best-00{index}-{average:.4f}.ckpt").write_text("checkpoint")
+            (trial_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "campaign_trial_id": index,
+                        "average_num_violations": average,
+                        "median_num_violations": average,
+                        "feasible_rate": 0.0 if average else 1.0,
+                    }
+                )
+            )
+            (trial_dir / "config.yaml").write_text(
+                json.dumps(
+                    {
+                        "experiment": {"random_state": 7, "verbose": 1},
+                        "dataset": {
+                            "num_graphs": 2,
+                            "cycle_length": 3,
+                            "path_length": 2,
+                            "num_rays": 1,
+                            "ray_length": 1,
+                        },
+                        "model": {"fixed": {}, "search_space": {"x": {"type": "real", "low": 1, "high": 1}}},
+                        "generation": {
+                            "n_samples": 4,
+                            "feasibility_effort": 2,
+                            "feasibility_filter": "none",
+                        },
+                        "outputs": {"artifact_subdir": "artificial_graphs"},
+                    }
+                )
+            )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "campaign": "artificial_graphs",
+                "prefix": "artificial_graphs_small",
+                "status": "running",
+                "run_dir": str(active_run),
+            }
+        )
+    )
+    return repo_root, state_path
+
+
+def test_campaign_best_model_auto_selects_latest_active_campaign_and_ranks_trials(tmp_path):
+    repo_root, state_path = _write_campaign_best_trial_fixture(tmp_path)
+
+    found_state_path, found_state = campaign_best_model.find_latest_campaign_state(repo_root)
+    ranking = campaign_best_model.collect_campaign_trial_results(repo_root=repo_root)
+    selection = campaign_best_model.select_best_campaign_trial(repo_root=repo_root)
+
+    assert found_state_path == state_path
+    assert found_state["status"] == "running"
+    assert ranking.iloc[0]["average_num_violations"] == 0.5
+    assert ranking.iloc[0]["run_name"] == "artificial_graphs_small_20260625_010203_old"
+    assert selection.metrics["average_num_violations"] == 0.5
+    assert selection.checkpoint_path.name.startswith("best-")
+
+
+def test_sample_from_best_campaign_trial_forwards_notebook_sampling_overrides(
+    monkeypatch,
+    tmp_path,
+):
+    repo_root, _state_path = _write_campaign_best_trial_fixture(tmp_path)
+    calls = {}
+
+    class _FakeEstimator:
+        def number_of_violations(self, graphs):
+            return [0 for _graph in graphs]
+
+    class _FakeGenerator:
+        feasibility_estimator = _FakeEstimator()
+
+        def sample(self, **kwargs):
+            calls["sample"] = kwargs
+            return ["g1", "g2", "g3"]
+
+    monkeypatch.setattr(
+        campaign_best_model,
+        "load_campaign_trial_generator",
+        lambda selection, *, notebook_context, device="cpu": _FakeGenerator(),
+    )
+
+    result = campaign_best_model.sample_from_best_campaign_trial(
+        repo_root=repo_root,
+        notebook_context={"NOTEBOOK_DATA_ROOT": tmp_path / "datasets"},
+        n_samples=3,
+        feasibility_effort=4,
+        feasibility_filter="strict",
+        device="cpu",
+    )
+
+    assert calls["sample"] == {
+        "n_samples": 3,
+        "feasibility_effort": 4,
+        "feasibility_filter": "strict",
+    }
+    assert result["sample_summary"]["returned_samples"] == 3
+    assert result["sample_summary"]["average_num_violations"] == 0.0
+
+
 def test_campaign_loop_completed_minibatch_patches_config_and_relaunches(
     monkeypatch,
     tmp_path,
@@ -1128,7 +1248,115 @@ def test_campaign_loop_completed_minibatch_patches_config_and_relaunches(
         "trial_quality"
     ] == {"type": "real", "low": 0.2, "high": 0.3}
     assert "Narrow quality." in (tmp_path / "LOGBOOK.md").read_text()
+    assert "agent_decision.json" in (tmp_path / "LOGBOOK.md").read_text()
+    assert "Files to inspect" in (tmp_path / "LOGBOOK.md").read_text()
     assert launched_configs
+
+
+def test_campaign_loop_can_semantically_stop_active_run_and_relaunch(
+    monkeypatch,
+    tmp_path,
+):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    run_dir = tmp_path / "artifact" / "molecules" / "molecules_20260625_091011_active"
+    (run_dir / "logs").mkdir(parents=True)
+    (run_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "latest_metrics": {
+                    "campaign_trial_id": 1,
+                    "average_num_violations": 99.0,
+                    "median_num_violations": 99.0,
+                    "feasible_rate": 0.0,
+                },
+                "queued_trials": [{"trial_id": 1, "status": "running"}],
+            }
+        )
+    )
+    core_nodefield_campaign._write_json(
+        core_nodefield_campaign._campaign_state_path(config),
+        {
+            "campaign": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(run_dir),
+            "pid": 12345,
+            "poll_seconds": 1,
+        },
+    )
+    terminated = []
+    launched_configs = []
+
+    def fake_decision(config, campaign_state, result, *, client=None):
+        del config, campaign_state, client
+        assert result["status"] == "running"
+        assert result["state"]["latest_metrics"]["average_num_violations"] == 99.0
+        return nodefield_campaign.AgentCampaignDecision(
+            decision="terminate_run_and_propose_trial",
+            reason="Partial metrics show this run is clearly uninformative.",
+            logbook_markdown=(
+                "### molecules\n\n"
+                "This run is not improving and should be stopped early.\n\n"
+                "| Trial | Avg violations |\n| --- | ---: |\n| trial_001 | 99.0 |\n\n"
+                "Next, tighten the trial-quality range around the previous stable region."
+            ),
+            campaign_patch={
+                "agent": {
+                    "reason": "Recover from a bad active run.",
+                    "default_trial_patch_space": {
+                        "model": {
+                            "search_space": {
+                                "trial_quality": {"type": "real", "low": 0.2, "high": 0.3}
+                            }
+                        }
+                    },
+                }
+            },
+        )
+
+    def fake_launch(config, *, campaign_name, device, run_timestamp=None, run_id=None):
+        del campaign_name, device, run_timestamp, run_id
+        launched_configs.append(config)
+        state = {
+            "campaign": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(tmp_path / "artifact" / "molecules" / "molecules_next"),
+            "child_log_path": str(
+                tmp_path / "artifact" / "molecules" / "molecules_next" / "logs" / "mini_batch.log"
+            ),
+            "poll_seconds": 1,
+        }
+        core_nodefield_campaign._write_json(
+            core_nodefield_campaign._campaign_state_path(config),
+            state,
+        )
+        return state
+
+    monkeypatch.setattr(core_nodefield_campaign, "_is_process_running", lambda pid: pid == 12345)
+    monkeypatch.setattr(core_nodefield_campaign, "_terminate_process_group", terminated.append)
+    monkeypatch.setattr(core_nodefield_campaign, "request_agent_campaign_decision", fake_decision)
+    monkeypatch.setattr(core_nodefield_campaign, "_launch_mini_batch_child", fake_launch)
+
+    result = nodefield_campaign.run_campaign_loop(
+        config,
+        campaign_name="molecules",
+        once=True,
+        sleep_fn=lambda seconds: None,
+    )
+
+    assert terminated == [12345]
+    assert result["state"]["status"] == "running"
+    assert result["state"]["run_dir"].endswith("molecules_next")
+    assert launched_configs
+    run_state = json.loads((run_dir / "state.json").read_text())
+    assert run_state["status"] == "terminated_by_agent"
+    assert (run_dir / "agent_decision.json").is_file()
+    logbook_text = (tmp_path / "LOGBOOK.md").read_text()
+    assert "Files to inspect" in logbook_text
+    assert "agent_decision.json" in logbook_text
 
 
 def test_campaign_proposal_records_latest_result_context(tmp_path):
@@ -1309,6 +1537,14 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
         1 <= item["model"]["fixed"]["number_of_transformer_layers"] <= 2
         for item in captured_configs
     )
+    logbook_text = (tmp_path / "LOGBOOK.md").read_text()
+    assert "Files to inspect" in logbook_text
+    assert "| Trial | Status | Avg violations | Median violations | Feasible rate |" in logbook_text
+    assert "This run completed" in logbook_text
+    assert "proposal.json" in logbook_text
+    assert "metrics/summary.csv" in logbook_text
+    assert "trial_001.log" in logbook_text
+    assert "loss_curves.pdf" in logbook_text
 
 
 def test_campaign_mini_batch_failure_marks_state_failed(monkeypatch, tmp_path):

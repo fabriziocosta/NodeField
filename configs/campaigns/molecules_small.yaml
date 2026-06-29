@@ -25,7 +25,7 @@ generation:
   feasibility_filter: none
 
 random_search:
-  batch_size: 3
+  batch_size: 1
   random_state: 101
 
 agent:
