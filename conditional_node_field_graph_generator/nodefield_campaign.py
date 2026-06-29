@@ -1629,6 +1629,120 @@ def _mark_run_terminated_by_agent(
     return run_state
 
 
+def _parse_state_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _seconds_until_next_poll(config: Mapping[str, Any], state: Mapping[str, Any]) -> int:
+    poll_seconds = int(config["runner"]["poll_seconds"])
+    last_poll = (
+        _parse_state_time(state.get("updated_at"))
+        or _parse_state_time(state.get("started_at"))
+    )
+    if last_poll is None:
+        return 0
+    due_at = last_poll + timedelta(seconds=poll_seconds)
+    return max(0, int((due_at - datetime.now()).total_seconds()))
+
+
+def _stream_new_log_lines(
+    log_path: str | Path | None,
+    *,
+    offsets: dict[str, int],
+    stream: TextIO,
+    max_lines: int = 40,
+) -> None:
+    if not log_path:
+        return
+    path = Path(str(log_path))
+    if not path.is_file():
+        return
+    key = str(path)
+    size = path.stat().st_size
+    offset = min(offsets.get(key, 0), size)
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        handle.seek(offset)
+        chunk = handle.read()
+        offsets[key] = handle.tell()
+    lines = chunk.splitlines()
+    if not lines:
+        return
+    if len(lines) > max_lines:
+        skipped = len(lines) - max_lines
+        lines = [f"... skipped {skipped} older log line(s) ...", *lines[-max_lines:]]
+    for line in lines:
+        print(f"[child] {line}", file=stream)
+
+
+def _wait_with_foreground_updates(
+    config: Mapping[str, Any],
+    state: Mapping[str, Any],
+    *,
+    seconds: int,
+    sleep_fn: Callable[[float], None],
+    stream: TextIO,
+    log_offsets: dict[str, int],
+) -> None:
+    if seconds <= 0:
+        return
+    log_path = state.get("child_log_path")
+    if log_path:
+        print("monitoring child log; press Ctrl-C to terminate the active run", file=stream)
+    if sleep_fn is not time.sleep:
+        _stream_new_log_lines(log_path, offsets=log_offsets, stream=stream)
+        sleep_fn(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    interval = max(1, min(10, seconds))
+    while True:
+        _stream_new_log_lines(log_path, offsets=log_offsets, stream=stream)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        sleep_fn(min(interval, remaining))
+
+
+def _terminate_campaign_state_for_interrupt(
+    config: Mapping[str, Any],
+    state: Mapping[str, Any],
+    *,
+    stream: TextIO,
+) -> dict[str, Any]:
+    next_state = dict(state)
+    pid = next_state.get("pid")
+    try:
+        pid_int = int(pid) if pid is not None else None
+    except (TypeError, ValueError):
+        pid_int = None
+    if pid_int and _is_process_running(pid_int):
+        _terminate_process_group(pid_int)
+    next_state.update(
+        {
+            "status": "terminated",
+            "phase": "interrupted",
+            "process_running": False,
+            "interrupted_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+    )
+    run_dir_text = next_state.get("run_dir")
+    if run_dir_text:
+        run_dir = Path(str(run_dir_text))
+        run_state = _read_json_if_exists(run_dir / "state.json")
+        if run_state:
+            run_state["status"] = "terminated_by_user"
+            run_state["terminated_at"] = _now_iso()
+            _write_json(run_dir / "state.json", run_state)
+    _write_json(_campaign_state_path(config), next_state)
+    print("\nCtrl-C received; terminated the active campaign child process.", file=stream)
+    return next_state
+
+
 def _handle_agent_decision(
     config: Mapping[str, Any],
     *,
@@ -1771,9 +1885,12 @@ def run_campaign_loop(
         return {"state": {"status": "dry_run"}, "status": status, "dry_run": True}
 
     lock_path = _acquire_campaign_lock(config)
+    active_config = dict(config)
+    campaign_state: dict[str, Any] = {}
+    log_offsets: dict[str, int] = {}
     try:
-        active_config = dict(config)
         while True:
+            next_sleep_seconds = int(active_config["runner"]["poll_seconds"])
             state_path = _campaign_state_path(active_config)
             campaign_state = _read_json_if_exists(state_path)
             run_dir_text = campaign_state.get("run_dir")
@@ -1824,18 +1941,30 @@ def run_campaign_loop(
                     stream=stream,
                 )
             elif campaign_state.get("status") == "running" and running:
-                campaign_state["child_status"] = child_status or "running"
-                campaign_state["process_running"] = True
-                campaign_state, active_config = _handle_agent_decision(
-                    active_config,
-                    campaign_state=campaign_state,
-                    campaign_name=campaign_name,
-                    device=device,
-                    active_process_pid=pid_int,
-                    active_run_running=True,
-                    client=client,
-                    stream=stream,
-                )
+                seconds_until_poll = _seconds_until_next_poll(active_config, campaign_state)
+                if seconds_until_poll > 0:
+                    campaign_state["child_status"] = child_status or "running"
+                    campaign_state["process_running"] = True
+                    next_sleep_seconds = seconds_until_poll
+                    next_poll_at = datetime.now() + timedelta(seconds=seconds_until_poll)
+                    print(
+                        f"status: running; run_dir={campaign_state.get('run_dir') or '-'}; "
+                        f"next_poll={next_poll_at.isoformat(timespec='seconds')}",
+                        file=stream,
+                    )
+                else:
+                    campaign_state["child_status"] = child_status or "running"
+                    campaign_state["process_running"] = True
+                    campaign_state, active_config = _handle_agent_decision(
+                        active_config,
+                        campaign_state=campaign_state,
+                        campaign_name=campaign_name,
+                        device=device,
+                        active_process_pid=pid_int,
+                        active_run_running=True,
+                        client=client,
+                        stream=stream,
+                    )
             elif campaign_state.get("status") == "agent_decision_failed":
                 campaign_state, active_config = _handle_agent_decision(
                     active_config,
@@ -1883,10 +2012,24 @@ def run_campaign_loop(
 
             if once:
                 return {"state": campaign_state, "config": active_config}
-            sleep_seconds = int(active_config["runner"]["poll_seconds"])
+            sleep_seconds = max(1, int(next_sleep_seconds))
             next_poll_at = datetime.now() + timedelta(seconds=sleep_seconds)
             print(f"next_poll: {next_poll_at.isoformat(timespec='seconds')}", file=stream)
-            sleep_fn(sleep_seconds)
+            _wait_with_foreground_updates(
+                active_config,
+                campaign_state,
+                seconds=sleep_seconds,
+                sleep_fn=sleep_fn,
+                stream=stream,
+                log_offsets=log_offsets,
+            )
+    except KeyboardInterrupt:
+        interrupted_state = _terminate_campaign_state_for_interrupt(
+            active_config,
+            campaign_state,
+            stream=stream,
+        )
+        return {"state": interrupted_state, "config": active_config, "interrupted": True}
     finally:
         _release_campaign_lock(lock_path)
 

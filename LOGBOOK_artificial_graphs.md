@@ -874,3 +874,26 @@ Current logbook convention: each new run should have one conclusion paragraph, a
 - trial_001 results CSV: [trial_results.csv](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/trials/trial_001/metrics/trial_results.csv)
 - loss PDF: [loss_curves.pdf](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/trials/trial_001/metrics/loss_curves.pdf)
 <!-- nodefield-campaign:artificial_graphs_large_20260629_074601_8a977b:end -->
+
+<!-- nodefield-campaign:artificial_graphs_large_20260629_074601_8a977b:agent:begin -->
+The run finished successfully at the trial level and produced metrics, but it did not generate any feasible samples yet. Compared with the previous strong run, the median violations improved, while the average violations worsened, which suggests some progress on typical cases but persistent high-violation tails.
+
+| trial | average_num_violations | median_num_violations | feasible_rate | note |
+|---|---:|---:|---:|---|
+| trial_001 | 769.8667 | 517.0 | 0.0 | Completed; no feasible samples |
+
+Next, we should keep the same architecture and near-max structural penalties, but tighten the search locally with a lower sampling step size and more total training steps to improve consistency and try to convert lower median violations into first feasible outputs.
+
+#### Files to inspect
+
+- run: [artificial_graphs_large_20260629_074601_8a977b](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b)
+- state: [state.json](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/state.json)
+- proposal: [proposal.json](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/proposal.json)
+- campaign result: [campaign_result.json](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/campaign_result.json)
+- agent decision: [agent_decision.json](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/agent_decision.json)
+- metrics csv: [summary.csv](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/metrics/summary.csv)
+- metrics json: [summary.json](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/metrics/summary.json)
+- campaign config: [campaign.yaml](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/configs/campaign.yaml)
+- base workflow: [base_workflow.yaml](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/configs/base_workflow.yaml)
+- mini-batch log: [mini_batch.log](artifact/artificial_graphs/artificial_graphs_large_20260629_074601_8a977b/logs/mini_batch.log)
+<!-- nodefield-campaign:artificial_graphs_large_20260629_074601_8a977b:agent:end -->

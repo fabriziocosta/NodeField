@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 from pathlib import Path
@@ -987,6 +988,70 @@ def test_campaign_loop_once_launches_child_without_openai(monkeypatch, tmp_path)
 
     assert result["state"]["status"] == "running"
     assert launches == [{"campaign_name": "molecules", "device": "cpu"}]
+
+
+def test_campaign_loop_foreground_streams_child_log_and_ctrl_c_terminates(
+    monkeypatch,
+    tmp_path,
+):
+    campaign_path = _write_agent_loop_campaign(tmp_path)
+    config = nodefield_campaign.load_campaign_config(campaign_path)
+    run_dir = tmp_path / "artifact" / "molecules" / "molecules_foreground"
+    log_path = run_dir / "logs" / "mini_batch.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("training started\nstep 1\n")
+    terminated = []
+
+    def fake_launch(config, *, campaign_name, device, run_timestamp=None, run_id=None):
+        del campaign_name, device, run_timestamp, run_id
+        state = {
+            "campaign": "molecules",
+            "campaign_id": "molecules",
+            "prefix": "molecules",
+            "status": "running",
+            "phase": "mini_batch",
+            "run_dir": str(run_dir),
+            "child_log_path": str(log_path),
+            "pid": 12345,
+            "process_running": True,
+            "poll_seconds": 1,
+            "started_at": "2026-06-25T09:10:11",
+            "updated_at": "2026-06-25T09:10:11",
+        }
+        core_nodefield_campaign._write_json(
+            core_nodefield_campaign._campaign_state_path(config),
+            state,
+        )
+        core_nodefield_campaign._write_json(
+            run_dir / "state.json",
+            {"status": "running", "queued_trials": [{"trial_id": 1, "status": "running"}]},
+        )
+        return state
+
+    def interrupt(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(core_nodefield_campaign, "_launch_mini_batch_child", fake_launch)
+    monkeypatch.setattr(core_nodefield_campaign, "_is_process_running", lambda pid: pid == 12345)
+    monkeypatch.setattr(core_nodefield_campaign, "_terminate_process_group", terminated.append)
+    stream = io.StringIO()
+
+    result = nodefield_campaign.run_campaign_loop(
+        config,
+        campaign_name="molecules",
+        sleep_fn=interrupt,
+        stream=stream,
+    )
+
+    output = stream.getvalue()
+    assert "monitoring child log" in output
+    assert "[child] training started" in output
+    assert "Ctrl-C received" in output
+    assert terminated == [12345]
+    assert result["interrupted"] is True
+    assert result["state"]["status"] == "terminated"
+    run_state = json.loads((run_dir / "state.json").read_text())
+    assert run_state["status"] == "terminated_by_user"
 
 
 def test_campaign_child_process_log_lives_inside_run_directory(tmp_path):

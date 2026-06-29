@@ -46,13 +46,11 @@ agent:
   - model.fixed
   - model.search_space
   max_search_leaf_count: 23
-  reason: Latest mini-batch improved substantially (average/median violations 620.875/578.0
-    from 1274.375/1010.5) but feasible_rate remains 0.0; we should exploit this better
-    region with longer training and slightly smaller sampling steps while keeping
-    high structural penalties.
-  next_attempt: 'Sample one candidate from a narrow exploitative range around the
-    improved run: keep architecture fixed, increase total_steps, keep lambdas very
-    close to 5.0, and lower sampling_step_size to target first feasible outputs.'
+  reason: 'Latest completed trial remains infeasible (feasible_rate=0.0) with mixed
+    quality: median violations improved (517) but average violations regressed (769.87),
+    indicating unstable tails. A focused local exploit step should improve consistency.'
+  next_attempt: Sample 1 local exploit candidate with longer training and smaller
+    sampling step size while keeping architecture fixed and lambdas tightly near 5.0.
   default_trial_patch_space:
     model:
       fixed:
@@ -80,12 +78,12 @@ agent:
           - 4
         transformer_dropout:
           type: real
-          low: 6.0e-05
-          high: 0.00015
+          low: 5.0e-05
+          high: 0.00012
         learning_rate:
           type: real
-          low: 3.7e-06
-          high: 4.6e-06
+          low: 3.4e-06
+          high: 4.1e-06
           scale: log
         batch_size:
           type: choice
@@ -93,36 +91,36 @@ agent:
           - 8
         total_steps:
           type: int
-          low: 6200
-          high: 9000
+          low: 8000
+          high: 12000
       search_space:
         lambda_degree_importance:
           type: real
-          low: 4.9997
+          low: 4.9998
           high: 5.0
         lambda_node_exist_importance:
           type: real
-          low: 4.9985
+          low: 4.999
           high: 5.0
         lambda_node_count_importance:
           type: real
-          low: 4.9995
+          low: 4.9996
           high: 5.0
         lambda_node_label_importance:
           type: real
-          low: 4.9985
+          low: 4.999
           high: 5.0
         lambda_edge_label_importance:
           type: real
-          low: 4.9997
+          low: 4.9998
           high: 5.0
         lambda_direct_edge_importance:
           type: real
-          low: 4.9997
+          low: 4.9998
           high: 5.0
         lambda_auxiliary_edge_importance:
           type: real
-          low: 4.997
+          low: 4.9985
           high: 5.0
         sparse_supervision_mask_ratio:
           type: real
@@ -130,13 +128,13 @@ agent:
           high: 1.0e-08
         sampling_step_size:
           type: real
-          low: 0.00011
-          high: 0.00016
+          low: 9.0e-05
+          high: 0.00013
         lambda_edge_count_importance:
           type: real
-          low: 4.997
+          low: 4.9985
           high: 5.0
         lambda_degree_edge_consistency_importance:
           type: real
-          low: 4.997
+          low: 4.9985
           high: 5.0
