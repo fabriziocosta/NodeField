@@ -33,9 +33,9 @@ class CampaignTrialSelection:
     prefix: str
     run_dir: Path
     trial_dir: Path
-    metrics_path: Path
-    config_path: Path
-    checkpoint_path: Path
+    metrics_path: Path | None
+    config_path: Path | None
+    checkpoint_path: Path | None
     generator_snapshot_path: Path | None
     metrics: dict[str, Any]
 
@@ -146,12 +146,28 @@ def _resolve_generator_snapshot_path(metrics: Mapping[str, Any], trial_dir: Path
     return None
 
 
+def _read_metrics_if_available(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        return _read_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _find_checkpoint_if_available(trial_dir: Path) -> Path | None:
+    try:
+        return _find_checkpoint(trial_dir)
+    except FileNotFoundError:
+        return None
+
+
 def collect_campaign_trial_results(
     *,
     repo_root: str | Path | None = None,
     campaign_state_path: str | Path | None = None,
 ) -> pd.DataFrame:
-    """Collect ranked trial metrics for the latest active campaign."""
+    """Collect ranked trial results for the latest active campaign."""
     root = resolve_repo_root(repo_root)
     if campaign_state_path is None:
         state_path, state = find_latest_campaign_state(root)
@@ -164,32 +180,38 @@ def collect_campaign_trial_results(
     for run_dir in sorted(domain_root.glob(f"{prefix}_*")):
         if not run_dir.is_dir():
             continue
-        for metrics_path in sorted(run_dir.glob("trials/trial_*/metrics.json")):
-            try:
-                metrics = _read_json(metrics_path)
-                checkpoint_path = _find_checkpoint(metrics_path.parent)
-            except (OSError, json.JSONDecodeError, FileNotFoundError):
+        for trial_dir in sorted(path for path in run_dir.glob("trials/trial_*") if path.is_dir()):
+            metrics_path = trial_dir / "metrics.json"
+            metrics = _read_metrics_if_available(metrics_path)
+            checkpoint_path = _find_checkpoint_if_available(trial_dir)
+            generator_snapshot_path = _resolve_generator_snapshot_path(metrics, trial_dir)
+            if checkpoint_path is None and generator_snapshot_path is None:
                 continue
-            config_path = metrics_path.parent / "config.yaml"
-            if not config_path.is_file():
-                continue
-            generator_snapshot_path = _resolve_generator_snapshot_path(metrics, metrics_path.parent)
+            config_path = trial_dir / "config.yaml"
+            config_path_or_empty = str(config_path) if config_path.is_file() else ""
             average = metrics.get("average_num_violations")
-            if average is None:
+            metrics_available = average is not None
+            if not metrics_available and generator_snapshot_path is None:
                 continue
-            sort_key = trial_sort_key(metrics)
+            sort_key = (
+                trial_sort_key(metrics)
+                if metrics_available
+                else (math.inf, math.inf, math.inf, 0.0, 0)
+            )
             rows.append(
                 {
                     **metrics,
+                    "metrics_available": bool(metrics_available),
+                    "model_available": True,
                     "domain": domain,
                     "prefix": prefix,
                     "run_dir": str(run_dir),
                     "run_name": run_dir.name,
-                    "trial_dir": str(metrics_path.parent),
-                    "trial_name": metrics_path.parent.name,
-                    "metrics_path": str(metrics_path),
-                    "config_path": str(config_path),
-                    "checkpoint_path": str(checkpoint_path),
+                    "trial_dir": str(trial_dir),
+                    "trial_name": trial_dir.name,
+                    "metrics_path": str(metrics_path) if metrics_path.is_file() else "",
+                    "config_path": config_path_or_empty,
+                    "checkpoint_path": str(checkpoint_path) if checkpoint_path else "",
                     "generator_snapshot_path": (
                         str(generator_snapshot_path) if generator_snapshot_path else ""
                     ),
@@ -204,7 +226,8 @@ def collect_campaign_trial_results(
             )
     if not rows:
         raise FileNotFoundError(
-            f"No completed trial metrics with checkpoints found for campaign {domain}/{prefix}."
+            "No completed trial metrics or generator snapshots found for campaign "
+            f"{domain}/{prefix}."
         )
     frame = pd.DataFrame(rows)
     frame = frame.sort_values(
@@ -235,7 +258,7 @@ def select_best_campaign_trial(
     repo_root: str | Path | None = None,
     campaign_state_path: str | Path | None = None,
 ) -> CampaignTrialSelection:
-    """Select the lowest-average-violation completed trial for the latest campaign."""
+    """Select the best scored trial, or a model-only trial when metrics are unavailable."""
     frame = collect_campaign_trial_results(
         repo_root=repo_root,
         campaign_state_path=campaign_state_path,
@@ -243,7 +266,12 @@ def select_best_campaign_trial(
     row = frame.iloc[0].to_dict()
     state_path = Path(row["campaign_state_path"]) if row.get("campaign_state_path") else None
     state = _read_json(state_path) if state_path is not None and state_path.is_file() else {}
-    metrics = _read_json(Path(row["metrics_path"]))
+    metrics_path = Path(row["metrics_path"]) if row.get("metrics_path") else None
+    metrics = (
+        _read_json(metrics_path)
+        if metrics_path is not None and metrics_path.is_file()
+        else {}
+    )
     return CampaignTrialSelection(
         campaign_state_path=state_path,
         campaign_state=state,
@@ -251,9 +279,9 @@ def select_best_campaign_trial(
         prefix=str(row["prefix"]),
         run_dir=Path(row["run_dir"]),
         trial_dir=Path(row["trial_dir"]),
-        metrics_path=Path(row["metrics_path"]),
-        config_path=Path(row["config_path"]),
-        checkpoint_path=Path(row["checkpoint_path"]),
+        metrics_path=metrics_path,
+        config_path=Path(row["config_path"]) if row.get("config_path") else None,
+        checkpoint_path=Path(row["checkpoint_path"]) if row.get("checkpoint_path") else None,
         generator_snapshot_path=(
             Path(row["generator_snapshot_path"]) if row.get("generator_snapshot_path") else None
         ),
@@ -378,11 +406,22 @@ def load_campaign_trial_generator(
     if selection.generator_snapshot_path is not None and selection.generator_snapshot_path.is_file():
         graph_generator = load_trial_graph_generator_snapshot(selection.generator_snapshot_path)
         _set_generator_device(graph_generator, device)
-        _load_checkpoint_into_generator(graph_generator, selection.checkpoint_path, device)
+        if selection.checkpoint_path is not None and selection.checkpoint_path.is_file():
+            _load_checkpoint_into_generator(graph_generator, selection.checkpoint_path, device)
+        else:
+            graph_generator.is_fitted_ = True
+            graph_generator.best_checkpoint_path_ = None
+            graph_generator.best_checkpoint_epoch_ = None
         graph_generator.campaign_trial_load_mode_ = "snapshot"
         graph_generator.generator_snapshot_path_ = str(selection.generator_snapshot_path)
+        graph_generator.campaign_trial_metrics_available_ = bool(selection.metrics)
         return graph_generator
 
+    if selection.config_path is None or selection.checkpoint_path is None:
+        raise FileNotFoundError(
+            "Campaign trial has no generator snapshot and cannot be rebuilt because "
+            "config_path or checkpoint_path is missing."
+        )
     warnings.warn(
         "Campaign trial generator snapshot is missing; rebuilding fit artifacts from the "
         "trial config for legacy compatibility. New campaign runs should record "

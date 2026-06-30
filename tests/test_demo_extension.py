@@ -1372,6 +1372,58 @@ def test_campaign_best_model_prefers_product_score_when_available(tmp_path):
     assert selection.metrics["optimization_score"] == 0.05
 
 
+def test_campaign_best_model_includes_snapshot_only_trials_without_metrics(tmp_path):
+    repo_root = tmp_path
+    (repo_root / "conditional_node_field_graph_generator").mkdir()
+    domain_root = repo_root / "artifact" / "artificial_graphs"
+    state_path = domain_root / "artificial_graphs_small_campaign_state.json"
+    run_dir = domain_root / "artificial_graphs_small_20260630_010203_model"
+    trial_dir = run_dir / "trials" / "trial_001"
+    snapshot_path = trial_dir / "model" / "graph_generator.pkl"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text("snapshot")
+    (trial_dir / "config.yaml").write_text(
+        json.dumps(
+            {
+                "experiment": {"random_state": 7, "verbose": 1},
+                "dataset": {"num_graphs": 2},
+                "model": {"fixed": {}, "search_space": {}},
+                "generation": {
+                    "n_samples": 4,
+                    "feasibility_effort": 2,
+                    "feasibility_filter": "none",
+                },
+                "outputs": {"artifact_subdir": "artificial_graphs"},
+            }
+        )
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "campaign": "artificial_graphs",
+                "prefix": "artificial_graphs_small",
+                "status": "running",
+                "run_dir": str(run_dir),
+            }
+        )
+    )
+
+    ranking = campaign_best_model.collect_campaign_trial_results(repo_root=repo_root)
+    selection = campaign_best_model.select_best_campaign_trial(repo_root=repo_root)
+
+    assert len(ranking) == 1
+    assert not bool(ranking.iloc[0]["metrics_available"])
+    assert bool(ranking.iloc[0]["model_available"])
+    assert ranking.iloc[0]["metrics_path"] == ""
+    assert ranking.iloc[0]["checkpoint_path"] == ""
+    assert ranking.iloc[0]["generator_snapshot_path"] == str(snapshot_path.resolve())
+    assert selection.metrics == {}
+    assert selection.metrics_path is None
+    assert selection.checkpoint_path is None
+    assert selection.generator_snapshot_path == snapshot_path.resolve()
+
+
 def test_load_campaign_trial_training_examples_uses_selected_trial_config(
     monkeypatch,
     tmp_path,
@@ -1511,6 +1563,57 @@ def test_load_campaign_trial_generator_uses_snapshot_without_rebuilding(
     assert loaded.generator_snapshot_path_ == str(snapshot_path)
     assert loaded.conditional_node_generator_model.model.weight.item() == pytest.approx(3.0)
     assert loaded.conditional_node_generator_model.model.bias.item() == pytest.approx(1.5)
+
+
+def test_load_campaign_trial_generator_uses_snapshot_without_checkpoint(
+    monkeypatch,
+    tmp_path,
+):
+    snapshot_path = tmp_path / "model" / "graph_generator.pkl"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text("snapshot")
+    selection = _campaign_trial_selection_for_loader(tmp_path, snapshot_path=snapshot_path)
+    selection = campaign_best_model.CampaignTrialSelection(
+        campaign_state_path=selection.campaign_state_path,
+        campaign_state=selection.campaign_state,
+        domain=selection.domain,
+        prefix=selection.prefix,
+        run_dir=selection.run_dir,
+        trial_dir=selection.trial_dir,
+        metrics_path=None,
+        config_path=selection.config_path,
+        checkpoint_path=None,
+        generator_snapshot_path=selection.generator_snapshot_path,
+        metrics={},
+    )
+
+    class _NodeModel:
+        def __init__(self):
+            self.device = torch.device("cpu")
+            self.model = torch.nn.Linear(1, 1)
+
+    class _FakeGenerator:
+        def __init__(self):
+            self.conditional_node_generator_model = _NodeModel()
+
+    generator = _FakeGenerator()
+    monkeypatch.setattr(
+        campaign_best_model,
+        "load_trial_graph_generator_snapshot",
+        lambda path: generator,
+    )
+
+    loaded = campaign_best_model.load_campaign_trial_generator(
+        selection,
+        notebook_context={"NOTEBOOK_DATA_ROOT": tmp_path / "datasets"},
+        device="cpu",
+    )
+
+    assert loaded is generator
+    assert loaded.campaign_trial_load_mode_ == "snapshot"
+    assert loaded.campaign_trial_metrics_available_ is False
+    assert loaded.best_checkpoint_path_ is None
+    assert loaded.best_checkpoint_epoch_ is None
 
 
 def test_load_campaign_trial_generator_legacy_fallback_rebuilds_when_snapshot_missing(
