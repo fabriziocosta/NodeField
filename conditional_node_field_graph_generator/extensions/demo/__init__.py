@@ -13,6 +13,7 @@ from typing import Any
 _EXPORTS = {
     "apply_exact_trial_patch": "...nodefield_campaign",
     "benchmark_regression_guidance": ".pipeline",
+    "build_campaign_trial_artificial_plotter": ".campaign_best_model",
     "build_dataset": ".pipeline",
     "build_graph_generator": ".pipeline",
     "build_zinc_dataset": ".pipeline",
@@ -21,6 +22,7 @@ _EXPORTS = {
     "collect_oracle_trace_rows": ".oracle",
     "compare_real_vs_generated": ".visualization",
     "describe_resume_checkpoint": ".storage",
+    "draw_artificial_graphs": ".artificial",
     "find_latest_checkpoint": ".storage",
     "find_latest_campaign_state": ".campaign_best_model",
     "fit_graph_generator": ".pipeline",

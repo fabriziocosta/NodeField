@@ -1289,6 +1289,32 @@ def test_load_campaign_trial_training_examples_uses_selected_trial_config(
     assert calls["notebook_context"]["NOTEBOOK_DATA_ROOT"] == tmp_path / "datasets"
 
 
+def test_build_campaign_trial_artificial_plotter_uses_dataset_alphabet_config(
+    monkeypatch,
+    tmp_path,
+):
+    repo_root, _state_path = _write_campaign_best_trial_fixture(tmp_path)
+    selection = campaign_best_model.select_best_campaign_trial(repo_root=repo_root)
+    calls = {}
+
+    def fake_plotter(node_alphabet_size, *, node_alphabet_kind, component_specific_alphabets):
+        calls["node_alphabet_size"] = node_alphabet_size
+        calls["node_alphabet_kind"] = node_alphabet_kind
+        calls["component_specific_alphabets"] = component_specific_alphabets
+        return "plotter"
+
+    monkeypatch.setattr(campaign_best_model, "make_artificial_graph_plotter", fake_plotter)
+
+    plotter = campaign_best_model.build_campaign_trial_artificial_plotter(selection)
+
+    assert plotter == "plotter"
+    assert calls == {
+        "node_alphabet_size": 3,
+        "node_alphabet_kind": "int",
+        "component_specific_alphabets": True,
+    }
+
+
 def test_sample_from_best_campaign_trial_forwards_notebook_sampling_overrides(
     monkeypatch,
     tmp_path,

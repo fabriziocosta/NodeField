@@ -12,7 +12,7 @@ import pandas as pd
 import torch
 
 from ...runtime_paths import resolve_repo_root
-from ..synthetic import generate_artificial_dataset
+from ..synthetic import generate_artificial_dataset, make_artificial_graph_plotter
 from .pipeline import build_graph_generator, build_zinc_dataset, sample_hyperparameter_configuration
 
 
@@ -356,6 +356,17 @@ def load_campaign_trial_training_examples(
     return list(graphs[: int(n_examples)])
 
 
+def build_campaign_trial_artificial_plotter(selection: CampaignTrialSelection):
+    """Build the artificial-graph plotter matching the selected trial dataset config."""
+    config = _read_yaml_or_json(selection.config_path)
+    dataset = dict(config.get("dataset", {}))
+    return make_artificial_graph_plotter(
+        int(dataset.get("node_alphabet_size", 3)),
+        node_alphabet_kind=str(dataset.get("node_alphabet_kind", "int")),
+        component_specific_alphabets=bool(dataset.get("component_specific_alphabets", True)),
+    )
+
+
 def sample_from_best_campaign_trial(
     *,
     notebook_context: Mapping[str, Any],
@@ -418,6 +429,7 @@ def sample_from_best_campaign_trial(
 
 __all__ = [
     "CampaignTrialSelection",
+    "build_campaign_trial_artificial_plotter",
     "collect_campaign_trial_results",
     "find_latest_campaign_state",
     "list_campaign_state_paths",
