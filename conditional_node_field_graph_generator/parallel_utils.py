@@ -32,6 +32,7 @@ def _parallel_map(
     max_workers: int,
     verbose: bool = False,
     timeout_seconds: Optional[float] = None,
+    per_job_timeout_seconds: Optional[float] = None,
     timeout_fallback_label: str = "parallel work",
     fallback_on_timeout: bool = True,
     deadline_monotonic: Optional[float] = None,
@@ -44,6 +45,7 @@ def _parallel_map(
             jobs,
             max_workers=max_workers,
             timeout_seconds=float(timeout_seconds),
+            per_job_timeout_seconds=per_job_timeout_seconds,
             timeout_fallback_label=timeout_fallback_label,
             deadline_monotonic=deadline_monotonic,
         )
@@ -141,11 +143,14 @@ def _managed_process_map(
     *,
     max_workers: int,
     timeout_seconds: float,
+    per_job_timeout_seconds: Optional[float],
     timeout_fallback_label: str,
     deadline_monotonic: Optional[float] = None,
 ):
     if timeout_seconds <= 0.0:
         raise TimeoutError("timeout_seconds must be > 0 when provided.")
+    if per_job_timeout_seconds is not None and float(per_job_timeout_seconds) <= 0.0:
+        raise TimeoutError("per_job_timeout_seconds must be > 0 when provided.")
     try:
         context = mp.get_context("fork")
     except ValueError as exc:
@@ -174,24 +179,56 @@ def _managed_process_map(
                 daemon=True,
             )
             process.start()
-            active[next_job_idx] = process
+            active[next_job_idx] = (process, time.monotonic())
             next_job_idx += 1
+
+    def active_timeout_deadline() -> Optional[float]:
+        if per_job_timeout_seconds is None or not active:
+            return None
+        return min(
+            started_at + float(per_job_timeout_seconds)
+            for _process, started_at in active.values()
+        )
+
+    def timed_out_active_job(now: float) -> Optional[int]:
+        if per_job_timeout_seconds is None:
+            return None
+        for job_idx, (_process, started_at) in active.items():
+            if now - started_at >= float(per_job_timeout_seconds):
+                return int(job_idx)
+        return None
 
     try:
         start_available_jobs()
         while completed < len(jobs):
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            timed_out_job_idx = timed_out_active_job(now)
+            if timed_out_job_idx is not None:
+                raise TimeoutError(
+                    f"Process-based {timeout_fallback_label} job exceeded "
+                    f"{float(per_job_timeout_seconds):.1f}s."
+                )
+            remaining = deadline - now
             if remaining <= 0.0:
                 raise TimeoutError(
                     f"Process-based {timeout_fallback_label} exceeded {timeout_seconds:.1f}s."
                 )
+            per_job_deadline = active_timeout_deadline()
+            if per_job_deadline is not None:
+                remaining = min(remaining, max(0.0, per_job_deadline - now))
             try:
                 job_idx, status, payload = result_queue.get(timeout=remaining)
             except queue.Empty as exc:
+                timed_out_job_idx = timed_out_active_job(time.monotonic())
+                if timed_out_job_idx is not None:
+                    raise TimeoutError(
+                        f"Process-based {timeout_fallback_label} job exceeded "
+                        f"{float(per_job_timeout_seconds):.1f}s."
+                    ) from exc
                 raise TimeoutError(
                     f"Process-based {timeout_fallback_label} exceeded {timeout_seconds:.1f}s."
                 ) from exc
-            process = active.pop(job_idx)
+            process, _started_at = active.pop(job_idx)
             process.join(timeout=0.25)
             if process.is_alive():
                 _terminate_process(process)
@@ -202,5 +239,5 @@ def _managed_process_map(
             start_available_jobs()
         return results
     finally:
-        _terminate_processes(active.values())
+        _terminate_processes(process for process, _started_at in active.values())
         result_queue.close()

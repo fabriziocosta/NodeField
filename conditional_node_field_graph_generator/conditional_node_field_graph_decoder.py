@@ -187,7 +187,10 @@ def _decode_single_adjacency_job(
     horizon_max_iterations: int = 1,
     solver_threads: Optional[int] = None,
     deadline_monotonic: Optional[float] = None,
+    per_job_timeout_seconds: Optional[float] = None,
 ) -> Tuple[np.ndarray, AdjacencySolveReport]:
+    if deadline_monotonic is None and per_job_timeout_seconds is not None:
+        deadline_monotonic = time.monotonic() + float(per_job_timeout_seconds)
     decoder = ConditionalNodeFieldGraphDecoder(
         verbose=bool(verbose),
         degree_slack_penalty=degree_slack_penalty,
@@ -963,10 +966,29 @@ class ConditionalNodeFieldGraphDecoder(object):
             configured_solver_timeout,
             timeout_seconds,
         )
-        deadline_monotonic = (
+        worker_limit = max(1, min(int(self.n_jobs), len(predicted_probs_list)))
+        timeout_waves = (
+            (len(predicted_probs_list) + worker_limit - 1) // worker_limit
+            if predicted_probs_list
+            else 1
+        )
+        parent_timeout_seconds = (
             None
             if timeout_seconds is None
-            else time.monotonic() + float(timeout_seconds)
+            else float(timeout_seconds) * float(max(1, timeout_waves))
+        )
+        if (
+            parent_timeout_seconds is not None
+            and self.active_time_limit_seconds is not None
+        ):
+            parent_timeout_seconds = min(
+                parent_timeout_seconds,
+                float(self.active_time_limit_seconds),
+            )
+        parent_deadline_monotonic = (
+            None
+            if parent_timeout_seconds is None
+            else time.monotonic() + float(parent_timeout_seconds)
         )
         jobs = [
             (
@@ -994,7 +1016,8 @@ class ConditionalNodeFieldGraphDecoder(object):
                 int(self.horizon_path_expansion_budget),
                 int(self.horizon_max_iterations),
                 None if self.solver_threads is None else int(self.solver_threads),
-                deadline_monotonic,
+                None,
+                None if timeout_seconds is None else float(timeout_seconds),
             )
             for graph_idx in range(len(predicted_probs_list))
         ]
@@ -1010,10 +1033,11 @@ class ConditionalNodeFieldGraphDecoder(object):
                 jobs,
                 self.n_jobs,
                 verbose=bool(self.verbose),
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=parent_timeout_seconds,
+                per_job_timeout_seconds=timeout_seconds,
                 timeout_fallback_label="parallel adjacency decode",
                 fallback_on_timeout=False,
-                deadline_monotonic=deadline_monotonic,
+                deadline_monotonic=parent_deadline_monotonic,
             )
         elif self.n_jobs == 1 or len(jobs) <= 1:
             results = [_decode_single_adjacency_job(*job) for job in jobs]

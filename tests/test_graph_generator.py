@@ -2215,6 +2215,54 @@ def test_decode_adjacency_matrix_does_not_use_node_embedding_shapes():
     assert adj_mtx_list[0].shape == (2, 2)
 
 
+def test_decode_adjacency_matrix_applies_timeout_per_parallel_graph(monkeypatch):
+    decoder = ConditionalNodeFieldGraphDecoder(
+        verbose=False,
+        n_jobs=2,
+        parallel_decode_timeout_seconds=30.0,
+    )
+    generated_nodes = GeneratedNodeBatch(
+        node_presence_mask=np.asarray(
+            [[True, True], [True, True], [True, True]],
+            dtype=bool,
+        ),
+        node_degree_predictions=np.asarray(
+            [[1, 1], [1, 1], [1, 1]],
+            dtype=float,
+        ),
+        edge_probability_matrices=[
+            np.asarray([[0.0, 0.9], [0.9, 0.0]], dtype=float)
+            for _idx in range(3)
+        ],
+    )
+    captured = {}
+
+    def fake_parallel_map(func, jobs, max_workers, **kwargs):
+        del func
+        captured["jobs"] = jobs
+        captured["max_workers"] = max_workers
+        captured["kwargs"] = kwargs
+        return [
+            (np.zeros((2, 2), dtype=float), None)
+            for _job in jobs
+        ]
+
+    monkeypatch.setattr(decoder_module, "_parallel_map", fake_parallel_map)
+
+    adj_mtx_list = decoder.decode_adjacency_matrix(
+        generated_nodes,
+        predicted_edge_probability_matrices=generated_nodes.edge_probability_matrices,
+    )
+
+    assert len(adj_mtx_list) == 3
+    assert captured["max_workers"] == 2
+    assert captured["kwargs"]["per_job_timeout_seconds"] == pytest.approx(30.0)
+    assert captured["kwargs"]["timeout_seconds"] == pytest.approx(60.0)
+    assert captured["kwargs"]["deadline_monotonic"] is not None
+    assert [job[-2] for job in captured["jobs"]] == [None, None, None]
+    assert [job[-1] for job in captured["jobs"]] == [30.0, 30.0, 30.0]
+
+
 def test_build_single_generated_node_batch_preserves_horizon_predictions():
     generated_nodes = GeneratedNodeBatch(
         node_presence_mask=np.asarray([[True, True], [True, False]], dtype=bool),
@@ -3083,6 +3131,21 @@ def test_timed_serial_map_uses_one_batch_deadline():
             max_workers=1,
             timeout_seconds=0.12,
             timeout_fallback_label="serial test work",
+            fallback_on_timeout=False,
+        )
+    assert time.monotonic() - started < 0.5
+
+
+def test_timed_parallel_map_enforces_per_job_deadline():
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="job exceeded 0.1s"):
+        parallel_utils._parallel_map(
+            _sleep_and_return,
+            [(0.5, 1), (0.5, 2)],
+            max_workers=2,
+            timeout_seconds=2.0,
+            per_job_timeout_seconds=0.1,
+            timeout_fallback_label="per-job test work",
             fallback_on_timeout=False,
         )
     assert time.monotonic() - started < 0.5
