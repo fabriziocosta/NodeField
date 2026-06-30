@@ -15,6 +15,7 @@ import torch
 from ...runtime_paths import resolve_repo_root
 from ..synthetic import generate_artificial_dataset, make_artificial_graph_plotter
 from .pipeline import build_graph_generator, build_zinc_dataset, sample_hyperparameter_configuration
+from .trial_scoring import trial_sort_key
 from .trial_snapshots import (
     load_trial_graph_generator_snapshot,
     trial_graph_generator_snapshot_path,
@@ -174,9 +175,9 @@ def collect_campaign_trial_results(
                 continue
             generator_snapshot_path = _resolve_generator_snapshot_path(metrics, metrics_path.parent)
             average = metrics.get("average_num_violations")
-            feasible_rate = metrics.get("feasible_rate", 0.0)
             if average is None:
                 continue
+            sort_key = trial_sort_key(metrics)
             rows.append(
                 {
                     **metrics,
@@ -195,8 +196,10 @@ def collect_campaign_trial_results(
                     "campaign_state_path": str(state_path) if state_path is not None else "",
                     "campaign_status": state.get("status", ""),
                     "_run_mtime": run_dir.stat().st_mtime,
-                    "_average_sort": float(average),
-                    "_feasible_sort": -float(feasible_rate),
+                    "_optimization_sort": sort_key[0],
+                    "_average_sort": sort_key[1],
+                    "_distance_sort": sort_key[2],
+                    "_feasible_sort": sort_key[3],
                 }
             )
     if not rows:
@@ -205,10 +208,26 @@ def collect_campaign_trial_results(
         )
     frame = pd.DataFrame(rows)
     frame = frame.sort_values(
-        ["_average_sort", "_feasible_sort", "_run_mtime", "run_name", "trial_name"],
-        ascending=[True, True, False, True, True],
+        [
+            "_optimization_sort",
+            "_average_sort",
+            "_distance_sort",
+            "_feasible_sort",
+            "_run_mtime",
+            "run_name",
+            "trial_name",
+        ],
+        ascending=[True, True, True, True, False, True, True],
     ).reset_index(drop=True)
-    return frame.drop(columns=["_average_sort", "_feasible_sort", "_run_mtime"])
+    return frame.drop(
+        columns=[
+            "_optimization_sort",
+            "_average_sort",
+            "_distance_sort",
+            "_feasible_sort",
+            "_run_mtime",
+        ]
+    )
 
 
 def select_best_campaign_trial(

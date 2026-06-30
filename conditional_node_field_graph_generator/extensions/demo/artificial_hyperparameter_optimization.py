@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +19,13 @@ from ...runtime_paths import (
 )
 from ..synthetic import generate_artificial_dataset
 from .pipeline import build_graph_generator, fit_graph_generator, sample_hyperparameter_configuration
+from .trial_scoring import (
+    TRIAL_SORT_ASCENDING,
+    TRIAL_SORT_COLUMNS,
+    mean_graph_embedding,
+    score_generated_graphs,
+    trial_sort_key,
+)
 from .trial_snapshots import save_trial_graph_generator_snapshot
 
 
@@ -155,42 +161,6 @@ def _parse_run_timestamp(value: Any) -> datetime | None:
     )
 
 
-def _number_of_violations(graph_generator: Any, generated_graphs: list[Any]) -> np.ndarray:
-    feasibility_estimator = getattr(graph_generator, "feasibility_estimator", None)
-    if feasibility_estimator is None or not hasattr(feasibility_estimator, "number_of_violations"):
-        raise RuntimeError(
-            "average_num_violations scoring requires graph_generator.feasibility_estimator."
-        )
-    return np.asarray(feasibility_estimator.number_of_violations(generated_graphs), dtype=float)
-
-
-def _score_generated_graphs(graph_generator: Any, generated_graphs: list[Any]) -> dict[str, Any]:
-    if len(generated_graphs) == 0:
-        return {
-            "returned_samples": 0,
-            "average_num_violations": math.inf,
-            "median_num_violations": math.inf,
-            "feasible_count": 0,
-            "feasible_rate": 0.0,
-            "violation_counts": np.asarray([], dtype=float),
-        }
-    violation_counts = _number_of_violations(graph_generator, generated_graphs)
-    if violation_counts.shape[0] != len(generated_graphs):
-        raise RuntimeError(
-            "Feasibility estimator returned an unexpected number of violation counts "
-            f"({violation_counts.shape[0]} for {len(generated_graphs)} graphs)."
-        )
-    feasible_count = int(np.sum(violation_counts == 0))
-    return {
-        "returned_samples": len(generated_graphs),
-        "average_num_violations": float(np.mean(violation_counts)),
-        "median_num_violations": float(np.median(violation_counts)),
-        "feasible_count": feasible_count,
-        "feasible_rate": float(feasible_count / len(generated_graphs)),
-        "violation_counts": violation_counts,
-    }
-
-
 def run_artificial_hyperparameter_optimization(
     config: Mapping[str, Any],
     *,
@@ -231,7 +201,7 @@ def run_artificial_hyperparameter_optimization(
     best_graph_generator = None
     best_samples: list[Any] = []
     best_violation_counts = np.asarray([], dtype=float)
-    best_sort_key = (math.inf, 0.0, 0)
+    best_sort_key = (float("inf"), float("inf"), float("inf"), 0.0, 0)
 
     for trial_id in range(1, int(experiment["n_trials"]) + 1):
         trial_root = artifact_root / "trials" / f"trial_{trial_id:03d}"
@@ -253,6 +223,7 @@ def run_artificial_hyperparameter_optimization(
             graphs,
             checkpoint_root=trial_root / "checkpoints",
         )
+        training_mean_graph_embedding = mean_graph_embedding(graph_generator, list(graphs))
         generator_snapshot_path = save_trial_graph_generator_snapshot(graph_generator, trial_root)
         generated_graphs = list(
             graph_generator.sample(
@@ -261,7 +232,11 @@ def run_artificial_hyperparameter_optimization(
                 feasibility_filter=generation_config["feasibility_filter"],
             )
         )
-        score_info = _score_generated_graphs(graph_generator, generated_graphs)
+        score_info = score_generated_graphs(
+            graph_generator,
+            generated_graphs,
+            training_mean_graph_embedding=training_mean_graph_embedding,
+        )
         row = {
             "trial_id": trial_id,
             **sampled_params,
@@ -271,6 +246,10 @@ def run_artificial_hyperparameter_optimization(
             "median_num_violations": score_info["median_num_violations"],
             "feasible_count": score_info["feasible_count"],
             "feasible_rate": score_info["feasible_rate"],
+            "average_training_embedding_cosine_distance": score_info[
+                "average_training_embedding_cosine_distance"
+            ],
+            "optimization_score": score_info["optimization_score"],
             "feasibility_effort": int(generation_config["feasibility_effort"]),
             "feasibility_filter": generation_config["feasibility_filter"],
             "trial_root": str(trial_root),
@@ -278,11 +257,7 @@ def run_artificial_hyperparameter_optimization(
         if generator_snapshot_path is not None:
             row["generator_snapshot_path"] = generator_snapshot_path
         rows.append(row)
-        sort_key = (
-            float(row["average_num_violations"]),
-            -float(row["feasible_rate"]),
-            int(row["trial_id"]),
-        )
+        sort_key = trial_sort_key(row)
         if sort_key < best_sort_key:
             best_sort_key = sort_key
             best_graph_generator = graph_generator
@@ -290,8 +265,8 @@ def run_artificial_hyperparameter_optimization(
             best_violation_counts = score_info["violation_counts"]
 
     results_df = pd.DataFrame(rows).sort_values(
-        ["average_num_violations", "feasible_rate", "trial_id"],
-        ascending=[True, False, True],
+        TRIAL_SORT_COLUMNS,
+        ascending=TRIAL_SORT_ASCENDING,
     ).reset_index(drop=True)
 
     results_csv_path = None

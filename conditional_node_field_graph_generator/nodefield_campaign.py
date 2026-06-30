@@ -814,7 +814,9 @@ def _format_metric_summary(metrics: Mapping[str, Any]) -> str:
     if not metrics:
         return "no metrics"
     preferred = [
+        "optimization_score",
         "average_num_violations",
+        "average_training_embedding_cosine_distance",
         "median_num_violations",
         "feasible_rate",
         "campaign_trial_id",
@@ -828,6 +830,18 @@ def _format_metric_summary(metrics: Mapping[str, Any]) -> str:
         if key not in preferred and len(parts) < 6:
             parts.append(f"{key}={metrics[key]}")
     return ", ".join(parts)
+
+
+def _metric_sort_key(row: Mapping[str, Any]) -> tuple[float, float, float, float]:
+    optimization = row.get("optimization_score")
+    if optimization is None:
+        optimization = row.get("average_num_violations", float("inf"))
+    return (
+        float(optimization),
+        float(row.get("average_num_violations", float("inf"))),
+        float(row.get("average_training_embedding_cosine_distance", float("inf"))),
+        -float(row.get("feasible_rate", 0.0) or 0.0),
+    )
 
 
 def _proposal_reason(agent: Mapping[str, Any], previous_result: Mapping[str, Any]) -> str:
@@ -1057,7 +1071,9 @@ def _format_logbook_metrics_table(state: Mapping[str, Any]) -> str:
             {
                 "trial": f"trial_{int(trial_id):03d}",
                 "status": trial.get("status", ""),
+                "score": metrics.get("optimization_score", ""),
                 "average": metrics.get("average_num_violations", ""),
+                "distance": metrics.get("average_training_embedding_cosine_distance", ""),
                 "median": metrics.get("median_num_violations", ""),
                 "feasible_rate": metrics.get("feasible_rate", ""),
             }
@@ -1065,12 +1081,18 @@ def _format_logbook_metrics_table(state: Mapping[str, Any]) -> str:
     if not rows:
         return ""
     lines = [
-        "| Trial | Status | Avg violations | Median violations | Feasible rate |",
-        "| --- | --- | ---: | ---: | ---: |",
+        (
+            "| Trial | Status | Product score | Avg violations | "
+            "Embedding distance | Median violations | Feasible rate |"
+        ),
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
-            "| {trial} | {status} | {average} | {median} | {feasible_rate} |".format(**row)
+            (
+                "| {trial} | {status} | {score} | {average} | {distance} | "
+                "{median} | {feasible_rate} |"
+            ).format(**row)
         )
     return "\n".join(lines)
 
@@ -1098,10 +1120,7 @@ def _best_metric_row(state: Mapping[str, Any]) -> Mapping[str, Any]:
         return latest_metrics if isinstance(latest_metrics, Mapping) else {}
     return sorted(
         numeric_rows,
-        key=lambda row: (
-            float(row.get("average_num_violations", float("inf"))),
-            -float(row.get("feasible_rate", 0.0) or 0.0),
-        ),
+        key=_metric_sort_key,
     )[0]
 
 
@@ -1123,7 +1142,10 @@ def _format_logbook_entry(
         conclusion = (
             f"This run {status} after testing {sampled_count} candidate(s). "
             f"The best candidate was {best_trial_name} with "
+            f"product score {best_metrics.get('optimization_score')}, "
             f"average violations {best_metrics.get('average_num_violations')}, "
+            "embedding distance "
+            f"{best_metrics.get('average_training_embedding_cosine_distance')}, "
             f"median violations {best_metrics.get('median_num_violations')}, and "
             f"feasible rate {best_metrics.get('feasible_rate')}; use the table below "
             "to compare the sampled candidates."
@@ -1254,7 +1276,11 @@ def _prepare_run_tree(run_dir: Path) -> None:
 def _summarize_result(result: Mapping[str, Any]) -> dict[str, Any]:
     best_row = result.get("best_row") or {}
     return {
+        "optimization_score": best_row.get("optimization_score"),
         "average_num_violations": best_row.get("average_num_violations"),
+        "average_training_embedding_cosine_distance": best_row.get(
+            "average_training_embedding_cosine_distance"
+        ),
         "median_num_violations": best_row.get("median_num_violations"),
         "feasible_rate": best_row.get("feasible_rate"),
         "trial_id": best_row.get("trial_id"),
@@ -2275,7 +2301,9 @@ def format_campaign_status(status: Mapping[str, Any]) -> str:
 
     def _metric_rows(metrics: Mapping[str, Any]) -> list[tuple[str, Any]]:
         preferred = [
+            "optimization_score",
             "average_num_violations",
+            "average_training_embedding_cosine_distance",
             "median_num_violations",
             "feasible_rate",
             "campaign_trial_id",

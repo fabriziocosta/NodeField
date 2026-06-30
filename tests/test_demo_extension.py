@@ -14,6 +14,7 @@ from conditional_node_field_graph_generator.extensions.demo import (
     campaign_best_model,
     campaign_search,
     nodefield_campaign,
+    trial_scoring,
     zinc_hyperparameter_optimization as zinc_hopt,
 )
 from conditional_node_field_graph_generator.extensions.demo.pipeline import (
@@ -518,7 +519,47 @@ def test_load_zinc_hyperparameter_optimization_config_validates_sections(tmp_pat
         zinc_hopt.load_zinc_hyperparameter_optimization_config(bad_path)
 
 
-def test_run_zinc_hyperparameter_optimization_ranks_average_violations(
+def test_trial_scoring_computes_bounded_embedding_distance_and_product_score():
+    class _FakeGenerator:
+        def node_encode(self, graphs):
+            return [np.asarray(graph, dtype=float) for graph in graphs]
+
+        class feasibility_estimator:
+            @staticmethod
+            def number_of_violations(graphs):
+                return [0 for _graph in graphs]
+
+    graph_embeddings = trial_scoring.graph_embeddings_from_node_embeddings(
+        [
+            np.asarray([[1.0, 2.0], [3.0, 4.0]]),
+            np.asarray([[2.0, 0.0]]),
+        ]
+    )
+    assert graph_embeddings.tolist() == [[4.0, 6.0], [2.0, 0.0]]
+    assert trial_scoring.bounded_cosine_distance(
+        np.asarray([1.0, 0.0]),
+        np.asarray([1.0, 0.0]),
+    ) == pytest.approx(0.0)
+    assert trial_scoring.bounded_cosine_distance(
+        np.asarray([1.0, 0.0]),
+        np.asarray([-1.0, 0.0]),
+    ) == pytest.approx(1.0)
+    training_mean = trial_scoring.mean_graph_embedding(
+        _FakeGenerator(),
+        [np.asarray([[1.0, 0.0]])],
+    )
+    assert training_mean.tolist() == [1.0, 0.0]
+
+    empty_score = trial_scoring.score_generated_graphs(
+        _FakeGenerator(),
+        [],
+        training_mean_graph_embedding=training_mean,
+    )
+    assert empty_score["average_training_embedding_cosine_distance"] == float("inf")
+    assert empty_score["optimization_score"] == float("inf")
+
+
+def test_run_zinc_hyperparameter_optimization_ranks_product_score(
     monkeypatch,
     tmp_path,
 ):
@@ -553,7 +594,25 @@ def test_run_zinc_hyperparameter_optimization_ranks_average_violations(
 
         def sample(self, **kwargs):
             calls["sample"].append(kwargs)
-            return [nx.Graph() for _ in range(int(kwargs["n_samples"]))]
+            generated = []
+            for _index in range(int(kwargs["n_samples"])):
+                graph = nx.Graph()
+                graph.graph["trial_quality"] = self.kwargs["trial_quality"]
+                generated.append(graph)
+            return generated
+
+        def node_encode(self, graphs):
+            calls.setdefault("node_encode", []).append(
+                [graph.graph.get("trial_quality", "training") for graph in graphs]
+            )
+            embeddings = []
+            for graph in graphs:
+                trial_quality = graph.graph.get("trial_quality")
+                if trial_quality == 1.0:
+                    embeddings.append(np.asarray([[0.0, 1.0]], dtype=float))
+                else:
+                    embeddings.append(np.asarray([[1.0, 0.0]], dtype=float))
+            return embeddings
 
     def fake_sample_hyperparameter_configuration(search_space, random_state=None):
         assert search_space == {
@@ -618,12 +677,22 @@ def test_run_zinc_hyperparameter_optimization_ranks_average_violations(
         {"n_samples": 3, "feasibility_effort": 4, "feasibility_filter": "strict"},
     ]
     results_df = result["results_df"]
-    assert results_df["trial_id"].tolist() == [2, 1]
-    assert results_df.loc[0, "average_num_violations"] == pytest.approx(2 / 3)
-    assert results_df.loc[1, "average_num_violations"] == pytest.approx(5.0)
-    assert results_df.loc[0, "feasible_rate"] == pytest.approx(1 / 3)
-    assert results_df.loc[1, "feasible_rate"] == pytest.approx(0.0)
-    assert result["best_row"]["trial_id"] == 2
+    assert calls["node_encode"] == [
+        ["training", "training"],
+        [5.0, 5.0, 5.0],
+        ["training", "training"],
+        [1.0, 1.0, 1.0],
+    ]
+    assert results_df["trial_id"].tolist() == [1, 2]
+    assert results_df.loc[0, "average_num_violations"] == pytest.approx(5.0)
+    assert results_df.loc[1, "average_num_violations"] == pytest.approx(2 / 3)
+    assert results_df.loc[0, "average_training_embedding_cosine_distance"] == pytest.approx(0.0)
+    assert results_df.loc[1, "average_training_embedding_cosine_distance"] == pytest.approx(1.0)
+    assert results_df.loc[0, "optimization_score"] == pytest.approx(0.0)
+    assert results_df.loc[1, "optimization_score"] == pytest.approx(2 / 3)
+    assert results_df.loc[0, "feasible_rate"] == pytest.approx(0.0)
+    assert results_df.loc[1, "feasible_rate"] == pytest.approx(1 / 3)
+    assert result["best_row"]["trial_id"] == 1
     assert result["results_csv_path"].is_file()
     assert ".artifacts" not in str(result["artifact_root"])
     assert result["artifact_root"].name == "unit-zinc-search_20260625_091011_unit"
@@ -1280,6 +1349,29 @@ def test_campaign_best_model_auto_selects_latest_active_campaign_and_ranks_trial
     assert selection.checkpoint_path.name.startswith("best-")
 
 
+def test_campaign_best_model_prefers_product_score_when_available(tmp_path):
+    repo_root, _state_path = _write_campaign_best_trial_fixture(tmp_path)
+    active_trial = (
+        repo_root
+        / "artifact"
+        / "artificial_graphs"
+        / "artificial_graphs_small_20260626_010203_active"
+        / "trials"
+        / "trial_002"
+    )
+    metrics = json.loads((active_trial / "metrics.json").read_text())
+    metrics["optimization_score"] = 0.05
+    metrics["average_training_embedding_cosine_distance"] = 0.05
+    (active_trial / "metrics.json").write_text(json.dumps(metrics))
+
+    ranking = campaign_best_model.collect_campaign_trial_results(repo_root=repo_root)
+    selection = campaign_best_model.select_best_campaign_trial(repo_root=repo_root)
+
+    assert ranking.iloc[0]["run_name"] == "artificial_graphs_small_20260626_010203_active"
+    assert ranking.iloc[0]["trial_name"] == "trial_002"
+    assert selection.metrics["optimization_score"] == 0.05
+
+
 def test_load_campaign_trial_training_examples_uses_selected_trial_config(
     monkeypatch,
     tmp_path,
@@ -1833,7 +1925,9 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
         return {
             "best_row": {
                 "trial_id": 1,
+                "optimization_score": value * (1.0 - value),
                 "average_num_violations": value,
+                "average_training_embedding_cosine_distance": 1.0 - value,
                 "median_num_violations": value,
                 "feasible_rate": 1.0 - value,
             },
@@ -1872,6 +1966,8 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
     assert "runner stdout should be logged" in first_log.read_text()
     assert "runner stderr should be logged" in first_log.read_text()
     assert "loss_pdf_path" in state["latest_metrics"]
+    assert "optimization_score" in state["latest_metrics"]
+    assert "average_training_embedding_cosine_distance" in state["latest_metrics"]
     assert state["latest_metrics"]["generator_snapshot_path"].endswith(
         "trial_002/model/graph_generator.pkl"
     )
@@ -1881,6 +1977,8 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
     assert first_metrics["generator_snapshot_path"].endswith(
         "trial_001/model/graph_generator.pkl"
     )
+    assert "optimization_score" in first_metrics
+    assert "average_training_embedding_cosine_distance" in first_metrics
     assert len(captured_configs) == 2
     assert all(
         item["model"]["search_space"]["trial_quality"]["low"]
@@ -1898,7 +1996,11 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
     )
     logbook_text = (tmp_path / "LOGBOOK.md").read_text()
     assert "Files to inspect" in logbook_text
-    assert "| Trial | Status | Avg violations | Median violations | Feasible rate |" in logbook_text
+    assert (
+        "| Trial | Status | Product score | Avg violations | Embedding distance | "
+        "Median violations | Feasible rate |"
+    ) in logbook_text
+    assert "product score" in logbook_text
     assert "This run completed" in logbook_text
     assert "proposal.json" in logbook_text
     assert "metrics/summary.csv" in logbook_text
