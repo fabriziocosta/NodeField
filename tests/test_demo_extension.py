@@ -7,6 +7,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from conditional_node_field_graph_generator import nodefield_campaign as core_nodefield_campaign
 from conditional_node_field_graph_generator.extensions.demo import (
@@ -569,6 +570,13 @@ def test_run_zinc_hyperparameter_optimization_ranks_average_violations(
         calls["fit_graph_generator"].append((graph_generator, train_graphs, kwargs))
         return graph_generator
 
+    def fake_save_trial_graph_generator_snapshot(graph_generator, trial_root):
+        del graph_generator
+        path = Path(trial_root) / "model" / "graph_generator.pkl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("snapshot")
+        return str(path)
+
     monkeypatch.setattr(zinc_hopt, "build_zinc_dataset", fake_build_zinc_dataset)
     monkeypatch.setattr(
         zinc_hopt,
@@ -577,6 +585,11 @@ def test_run_zinc_hyperparameter_optimization_ranks_average_violations(
     )
     monkeypatch.setattr(zinc_hopt, "build_graph_generator", fake_build_graph_generator)
     monkeypatch.setattr(zinc_hopt, "fit_graph_generator", fake_fit_graph_generator)
+    monkeypatch.setattr(
+        zinc_hopt,
+        "save_trial_graph_generator_snapshot",
+        fake_save_trial_graph_generator_snapshot,
+    )
 
     config = _base_zinc_hyperparameter_optimization_config()
     config["outputs"]["artifact_root"] = str(tmp_path / "artifact")
@@ -615,6 +628,11 @@ def test_run_zinc_hyperparameter_optimization_ranks_average_violations(
     assert ".artifacts" not in str(result["artifact_root"])
     assert result["artifact_root"].name == "unit-zinc-search_20260625_091011_unit"
     assert result["results_csv_path"].parent.name == "metrics"
+    assert "generator_snapshot_path" in results_df.columns
+    assert all(
+        Path(path).name == "graph_generator.pkl"
+        for path in results_df["generator_snapshot_path"]
+    )
 
 
 def test_campaign_patch_space_validation_and_sampling_is_deterministic():
@@ -1315,6 +1333,144 @@ def test_build_campaign_trial_artificial_plotter_uses_dataset_alphabet_config(
     }
 
 
+def _campaign_trial_selection_for_loader(tmp_path, *, snapshot_path=None):
+    checkpoint_path = tmp_path / "best.ckpt"
+    target_model = torch.nn.Linear(1, 1)
+    with torch.no_grad():
+        target_model.weight.fill_(3.0)
+        target_model.bias.fill_(1.5)
+    torch.save({"state_dict": target_model.state_dict(), "epoch": 4}, checkpoint_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "experiment": {"random_state": 7, "verbose": 1},
+                "dataset": {"num_graphs": 2, "min_size": 3, "max_size": 4, "random_state": 7},
+                "model": {"fixed": {}, "search_space": {}},
+                "generation": {
+                    "n_samples": 2,
+                    "feasibility_effort": 2,
+                    "feasibility_filter": "none",
+                },
+                "outputs": {"artifact_subdir": "molecules"},
+            }
+        )
+    )
+    return campaign_best_model.CampaignTrialSelection(
+        campaign_state_path=None,
+        campaign_state={},
+        domain="molecules",
+        prefix="molecules_small",
+        run_dir=tmp_path,
+        trial_dir=tmp_path / "trial_001",
+        metrics_path=tmp_path / "metrics.json",
+        config_path=config_path,
+        checkpoint_path=checkpoint_path,
+        generator_snapshot_path=snapshot_path,
+        metrics={},
+    )
+
+
+def test_load_campaign_trial_generator_uses_snapshot_without_rebuilding(
+    monkeypatch,
+    tmp_path,
+):
+    snapshot_path = tmp_path / "model" / "graph_generator.pkl"
+    snapshot_path.parent.mkdir(parents=True)
+    snapshot_path.write_text("snapshot")
+    selection = _campaign_trial_selection_for_loader(tmp_path, snapshot_path=snapshot_path)
+
+    class _NodeModel:
+        def __init__(self):
+            self.device = torch.device("cpu")
+            self.model = torch.nn.Linear(1, 1)
+
+    class _FakeGenerator:
+        def __init__(self):
+            self.conditional_node_generator_model = _NodeModel()
+
+    generator = _FakeGenerator()
+
+    monkeypatch.setattr(
+        campaign_best_model,
+        "load_trial_graph_generator_snapshot",
+        lambda path: generator,
+    )
+    monkeypatch.setattr(
+        campaign_best_model,
+        "_build_dataset_for_trial",
+        lambda *args, **kwargs: pytest.fail("snapshot load should not rebuild dataset"),
+    )
+    monkeypatch.setattr(
+        campaign_best_model,
+        "_setup_generator_for_checkpoint",
+        lambda *args, **kwargs: pytest.fail("snapshot load should not refit setup artifacts"),
+    )
+
+    loaded = campaign_best_model.load_campaign_trial_generator(
+        selection,
+        notebook_context={"NOTEBOOK_DATA_ROOT": tmp_path / "datasets"},
+        device="cpu",
+    )
+
+    assert loaded is generator
+    assert loaded.campaign_trial_load_mode_ == "snapshot"
+    assert loaded.best_checkpoint_epoch_ == 4
+    assert loaded.generator_snapshot_path_ == str(snapshot_path)
+    assert loaded.conditional_node_generator_model.model.weight.item() == pytest.approx(3.0)
+    assert loaded.conditional_node_generator_model.model.bias.item() == pytest.approx(1.5)
+
+
+def test_load_campaign_trial_generator_legacy_fallback_rebuilds_when_snapshot_missing(
+    monkeypatch,
+    tmp_path,
+):
+    selection = _campaign_trial_selection_for_loader(tmp_path, snapshot_path=None)
+    calls = {"build_dataset": 0, "setup": 0}
+
+    class _NodeModel:
+        def __init__(self):
+            self.device = torch.device("cpu")
+            self.model = torch.nn.Linear(1, 1)
+
+    class _FakeGenerator:
+        def __init__(self):
+            self.conditional_node_generator_model = _NodeModel()
+
+    generator = _FakeGenerator()
+
+    def fake_build_dataset(config, notebook_context):
+        del config, notebook_context
+        calls["build_dataset"] += 1
+        return ["g1", "g2"]
+
+    def fake_setup(graph_generator, graphs):
+        assert graph_generator is generator
+        assert graphs == ["g1", "g2"]
+        calls["setup"] += 1
+
+    monkeypatch.setattr(campaign_best_model, "_build_dataset_for_trial", fake_build_dataset)
+    monkeypatch.setattr(campaign_best_model, "_setup_generator_for_checkpoint", fake_setup)
+    monkeypatch.setattr(
+        campaign_best_model,
+        "sample_hyperparameter_configuration",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(campaign_best_model, "build_graph_generator", lambda **kwargs: generator)
+
+    with pytest.warns(RuntimeWarning, match="snapshot is missing"):
+        loaded = campaign_best_model.load_campaign_trial_generator(
+            selection,
+            notebook_context={"NOTEBOOK_DATA_ROOT": tmp_path / "datasets"},
+            device="cpu",
+        )
+
+    assert loaded is generator
+    assert loaded.campaign_trial_load_mode_ == "legacy_rebuild"
+    assert calls == {"build_dataset": 1, "setup": 1}
+    assert loaded.conditional_node_generator_model.model.weight.item() == pytest.approx(3.0)
+
+
 def test_sample_from_best_campaign_trial_forwards_notebook_sampling_overrides(
     monkeypatch,
     tmp_path,
@@ -1692,6 +1848,11 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
         "_domain_runner",
         lambda domain: (fake_loader, fake_runner),
     )
+    monkeypatch.setattr(
+        core_nodefield_campaign,
+        "_save_result_generator_snapshot",
+        lambda result, trial_dir: str(Path(trial_dir) / "model" / "graph_generator.pkl"),
+    )
 
     result = nodefield_campaign.run_campaign_once(
         config,
@@ -1711,6 +1872,15 @@ def test_campaign_mini_batch_execution_writes_state_and_metrics(monkeypatch, tmp
     assert "runner stdout should be logged" in first_log.read_text()
     assert "runner stderr should be logged" in first_log.read_text()
     assert "loss_pdf_path" in state["latest_metrics"]
+    assert state["latest_metrics"]["generator_snapshot_path"].endswith(
+        "trial_002/model/graph_generator.pkl"
+    )
+    first_metrics = json.loads(
+        (result["run_dir"] / "trials" / "trial_001" / "metrics.json").read_text()
+    )
+    assert first_metrics["generator_snapshot_path"].endswith(
+        "trial_001/model/graph_generator.pkl"
+    )
     assert len(captured_configs) == 2
     assert all(
         item["model"]["search_space"]["trial_quality"]["low"]

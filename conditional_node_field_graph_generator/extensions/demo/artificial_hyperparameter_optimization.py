@@ -20,6 +20,7 @@ from ...runtime_paths import (
 )
 from ..synthetic import generate_artificial_dataset
 from .pipeline import build_graph_generator, fit_graph_generator, sample_hyperparameter_configuration
+from .trial_snapshots import save_trial_graph_generator_snapshot
 
 
 _REQUIRED_TOP_LEVEL_SECTIONS = ("experiment", "dataset", "model", "generation", "outputs")
@@ -252,6 +253,7 @@ def run_artificial_hyperparameter_optimization(
             graphs,
             checkpoint_root=trial_root / "checkpoints",
         )
+        generator_snapshot_path = save_trial_graph_generator_snapshot(graph_generator, trial_root)
         generated_graphs = list(
             graph_generator.sample(
                 n_samples=int(generation_config["n_samples"]),
@@ -273,6 +275,8 @@ def run_artificial_hyperparameter_optimization(
             "feasibility_filter": generation_config["feasibility_filter"],
             "trial_root": str(trial_root),
         }
+        if generator_snapshot_path is not None:
+            row["generator_snapshot_path"] = generator_snapshot_path
         rows.append(row)
         sort_key = (
             float(row["average_num_violations"]),

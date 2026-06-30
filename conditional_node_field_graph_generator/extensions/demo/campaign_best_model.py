@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,6 +15,10 @@ import torch
 from ...runtime_paths import resolve_repo_root
 from ..synthetic import generate_artificial_dataset, make_artificial_graph_plotter
 from .pipeline import build_graph_generator, build_zinc_dataset, sample_hyperparameter_configuration
+from .trial_snapshots import (
+    load_trial_graph_generator_snapshot,
+    trial_graph_generator_snapshot_path,
+)
 
 
 TERMINAL_CAMPAIGN_STATUSES = {"campaign_completed", "openai_credits_exhausted"}
@@ -30,6 +35,7 @@ class CampaignTrialSelection:
     metrics_path: Path
     config_path: Path
     checkpoint_path: Path
+    generator_snapshot_path: Path | None
     metrics: dict[str, Any]
 
 
@@ -127,6 +133,18 @@ def _find_checkpoint(trial_dir: Path) -> Path:
     raise FileNotFoundError(f"No checkpoint found under {trial_dir}")
 
 
+def _resolve_generator_snapshot_path(metrics: Mapping[str, Any], trial_dir: Path) -> Path | None:
+    configured_path = metrics.get("generator_snapshot_path")
+    if configured_path:
+        path = Path(str(configured_path)).expanduser()
+        if path.is_file():
+            return path.resolve()
+    stable_path = trial_graph_generator_snapshot_path(trial_dir)
+    if stable_path.is_file():
+        return stable_path
+    return None
+
+
 def collect_campaign_trial_results(
     *,
     repo_root: str | Path | None = None,
@@ -154,6 +172,7 @@ def collect_campaign_trial_results(
             config_path = metrics_path.parent / "config.yaml"
             if not config_path.is_file():
                 continue
+            generator_snapshot_path = _resolve_generator_snapshot_path(metrics, metrics_path.parent)
             average = metrics.get("average_num_violations")
             feasible_rate = metrics.get("feasible_rate", 0.0)
             if average is None:
@@ -170,6 +189,9 @@ def collect_campaign_trial_results(
                     "metrics_path": str(metrics_path),
                     "config_path": str(config_path),
                     "checkpoint_path": str(checkpoint_path),
+                    "generator_snapshot_path": (
+                        str(generator_snapshot_path) if generator_snapshot_path else ""
+                    ),
                     "campaign_state_path": str(state_path) if state_path is not None else "",
                     "campaign_status": state.get("status", ""),
                     "_run_mtime": run_dir.stat().st_mtime,
@@ -213,6 +235,9 @@ def select_best_campaign_trial(
         metrics_path=Path(row["metrics_path"]),
         config_path=Path(row["config_path"]),
         checkpoint_path=Path(row["checkpoint_path"]),
+        generator_snapshot_path=(
+            Path(row["generator_snapshot_path"]) if row.get("generator_snapshot_path") else None
+        ),
         metrics=metrics,
     )
 
@@ -309,13 +334,43 @@ def _set_generator_device(graph_generator: Any, device: str) -> None:
         node_model.model.to(resolved_device)
 
 
+def _load_checkpoint_into_generator(
+    graph_generator: Any,
+    checkpoint_path: Path,
+    device: str,
+) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    graph_generator.conditional_node_generator_model.model.load_state_dict(state_dict)
+    _set_generator_device(graph_generator, device)
+    graph_generator.is_fitted_ = True
+    graph_generator.best_checkpoint_path_ = str(checkpoint_path)
+    graph_generator.best_checkpoint_epoch_ = checkpoint.get("epoch")
+    return checkpoint
+
+
 def load_campaign_trial_generator(
     selection: CampaignTrialSelection,
     *,
     notebook_context: Mapping[str, Any],
     device: str = "cpu",
 ) -> Any:
-    """Rebuild a campaign trial generator and load the selected checkpoint weights."""
+    """Load a campaign trial generator snapshot and apply the selected checkpoint weights."""
+    if selection.generator_snapshot_path is not None and selection.generator_snapshot_path.is_file():
+        graph_generator = load_trial_graph_generator_snapshot(selection.generator_snapshot_path)
+        _set_generator_device(graph_generator, device)
+        _load_checkpoint_into_generator(graph_generator, selection.checkpoint_path, device)
+        graph_generator.campaign_trial_load_mode_ = "snapshot"
+        graph_generator.generator_snapshot_path_ = str(selection.generator_snapshot_path)
+        return graph_generator
+
+    warnings.warn(
+        "Campaign trial generator snapshot is missing; rebuilding fit artifacts from the "
+        "trial config for legacy compatibility. New campaign runs should record "
+        "generator_snapshot_path in metrics.json.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     config = _read_yaml_or_json(selection.config_path)
     experiment = config["experiment"]
     model_config = config["model"]
@@ -334,13 +389,9 @@ def load_campaign_trial_generator(
     graph_generator = build_graph_generator(**generator_kwargs)
     _set_generator_device(graph_generator, device)
     _setup_generator_for_checkpoint(graph_generator, graphs)
-    checkpoint = torch.load(selection.checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = checkpoint.get("state_dict", checkpoint)
-    graph_generator.conditional_node_generator_model.model.load_state_dict(state_dict)
-    _set_generator_device(graph_generator, device)
-    graph_generator.is_fitted_ = True
-    graph_generator.best_checkpoint_path_ = str(selection.checkpoint_path)
-    graph_generator.best_checkpoint_epoch_ = checkpoint.get("epoch")
+    _load_checkpoint_into_generator(graph_generator, selection.checkpoint_path, device)
+    graph_generator.campaign_trial_load_mode_ = "legacy_rebuild"
+    graph_generator.generator_snapshot_path_ = None
     return graph_generator
 
 

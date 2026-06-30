@@ -1282,6 +1282,15 @@ def _export_trial_loss_pdf(result: Mapping[str, Any], trial_dir: Path) -> str | 
     return str(pdf_path)
 
 
+def _save_result_generator_snapshot(result: Mapping[str, Any], trial_dir: Path) -> str | None:
+    graph_generator = result.get("best_graph_generator")
+    if graph_generator is None:
+        return None
+    from .extensions.demo.trial_snapshots import save_trial_graph_generator_snapshot
+
+    return save_trial_graph_generator_snapshot(graph_generator, trial_dir)
+
+
 def _write_summary_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({key for row in rows for key in row})
@@ -1374,6 +1383,7 @@ def run_campaign_once(
                 with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
                     result = runner(loaded_workflow_config, notebook_context=_notebook_context(config))
                     loss_pdf_path = _export_trial_loss_pdf(result, trial_dir)
+                    generator_snapshot_path = _save_result_generator_snapshot(result, trial_dir)
         except Exception as exc:
             state["status"] = "failed"
             state["queued_trials"][index - 1]["status"] = "failed"
@@ -1403,6 +1413,8 @@ def run_campaign_once(
         trial_metrics = {"campaign_trial_id": index, **_summarize_result(result)}
         if loss_pdf_path:
             trial_metrics["loss_pdf_path"] = loss_pdf_path
+        if generator_snapshot_path:
+            trial_metrics["generator_snapshot_path"] = generator_snapshot_path
         metrics_rows.append(trial_metrics)
         _write_json(trial_dir / "metrics.json", trial_metrics)
 
@@ -1415,6 +1427,7 @@ def run_campaign_once(
                 "trial_dir": str(trial_dir),
                 "log_path": str(trial_log_path),
                 "loss_pdf_path": loss_pdf_path,
+                "generator_snapshot_path": generator_snapshot_path,
             }
         )
         state["latest_metrics"] = trial_metrics
