@@ -1262,6 +1262,33 @@ def test_campaign_best_model_auto_selects_latest_active_campaign_and_ranks_trial
     assert selection.checkpoint_path.name.startswith("best-")
 
 
+def test_load_campaign_trial_training_examples_uses_selected_trial_config(
+    monkeypatch,
+    tmp_path,
+):
+    repo_root, _state_path = _write_campaign_best_trial_fixture(tmp_path)
+    selection = campaign_best_model.select_best_campaign_trial(repo_root=repo_root)
+    calls = {}
+
+    def fake_build_dataset(config, notebook_context):
+        calls["config_path"] = selection.config_path
+        calls["dataset"] = dict(config["dataset"])
+        calls["notebook_context"] = dict(notebook_context)
+        return ["g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8"]
+
+    monkeypatch.setattr(campaign_best_model, "_build_dataset_for_trial", fake_build_dataset)
+
+    examples = campaign_best_model.load_campaign_trial_training_examples(
+        selection,
+        notebook_context={"NOTEBOOK_DATA_ROOT": tmp_path / "datasets"},
+        n_examples=7,
+    )
+
+    assert examples == ["g1", "g2", "g3", "g4", "g5", "g6", "g7"]
+    assert calls["dataset"]["num_graphs"] == 2
+    assert calls["notebook_context"]["NOTEBOOK_DATA_ROOT"] == tmp_path / "datasets"
+
+
 def test_sample_from_best_campaign_trial_forwards_notebook_sampling_overrides(
     monkeypatch,
     tmp_path,

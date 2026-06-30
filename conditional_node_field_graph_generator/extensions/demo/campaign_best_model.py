@@ -344,6 +344,18 @@ def load_campaign_trial_generator(
     return graph_generator
 
 
+def load_campaign_trial_training_examples(
+    selection: CampaignTrialSelection,
+    *,
+    notebook_context: Mapping[str, Any],
+    n_examples: int = 7,
+) -> list[Any]:
+    """Rebuild the selected trial training dataset and return example graphs."""
+    config = _read_yaml_or_json(selection.config_path)
+    graphs = _build_dataset_for_trial(config, notebook_context)
+    return list(graphs[: int(n_examples)])
+
+
 def sample_from_best_campaign_trial(
     *,
     notebook_context: Mapping[str, Any],
@@ -410,6 +422,7 @@ __all__ = [
     "find_latest_campaign_state",
     "list_campaign_state_paths",
     "load_campaign_trial_generator",
+    "load_campaign_trial_training_examples",
     "sample_from_best_campaign_trial",
     "select_best_campaign_trial",
 ]

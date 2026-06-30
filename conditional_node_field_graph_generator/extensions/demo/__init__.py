@@ -33,6 +33,7 @@ _EXPORTS = {
     "load_artificial_hyperparameter_optimization_config": ".artificial_hyperparameter_optimization",
     "load_campaign_config": "...nodefield_campaign",
     "load_campaign_trial_generator": ".campaign_best_model",
+    "load_campaign_trial_training_examples": ".campaign_best_model",
     "load_graph_generator": "...persistence",
     "load_zinc_hyperparameter_optimization_config": ".zinc_hyperparameter_optimization",
     "offset_neg_graphs": ".visualization",
