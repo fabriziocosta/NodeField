@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import inspect
+import contextlib
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 import warnings
@@ -173,6 +174,25 @@ class FeasibilityEstimator:
             feasibility_estimator.parallel = parallel
         return self
 
+    @contextlib.contextmanager
+    def _temporary_child_serial_execution(self):
+        original_values = []
+        for feasibility_estimator in self.feasibility_estimators:
+            for attr, value in (
+                ("n_jobs", 1),
+                ("parallel", False),
+                ("backend", "threading"),
+            ):
+                if not hasattr(feasibility_estimator, attr):
+                    continue
+                original_values.append((feasibility_estimator, attr, getattr(feasibility_estimator, attr)))
+                setattr(feasibility_estimator, attr, value)
+        try:
+            yield
+        finally:
+            for feasibility_estimator, attr, original_value in original_values:
+                setattr(feasibility_estimator, attr, original_value)
+
     def set_active_mask(self, mask):
         self.active_mask = self._normalize_mask(mask)
         return self
@@ -309,10 +329,11 @@ class FeasibilityEstimator:
         selected_estimators = self._selected_estimators(estimator_mask=estimator_mask)
         if not selected_estimators:
             return np.zeros((len(graphs), 0), dtype=int)
-        preds = [
-            np.asarray(feasibility_estimator.number_of_violations(graphs)).reshape(-1, 1)
-            for _, _, feasibility_estimator in selected_estimators
-        ]
+        with self._temporary_child_serial_execution():
+            preds = [
+                np.asarray(feasibility_estimator.number_of_violations(graphs)).reshape(-1, 1)
+                for _, _, feasibility_estimator in selected_estimators
+            ]
         return np.hstack(preds)
 
     def number_of_violations(self, graphs, estimator_mask=None):
@@ -332,14 +353,31 @@ class FeasibilityEstimator:
             return violating_sets
         base_budgets = self._resolve_oracle_cut_budgets(cut_budget_per_estimator)
         estimator_violations_by_estimator = []
-        for estimator_idx, _, feasibility_estimator in selected_estimators:
-            if not hasattr(feasibility_estimator, "violating_edge_sets"):
-                estimator_violations_by_estimator.append((estimator_idx, [[] for _ in range(len(graphs))]))
-                continue
-            estimator_violations = []
-            for graph_violations in feasibility_estimator.violating_edge_sets(graphs):
-                estimator_violations.append(self._deduplicate_frozensets(graph_violations))
-            estimator_violations_by_estimator.append((estimator_idx, estimator_violations))
+        with self._temporary_child_serial_execution():
+            for estimator_idx, estimator_name, feasibility_estimator in selected_estimators:
+                if not hasattr(feasibility_estimator, "violating_edge_sets"):
+                    estimator_violations_by_estimator.append((estimator_idx, [[] for _ in range(len(graphs))]))
+                    continue
+                estimator_violations = []
+                try:
+                    raw_violations = feasibility_estimator.violating_edge_sets(graphs)
+                except SystemError as exc:
+                    warnings.warn(
+                        "Skipping oracle edge cuts for feasibility estimator "
+                        f"{estimator_name!r} because the external abstractgraph "
+                        f"decomposition failed: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    raw_violations = [[] for _ in range(len(graphs))]
+                for graph_violations in raw_violations:
+                    estimator_violations.append(self._deduplicate_frozensets(graph_violations))
+                if len(estimator_violations) != len(graphs):
+                    raise ValueError(
+                        "feasibility_estimator.violating_edge_sets() must return one "
+                        "entry per input graph."
+                    )
+                estimator_violations_by_estimator.append((estimator_idx, estimator_violations))
 
         for graph_idx in range(len(graphs)):
             per_estimator_counts = np.asarray(

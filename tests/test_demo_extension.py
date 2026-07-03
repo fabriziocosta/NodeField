@@ -2410,6 +2410,25 @@ class _MaskAwareFeasibilityLeaf:
         return [list(self._violating_edge_sets) for _ in graphs]
 
 
+class _ExecutionRecordingFeasibilityLeaf(_MaskAwareFeasibilityLeaf):
+    def __init__(self, accepted_ids, n_jobs, backend="dill"):
+        super().__init__(accepted_ids)
+        self.n_jobs = n_jobs
+        self.parallel = True
+        self.backend = backend
+        self.seen_execution_settings = []
+
+    def number_of_violations(self, graphs):
+        self.seen_execution_settings.append((self.n_jobs, self.parallel, self.backend))
+        return super().number_of_violations(graphs)
+
+
+class _BrokenOracleCutFeasibilityLeaf(_ExecutionRecordingFeasibilityLeaf):
+    def violating_edge_sets(self, graphs):
+        self.seen_execution_settings.append((self.n_jobs, self.parallel, self.backend))
+        raise SystemError("abstractgraph decomposition failed")
+
+
 def _oracle_test_graph(graph_id):
     graph = nx.Graph()
     graph.graph["graph_id"] = graph_id
@@ -2435,6 +2454,40 @@ def test_demo_feasibility_estimator_mask_selects_active_levels():
 
     estimator.set_active_mask([0, 1])
     assert estimator.predict(graphs).tolist() == [False, True]
+
+
+def test_demo_feasibility_estimator_counts_violations_serially_and_restores_child_execution_settings():
+    graphs = [_oracle_test_graph(0), _oracle_test_graph(1)]
+    first = _ExecutionRecordingFeasibilityLeaf({0}, n_jobs=-1)
+    second = _ExecutionRecordingFeasibilityLeaf({1}, n_jobs=4, backend="loky")
+    estimator = FeasibilityEstimator(
+        [first, second],
+        estimator_names=["first", "second"],
+    )
+
+    assert estimator.number_of_violations(graphs).tolist() == [1, 1]
+    assert first.seen_execution_settings == [(1, False, "threading")]
+    assert second.seen_execution_settings == [(1, False, "threading")]
+    assert first.n_jobs == -1
+    assert first.parallel is True
+    assert first.backend == "dill"
+    assert second.n_jobs == 4
+    assert second.parallel is True
+    assert second.backend == "loky"
+
+
+def test_demo_feasibility_estimator_skips_broken_oracle_cuts_and_restores_child_execution_settings():
+    graph = _oracle_test_graph(0)
+    broken = _BrokenOracleCutFeasibilityLeaf({0}, n_jobs=-1)
+    estimator = FeasibilityEstimator([broken], estimator_names=["broken"])
+
+    with pytest.warns(RuntimeWarning, match="Skipping oracle edge cuts"):
+        assert estimator.violating_edge_sets([graph]) == [[]]
+
+    assert broken.seen_execution_settings == [(1, False, "threading")]
+    assert broken.n_jobs == -1
+    assert broken.parallel is True
+    assert broken.backend == "dill"
 
 
 def test_demo_feasibility_estimator_caps_oracle_cuts_per_level():

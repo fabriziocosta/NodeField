@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import random
 import time
 from typing import Any, FrozenSet, List, Optional, Sequence
+import warnings
 
 import numpy as np
 
@@ -534,59 +535,71 @@ def decode_generated_nodes_with_oracle(
                     budget=add_edge_repair_budget,
                 )
                 if proposals:
-                    current_violation_counts = np.asarray(
-                        owner.feasibility_estimator.number_of_violations([graph]),
-                        dtype=int,
-                    ).reshape(-1)
-                    if current_violation_counts.size != 1:
-                        raise ValueError(
-                            "feasibility_estimator.number_of_violations() must return "
-                            "one count per input graph."
-                        )
-                    current_violation_count = int(current_violation_counts[0])
-                    candidate_states = []
-                    candidate_graphs = []
-                    for proposal in proposals:
-                        candidate_adj_mtx = np.asarray(single_adj_mtx, dtype=int).copy()
-                        i, j = proposal.edge
-                        candidate_adj_mtx[i, j] = candidate_adj_mtx[j, i] = 1
-                        candidate_edge_label_matrix = np.asarray(
-                            current_edge_label_matrix,
-                            dtype=object,
-                        ).copy()
-                        candidate_edge_label_matrix[i, j] = proposal.label
-                        candidate_edge_label_matrix[j, i] = proposal.label
-                        candidate_graph = assemble_graph(
-                            existence_mask,
-                            current_node_labels,
-                            np.asarray(
-                                edge_label_matrix_to_list(
+                    try:
+                        current_violation_counts = np.asarray(
+                            owner.feasibility_estimator.number_of_violations([graph]),
+                            dtype=int,
+                        ).reshape(-1)
+                        if current_violation_counts.size != 1:
+                            raise ValueError(
+                                "feasibility_estimator.number_of_violations() must return "
+                                "one count per input graph."
+                            )
+                        current_violation_count = int(current_violation_counts[0])
+                        candidate_states = []
+                        candidate_graphs = []
+                        for proposal in proposals:
+                            candidate_adj_mtx = np.asarray(single_adj_mtx, dtype=int).copy()
+                            i, j = proposal.edge
+                            candidate_adj_mtx[i, j] = candidate_adj_mtx[j, i] = 1
+                            candidate_edge_label_matrix = np.asarray(
+                                current_edge_label_matrix,
+                                dtype=object,
+                            ).copy()
+                            candidate_edge_label_matrix[i, j] = proposal.label
+                            candidate_edge_label_matrix[j, i] = proposal.label
+                            candidate_graph = assemble_graph(
+                                existence_mask,
+                                current_node_labels,
+                                np.asarray(
+                                    edge_label_matrix_to_list(
+                                        candidate_adj_mtx,
+                                        candidate_edge_label_matrix,
+                                    ),
+                                    dtype=object,
+                                ),
+                                candidate_adj_mtx,
+                            )
+                            candidate_states.append(
+                                (
+                                    proposal,
                                     candidate_adj_mtx,
                                     candidate_edge_label_matrix,
-                                ),
-                                dtype=object,
-                            ),
-                            candidate_adj_mtx,
-                        )
-                        candidate_states.append(
-                            (
-                                proposal,
-                                candidate_adj_mtx,
-                                candidate_edge_label_matrix,
-                                candidate_graph,
+                                    candidate_graph,
+                                )
                             )
-                        )
-                        candidate_graphs.append(candidate_graph)
+                            candidate_graphs.append(candidate_graph)
 
-                    candidate_violation_counts = np.asarray(
-                        owner.feasibility_estimator.number_of_violations(candidate_graphs),
-                        dtype=int,
-                    ).reshape(-1)
-                    if candidate_violation_counts.size != len(candidate_graphs):
-                        raise ValueError(
-                            "feasibility_estimator.number_of_violations() must return "
-                            "one count per input graph."
+                        candidate_violation_counts = np.asarray(
+                            owner.feasibility_estimator.number_of_violations(candidate_graphs),
+                            dtype=int,
+                        ).reshape(-1)
+                        if candidate_violation_counts.size != len(candidate_graphs):
+                            raise ValueError(
+                                "feasibility_estimator.number_of_violations() must return "
+                                "one count per input graph."
+                            )
+                    except SystemError as exc:
+                        warnings.warn(
+                            "Skipping localized oracle edge-addition repair because "
+                            "feasibility violation counting failed in an external "
+                            f"decomposition: {exc}",
+                            RuntimeWarning,
+                            stacklevel=2,
                         )
+                        candidate_states = []
+                        candidate_violation_counts = np.asarray([], dtype=int)
+
                     improving_candidates = []
                     for candidate_state, violation_count in zip(
                         candidate_states,

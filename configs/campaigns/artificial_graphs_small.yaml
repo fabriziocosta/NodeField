@@ -10,7 +10,7 @@ runner:
   config_path: notebooks/configs/artificial_graph_hyperparameter_optimization.yaml
   poll_seconds: 1800
 dataset:
-  num_graphs: 100
+  num_graphs: 300
   cycle_length: 6
   path_length: 4
   num_rays: 3
@@ -22,8 +22,8 @@ dataset:
   component_specific_alphabets: true
   seed: 42
 generation:
-  n_samples: 16
-  feasibility_effort: 2
+  n_samples: 32
+  feasibility_effort: 1
   feasibility_filter: none
 random_search:
   batch_size: 1
@@ -36,7 +36,7 @@ agent:
   prompts:
     proposal: configs/campaigns/prompts/nodefield_campaign_proposal.md
     logbook: configs/campaigns/prompts/nodefield_campaign_logbook.md
-  proposal_mode: range_search
+  proposal_mode: exact_configs
   mutable_groups:
   - architecture
   - training
@@ -46,87 +46,30 @@ agent:
   - model.fixed
   - model.search_space
   max_search_leaf_count: 23
-  reason: Latest run set a new best (avg/median violations 33.875/33.0 at trial_001)
-    but feasible_rate is still 0.0 and one trial collapsed badly (114.4/118.0), showing
-    a narrow unstable region. Exploit tightly around trial_001 and prune low auxiliary/node_count/sampling
-    and high-degree edges.
-  next_attempt: 'Run 3 very tight exploit trials around trial_001: keep compact 1-layer/4-head
-    setup, keep LR/steps near current values, raise floors for auxiliary/node_count/sampling_step_size,
-    and cap degree away from the high edge.'
-  default_trial_patch_space:
-    model:
+  reason: Restart the small artificial campaign from the original low-product-score
+    basin using 300 training graphs, 32 generated scoring samples, and feasibility
+    effort 1 to avoid slow/high-variance oracle refinement.
+  next_attempt: Run one exact trial at the midpoint of the original tight range around
+    the product-score 1.53 attempt.
+  default_trial_configs:
+  - model:
       fixed:
-        latent_embedding_dimension:
-          type: choice
-          values:
-          - 64
-        node_embedding_svd_dimension:
-          type: choice
-          values:
-          - 32
-        graph_embedding_svd_dimension:
-          type: choice
-          values:
-          - 32
-        number_of_transformer_layers:
-          type: int
-          low: 1
-          high: 1
-        transformer_attention_head_count:
-          type: choice
-          values:
-          - 4
-        transformer_dropout:
-          type: real
-          low: 0.072305
-          high: 0.072315
-        learning_rate:
-          type: real
-          low: 0.0001749
-          high: 0.0001751
-          scale: log
-        batch_size:
-          type: choice
-          values:
-          - 16
-        total_steps:
-          type: int
-          low: 306
-          high: 308
+        latent_embedding_dimension: 64
+        node_embedding_svd_dimension: 32
+        graph_embedding_svd_dimension: 32
+        number_of_transformer_layers: 1
+        transformer_attention_head_count: 4
+        transformer_dropout: 0.07231
+        learning_rate: 0.000175
+        batch_size: 16
+        total_steps: 307
       search_space:
-        lambda_degree_importance:
-          type: real
-          low: 0.74145
-          high: 0.7419
-        lambda_node_exist_importance:
-          type: real
-          low: 2.6433
-          high: 2.64365
-        lambda_node_count_importance:
-          type: real
-          low: 0.9135
-          high: 0.91425
-        lambda_node_label_importance:
-          type: real
-          low: 2.9183
-          high: 2.91895
-        lambda_edge_label_importance:
-          type: real
-          low: 2.32875
-          high: 2.32895
-        lambda_direct_edge_importance:
-          type: real
-          low: 1.60805
-          high: 1.60825
-        lambda_auxiliary_edge_importance:
-          type: real
-          low: 1.8444
-          high: 1.8453
-        sparse_supervision_mask_ratio:
-          type: real
-          low: 0.181082
-          high: 0.18109
-        sampling_step_size:
-          type: real
-          low: 0.0192172
-          high: 0.019223
+        lambda_degree_importance: 0.741675
+        lambda_node_exist_importance: 2.643475
+        lambda_node_count_importance: 0.913875
+        lambda_node_label_importance: 2.918625
+        lambda_edge_label_importance: 2.32885
+        lambda_direct_edge_importance: 1.60815
+        lambda_auxiliary_edge_importance: 1.84485
+        sparse_supervision_mask_ratio: 0.181086
+        sampling_step_size: 0.0192201

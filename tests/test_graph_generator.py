@@ -1668,6 +1668,28 @@ def test_constructive_oracle_rejects_non_improving_additions():
     assert not decoded[0].has_edge(0, 3)
 
 
+def test_constructive_oracle_skips_edge_additions_when_violation_counting_fails():
+    class _BrokenViolationCounter(_ConstructiveEdgeEstimator):
+        def number_of_violations(self, graphs):
+            self.violation_batch_sizes.append(len(graphs))
+            raise SystemError("abstractgraph decomposition failed")
+
+    estimator = _BrokenViolationCounter([(0, 3, "good")])
+    generator = ConditionalNodeFieldGraphGenerator(
+        feasibility_estimator=estimator,
+        verbose=False,
+        max_oracle_iterations=1,
+    )
+    generator.edge_label_classes_ = np.asarray(["bad", "good"], dtype=object)
+    generator.edge_label_to_index_ = {"bad": 0, "good": 1}
+
+    with pytest.warns(RuntimeWarning, match="Skipping localized oracle edge-addition repair"):
+        decoded = generator._decode_generated_nodes(_constructive_oracle_generated_batch())
+
+    assert not decoded[0].has_edge(0, 3)
+    assert estimator.violation_batch_sizes == [1]
+
+
 def test_constructive_oracle_budget_zero_disables_additions():
     estimator = _ConstructiveEdgeEstimator([(0, 3, "good")])
     generator = ConditionalNodeFieldGraphGenerator(
