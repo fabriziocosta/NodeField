@@ -279,6 +279,27 @@ def test_save_graph_generator_uses_atomic_replace(monkeypatch, tmp_path):
     assert not src.exists()
 
 
+def test_save_graph_generator_removes_stale_temp_snapshots(tmp_path):
+    stale_paths = [
+        tmp_path / ".demo-chem.abandoned-1.pkl",
+        tmp_path / ".demo-chem.abandoned-2.pkl",
+    ]
+    for stale_path in stale_paths:
+        stale_path.write_bytes(b"truncated")
+    unrelated_temp_path = tmp_path / ".another-model.abandoned.pkl"
+    unrelated_temp_path.write_bytes(b"keep")
+
+    filename = save_graph_generator(
+        _SaveableGenerator(model_name="demo-chem", model_dir=tmp_path),
+        save_loss_curves_pdf=False,
+    )
+
+    assert filename == "demo-chem.pkl"
+    assert (tmp_path / filename).is_file()
+    assert not any(path.exists() for path in stale_paths)
+    assert unrelated_temp_path.is_file()
+
+
 def test_save_graph_generator_cpu_fallback_handles_forked_cuda_init_error(monkeypatch, tmp_path):
     class _RecordingModule(torch.nn.Module):
         def __init__(self):

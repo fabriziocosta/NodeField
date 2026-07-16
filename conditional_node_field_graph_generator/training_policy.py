@@ -119,7 +119,9 @@ def create_trainer(
     return pl.Trainer(
         max_epochs=maximum_epochs,
         callbacks=callbacks,
-        logger=True,
+        # NodeField records its own metrics and exports; disabling Lightning's
+        # default logger avoids accumulating redundant lightning_logs folders.
+        logger=False,
         default_root_dir=artifact_root_dir,
         enable_checkpointing=True,
         enable_model_summary=False,

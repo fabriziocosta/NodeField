@@ -256,6 +256,18 @@ def _atomic_pickle_dump(obj, output_path: Path) -> None:
             temp_path.unlink(missing_ok=True)
 
 
+def _cleanup_snapshot_temp_files(model_root: Path, stem: str) -> int:
+    """Remove abandoned atomic snapshot files for one finalized model name."""
+    removed = 0
+    for temp_path in model_root.glob(f".{stem}.*.pkl"):
+        try:
+            temp_path.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            logger.warning("Unable to remove stale snapshot file %s: %s", temp_path, exc)
+    return removed
+
+
 def _iter_snapshot_modules(graph_generator):
     """Yield known torch modules whose tensors should be CPU-backed for snapshots."""
     seen = set()
@@ -278,6 +290,14 @@ def _module_device(module: torch.nn.Module):
     for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
         return tensor.device
     return None
+
+
+def _snapshot_requires_in_process_cpu_fallback(graph_generator) -> bool:
+    """Return whether accelerator state makes forked snapshotting unsafe."""
+    return any(
+        device is not None and device.type == "mps"
+        for device in (_module_device(module) for module in _iter_snapshot_modules(graph_generator))
+    )
 
 
 def _snapshot_to_cpu_and_dump(graph_generator, output_path: Path) -> None:
@@ -335,31 +355,45 @@ def save_graph_generator(
     lock_factory = getattr(graph_generator, "_ensure_stream_runtime_lock", None)
     lock_context = lock_factory() if callable(lock_factory) else nullcontext()
     with lock_context:
+        removed_temp_files = _cleanup_snapshot_temp_files(model_root, stem)
+        if removed_temp_files and log:
+            logger.info(
+                "Removed %d stale temporary snapshot file(s) for %s.",
+                removed_temp_files,
+                filename,
+            )
         snapshot_timeout_seconds = getattr(graph_generator, "stream_snapshot_timeout_seconds", None)
         pdf_timeout_seconds = getattr(graph_generator, "stream_pdf_timeout_seconds", None)
         try:
-            run_with_fork_timeout(
-                _atomic_pickle_dump_worker,
-                graph_generator,
-                str(path),
-                timeout_seconds=snapshot_timeout_seconds,
-            )
+            if _snapshot_requires_in_process_cpu_fallback(graph_generator):
+                _snapshot_to_cpu_and_dump(graph_generator, path)
+            else:
+                run_with_fork_timeout(
+                    _atomic_pickle_dump_worker,
+                    graph_generator,
+                    str(path),
+                    timeout_seconds=snapshot_timeout_seconds,
+                )
         except TimeoutError:
+            _cleanup_snapshot_temp_files(model_root, stem)
             logger.warning("Timed out while saving graph generator snapshot %s; skipping snapshot.", path)
             return None
         except Exception as exc:
             if not _looks_like_fork_cuda_initialization_error(exc):
+                _cleanup_snapshot_temp_files(model_root, stem)
                 logger.warning("Unable to save graph generator snapshot %s: %s", path, exc)
                 return None
             try:
                 _snapshot_to_cpu_and_dump(graph_generator, path)
             except Exception as fallback_exc:
+                _cleanup_snapshot_temp_files(model_root, stem)
                 logger.warning("Unable to save graph generator snapshot %s: %s", path, fallback_exc)
                 return None
             logger.debug(
                 "Saved graph generator snapshot %s with CPU fallback after forked CUDA initialization failed.",
                 path,
             )
+        _cleanup_snapshot_temp_files(model_root, stem)
         if save_loss_curves_pdf:
             try:
                 run_with_fork_timeout(
@@ -383,7 +417,11 @@ def list_saved_graph_generators(model_dir=None):
     import pandas as pd
 
     model_root = resolve_saved_generator_dir(model_dir=model_dir)
-    files = sorted(model_root.glob("*.pkl"), key=lambda path: path.stat().st_mtime, reverse=True)
+    files = sorted(
+        (path for path in model_root.glob("*.pkl") if not path.name.startswith(".")),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
     if not files:
         logger.info("No saved graph generators found in %s", model_root)
         return []
@@ -429,12 +467,22 @@ def load_graph_generator(model_name, model_dir=None):
                 candidates.append(candidate_path.resolve())
         if not candidates:
             pattern = requested[:-4] if requested.endswith(".pkl") else requested
-            matches = sorted(model_root.glob(f"{pattern}*.pkl"))
+            matches = sorted(
+                path
+                for path in model_root.glob(f"{pattern}*.pkl")
+                if not path.name.startswith(".")
+            )
             if not matches and sanitized_stem != pattern:
-                matches = sorted(model_root.glob(f"{sanitized_stem}*.pkl"))
+                matches = sorted(
+                    path
+                    for path in model_root.glob(f"{sanitized_stem}*.pkl")
+                    if not path.name.startswith(".")
+                )
             candidates = [path.resolve() for path in matches]
     if not candidates:
-        available = sorted(path.name for path in model_root.glob("*.pkl"))
+        available = sorted(
+            path.name for path in model_root.glob("*.pkl") if not path.name.startswith(".")
+        )
         available_suffix = ""
         if available:
             preview = ", ".join(available[:5])
