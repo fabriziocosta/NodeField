@@ -84,6 +84,11 @@ def run_trainer_fit(trainer, model, train_loader, val_loader, context: str, ckpt
                 "ignore",
                 message=r"Starting from v1\.9\.0, `tensorboardX` has been removed as a dependency.*",
             )
+            warnings.filterwarnings(
+                "ignore",
+                message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*",
+                category=Warning,
+            )
             trainer.fit(
                 model,
                 train_dataloaders=train_loader,

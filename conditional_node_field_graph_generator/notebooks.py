@@ -61,6 +61,11 @@ def configure_notebook(*, require_nsppk: bool = False, print_torch: bool = True)
     warnings.filterwarnings("ignore", message=".*PossibleUserWarning.*")
     warnings.filterwarnings("ignore", message=".*does not have many workers.*")
     warnings.filterwarnings("ignore", message=".*to enable TensorBoard support.*")
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*",
+        category=Warning,
+    )
 
     repo_root = ensure_repo_on_syspath()
     if require_nsppk:

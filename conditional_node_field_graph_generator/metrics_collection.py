@@ -363,7 +363,7 @@ class GraphGeneratorEpochSnapshotCallback(pl.callbacks.Callback):
                 verbose_log(
                     owner,
                     f"epoch {epoch_label}: completed epoch in {epoch_seconds:.2f}s",
-                    level=1,
+                    level=2,
                 )
             else:
                 verbose_log(

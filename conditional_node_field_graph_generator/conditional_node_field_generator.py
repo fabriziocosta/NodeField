@@ -1776,6 +1776,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         learning_rate: float = 1e-3,
         maximum_epochs: int = 10,
         batch_size: int = 32,
+        training_num_workers: int = 0,
         total_steps: int = 100,
         verbose: bool = False,
         verbose_epoch_interval: int = 10,
@@ -1819,6 +1820,9 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.learning_rate = learning_rate
         self.maximum_epochs = maximum_epochs
         self.batch_size = batch_size
+        self.training_num_workers = int(training_num_workers)
+        if self.training_num_workers < 0:
+            raise ValueError("training_num_workers must be >= 0")
         self.total_steps = int(total_steps)
         self.verbose = verbose
         self.verbose_epoch_interval = int(verbose_epoch_interval)

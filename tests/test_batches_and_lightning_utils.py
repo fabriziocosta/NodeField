@@ -145,6 +145,11 @@ class _WarnTrainer:
             "`pytorch_lightning` package, due to potential conflicts with other packages in the ML ecosystem.",
             UserWarning,
         )
+        warnings.warn(
+            "`isinstance(treespec, LeafSpec)` is deprecated, use "
+            "`isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.",
+            DeprecationWarning,
+        )
 
 
 def test_run_trainer_fit_suppresses_lightning_worker_warnings():
@@ -623,7 +628,7 @@ def test_graph_generator_epoch_snapshot_callback_logs_complete_epoch_time(monkey
             self.model_name = "demo-chem"
             self.model_dir = tmp_path
             self.is_fitted_ = False
-            self.verbose = 1
+            self.verbose = 2
 
     class _Trainer:
         sanity_checking = False
@@ -642,6 +647,14 @@ def test_graph_generator_epoch_snapshot_callback_logs_complete_epoch_time(monkey
     assert "epoch 3: completed epoch in 8.50s" in caplog.text
     assert "finished generator snapshot" not in caplog.text
     assert pl_module._last_completed_epoch_seconds == pytest.approx(8.5)
+
+    caplog.clear()
+    quiet_owner = _Owner()
+    quiet_owner.verbose = 1
+    callback = GraphGeneratorEpochSnapshotCallback(quiet_owner)
+    callback.on_validation_epoch_end(_Trainer(), _Module())
+
+    assert "completed epoch in" not in caplog.text
 
 
 def test_graph_generator_batch_and_epoch_snapshot_callback_saves_epoch_version(monkeypatch, tmp_path):

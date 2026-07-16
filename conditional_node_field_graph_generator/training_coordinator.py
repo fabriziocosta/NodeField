@@ -220,6 +220,11 @@ class TrainingCoordinator:
             targets=targets,
         )
         dataset = owner._build_dataset_from_processed_payload(payload)
+        training_num_workers = max(0, int(getattr(owner, "training_num_workers", 0)))
+        loader_worker_kwargs = {
+            "num_workers": training_num_workers,
+            "persistent_workers": training_num_workers > 0,
+        }
         if isinstance(dataset, ConditionalNodeFieldGraphWithEdgesDataset):
             train_dataset, val_dataset = owner._build_train_val_subsets(dataset)
             train_loader = DataLoader(
@@ -227,17 +232,29 @@ class TrainingCoordinator:
                 batch_size=owner.batch_size,
                 shuffle=True,
                 collate_fn=collate_conditional_node_field_graph_with_edges,
+                **loader_worker_kwargs,
             )
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=owner.batch_size,
                 shuffle=False,
                 collate_fn=collate_conditional_node_field_graph_with_edges,
+                **loader_worker_kwargs,
             )
         else:
             train_dataset, val_dataset = owner._build_train_val_subsets(dataset)
-            train_loader = DataLoader(train_dataset, batch_size=owner.batch_size, shuffle=True)
-            val_loader = DataLoader(val_dataset, batch_size=owner.batch_size, shuffle=False)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=owner.batch_size,
+                shuffle=True,
+                **loader_worker_kwargs,
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=owner.batch_size,
+                shuffle=False,
+                **loader_worker_kwargs,
+            )
 
         self.run_training(
             train_loader,
