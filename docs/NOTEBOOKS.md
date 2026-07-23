@@ -7,9 +7,6 @@ data, or validates an invariant.
 
 ## Start here
 
-- [End-to-end graph-generation experiment](../notebooks/end_to_end_graph_generation_experiment.ipynb)
-  covers the broad artificial/molecular workflow, conditioning, interpolation,
-  distribution comparisons, and sampling.
 - [Molecular generation and guidance](../notebooks/molecular_generation_and_guidance.ipynb)
   is the maintained chemistry-focused workflow.
 - [ZINC molecular-generation development](../notebooks/zinc_molecular_generation_development.ipynb)
@@ -34,8 +31,6 @@ data, or validates an invariant.
 | [ZINC molecular-generation development](../notebooks/zinc_molecular_generation_development.ipynb) | Develop and evaluate the cached ZINC workflow with conditional sampling, interpolation, and guidance. |
 | [ZINC non-streaming training and sampling](../notebooks/zinc_non_streaming_training_and_sampling.ipynb) | Materialize a ZINC subset, train through the regular in-memory path, and sample molecules. |
 | [ZINC streaming training and sampling](../notebooks/zinc_streaming_training_and_sampling.ipynb) | Train from the ZINC CSV through the streaming path and sample molecules. |
-| [ZINC interpolation and sampling dynamics](../notebooks/zinc_interpolation_and_sampling_dynamics.ipynb) | Compare endpoint interpolation and temporary sampling-dynamics settings on a ZINC generator. |
-| [Saved-generator sampling and graph repair](../notebooks/saved_generator_sampling_and_graph_repair.ipynb) | Load saved generators, sample graphs, and inspect repair/padding behavior for generated candidates. |
 | [Campaign best-trial sampling review](../notebooks/campaign_best_trial_sampling_review.ipynb) | Select the best completed campaign trial, reload its checkpoint, and review training and generated samples. |
 
 ## ZINC optimization and feasibility studies
@@ -43,7 +38,6 @@ data, or validates an invariant.
 | Notebook | Purpose |
 | --- | --- |
 | [ZINC molecule hyperparameter optimization](../notebooks/zinc_molecule_hyperparameter_optimization.ipynb) | Run the YAML-driven molecule hyperparameter search and review its best trial. |
-| [ZINC feasibility-rate hyperparameter search](../notebooks/zinc_feasibility_rate_hyperparameter_search.ipynb) | Run a small random search scored by feasible-generation rate. |
 | [ZINC feasibility oracle analysis](../notebooks/zinc_feasibility_oracle_analysis.ipynb) | Compare oracle-off and oracle-on decoding, traces, feasibility scores, and interpolation. |
 | [ZINC guidance bootstrap and cycle analysis](../notebooks/zinc_guidance_bootstrap_and_cycle_analysis.ipynb) | Bootstrap regression guidance from generated molecules and compare guided versus unguided cycles. |
 | [Similarity-pruned target optimization](../notebooks/similarity_pruned_target_optimization.ipynb) | Prune a dataset by graph similarity to a hidden target, train an optimization model, and test classifier guidance. |

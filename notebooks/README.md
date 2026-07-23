@@ -6,7 +6,6 @@ these as one linear tutorial.
 
 ## Core workflows
 
-- [End-to-end graph generation experiment](./end_to_end_graph_generation_experiment.ipynb) — complete dataset, training, conditioning, interpolation, guidance, and distribution-comparison workflow.
 - [Molecular generation and guidance](./molecular_generation_and_guidance.ipynb) — maintained chemistry workflow for molecular training, decoding, feasibility, guidance, and interpolation.
 - [ZINC molecular-generation development](./zinc_molecular_generation_development.ipynb) — larger cached-ZINC development and evaluation workspace.
 - [Artificial non-streaming training and sampling](./artificial_non_streaming_training_and_sampling.ipynb) — train on generated cycle/path/star graphs and inspect samples.
@@ -21,15 +20,12 @@ these as one linear tutorial.
 
 - [ZINC non-streaming training and sampling](./zinc_non_streaming_training_and_sampling.ipynb) — materialize a ZINC subset, train in memory, and compare filtered/unfiltered samples.
 - [ZINC streaming training and sampling](./zinc_streaming_training_and_sampling.ipynb) — train directly from the ZINC CSV through the streaming path.
-- [Saved-generator sampling and graph repair](./saved_generator_sampling_and_graph_repair.ipynb) — sample from saved generators and inspect graph-repair behavior.
 - [Campaign best-trial sampling review](./campaign_best_trial_sampling_review.ipynb) — reload the best completed campaign trial and review its outputs.
-- [ZINC interpolation and sampling dynamics](./zinc_interpolation_and_sampling_dynamics.ipynb) — compare interpolation and temporary sampling-dynamics settings.
 
 ## Optimization and feasibility studies
 
 - [Similarity-pruned target optimization](./similarity_pruned_target_optimization.ipynb) — train and evaluate a generator optimized toward a hidden similarity target.
 - [ZINC molecule hyperparameter optimization](./zinc_molecule_hyperparameter_optimization.ipynb) — run the YAML-driven ZINC molecule hyperparameter search.
-- [ZINC feasibility-rate hyperparameter search](./zinc_feasibility_rate_hyperparameter_search.ipynb) — rank random-search trials by feasible-generation rate.
 - [ZINC feasibility oracle analysis](./zinc_feasibility_oracle_analysis.ipynb) — compare oracle-off and oracle-on decoding, traces, and interpolation.
 - [ZINC guidance bootstrap and cycle analysis](./zinc_guidance_bootstrap_and_cycle_analysis.ipynb) — bootstrap guidance and compare guided versus unguided sampling cycles.
 

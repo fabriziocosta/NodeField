@@ -8,12 +8,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_ROOT = PROJECT_ROOT / "notebooks"
 SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 MAINTAINED_NOTEBOOKS = [
-    NOTEBOOK_ROOT / "end_to_end_graph_generation_experiment.ipynb",
     NOTEBOOK_ROOT / "molecular_generation_and_guidance.ipynb",
     NOTEBOOK_ROOT / "similarity_pruned_target_optimization.ipynb",
     NOTEBOOK_ROOT / "zinc_non_streaming_training_and_sampling.ipynb",
     NOTEBOOK_ROOT / "zinc_guidance_bootstrap_and_cycle_analysis.ipynb",
-    NOTEBOOK_ROOT / "zinc_feasibility_rate_hyperparameter_search.ipynb",
     NOTEBOOK_ROOT / "zinc_molecule_hyperparameter_optimization.ipynb",
 ]
 
