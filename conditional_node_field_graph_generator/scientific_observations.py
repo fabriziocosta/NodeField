@@ -48,14 +48,19 @@ def epoch_telemetry(trainer: Any, module: Any) -> dict[str, Any]:
     """Extract a JSON-safe, compact record from Lightning's epoch state."""
     metrics: dict[str, Any] = {}
     callback_metrics = getattr(trainer, "callback_metrics", {}) or {}
+    non_finite_metric = False
     for name, value in callback_metrics.items():
         number = _number(value)
+        if isinstance(value, torch.Tensor) and value.numel() == 1:
+            non_finite_metric = non_finite_metric or not math.isfinite(float(value.detach().cpu().item()))
+        elif isinstance(value, (float, int)) and not isinstance(value, bool):
+            non_finite_metric = non_finite_metric or not math.isfinite(float(value))
         if number is not None:
             metrics[str(name)] = number
     epoch = int(getattr(trainer, "current_epoch", -1)) + 1
     durations = getattr(module, "_epoch_duration_seconds", []) or []
     duration = float(durations[-1]) if durations else None
-    finite = all(math.isfinite(float(value)) for value in metrics.values())
+    finite = not non_finite_metric and all(math.isfinite(float(value)) for value in metrics.values())
     return {
         "epoch": epoch,
         "metrics": metrics,
@@ -219,6 +224,10 @@ class ScientificMetricsCallback(pl.callbacks.Callback):
         for observation in detect_observations(self.records, policy=self.policy):
             observation["source_telemetry"] = str(self.telemetry_path)
             self._append(self.observations_path, observation)
+            if observation["type"] in {"non_finite_metric", "unstable_gradients"}:
+                setattr(pl_module, "scientific_stop_reason", observation["type"])
+                # Lightning checks this flag after the current validation epoch.
+                setattr(trainer, "should_stop", True)
 
 
 def read_jsonl(path: str | Path) -> list[dict[str, Any]]:

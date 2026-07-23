@@ -304,7 +304,8 @@ def apply_operations(state: Mapping[str, Any], operations: list[Mapping[str, Any
     for operation in operations:
         kind = str(operation.get("operation", ""))
         entity_type = str(operation.get("entity_type", ""))
-        entity_id = str(operation.get("entity_id", ""))
+        raw_entity_id = operation.get("entity_id")
+        entity_id = str(raw_entity_id) if raw_entity_id else ""
         if kind == "create_entity":
             if entity_type in IMMUTABLE_ENTITY_TYPES:
                 raise ValueError("LLM operations cannot create historical experiments or observations.")
@@ -363,7 +364,7 @@ def validate_candidate(
     if remaining_gpu_hours is not None and estimated > remaining_gpu_hours:
         raise ValueError("Candidate exceeds remaining campaign budget.")
     varied = design.get("varied")
-    paths = list(_leaf_paths(varied))
+    paths = list(_leaf_paths(varied)) + list(_leaf_paths(design.get("fixed")))
     if any(not any(path == allowed or path.startswith(f"{allowed}.") for allowed in allowed_paths) for path in paths):
         raise ValueError("Candidate varies a parameter outside the campaign allowlist.")
 

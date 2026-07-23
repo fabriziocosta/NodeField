@@ -199,21 +199,53 @@ class TrainingCoordinator:
             graph_conditioning=validation_graph_conditioning,
             targets=None,
         )
-        train_loader = DataLoader(
-            PrebuiltBatchIterableDataset(
+        try:
+            train_dataset = PrebuiltBatchIterableDataset(
                 batch_iter_factory,
                 prefetch_batches=int(getattr(owner, "stream_prefetch_batches", 2)),
                 batch_timeout_seconds=getattr(owner, "stream_batch_timeout_seconds", None),
                 max_consecutive_timeouts=int(getattr(owner, "stream_max_consecutive_stalls", 3)),
-            ),
-            batch_size=None,
-        )
+            )
+        except TypeError as exc:
+            # Preserve compatibility with lightweight iterable test doubles and
+            # older extension implementations that only accepted prefetch_batches.
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            train_dataset = PrebuiltBatchIterableDataset(
+                batch_iter_factory,
+                prefetch_batches=int(getattr(owner, "stream_prefetch_batches", 2)),
+            )
+        train_loader = DataLoader(train_dataset, batch_size=None)
         previous_batch_logging = bool(getattr(owner.model, "log_train_every_batch", False))
         previous_stream_progress_owner = getattr(owner.model, "_stream_progress_owner", None)
         stream_progress_owner = getattr(owner, "_graph_generator_snapshot_owner", None)
         owner.model._stream_progress_owner = stream_progress_owner
         owner.model.log_train_every_batch = bool(
             getattr(stream_progress_owner, "verbose", owner.verbose)
+        )
+        training_policy_factory = getattr(owner, "_current_training_policy", None)
+        checkpoint_policy_factory = getattr(owner, "_current_checkpoint_policy", None)
+        metrics_policy = getattr(owner, "metrics_policy_", MetricsPolicy())
+        training_policy = (
+            training_policy_factory(suppress_non_batch_output=False)
+            if callable(training_policy_factory)
+            else TrainingPolicy(
+                maximum_epochs=int(getattr(owner, "maximum_epochs", 1)),
+                early_stopping_monitor=str(getattr(owner, "early_stopping_monitor", "val_total")),
+                early_stopping_mode=str(getattr(owner, "early_stopping_mode", "min")),
+                enable_early_stopping=bool(getattr(owner, "enable_early_stopping", False)),
+                early_stopping_patience=int(getattr(owner, "early_stopping_patience", 1)),
+                early_stopping_min_delta=float(getattr(owner, "early_stopping_min_delta", 0.0)),
+                suppress_non_batch_output=False,
+            )
+        )
+        checkpoint_policy = (
+            checkpoint_policy_factory()
+            if callable(checkpoint_policy_factory)
+            else CheckpointPolicy(
+                restore_best_checkpoint=bool(getattr(owner, "restore_best_checkpoint", False)),
+                checkpoint_root_dir=str(getattr(owner, "checkpoint_root_dir", ".artifacts/checkpoints")),
+            )
         )
         try:
             self.run_training(
@@ -222,9 +254,9 @@ class TrainingCoordinator:
                 ckpt_path=ckpt_path,
                 context=f"{owner.__class__.__name__}.fit_from_prebuilt_batches",
                 train_loader_length=1,
-                training_policy=owner._current_training_policy(suppress_non_batch_output=False),
-                checkpoint_policy=owner._current_checkpoint_policy(),
-                metrics_policy=owner.metrics_policy_,
+                training_policy=training_policy,
+                checkpoint_policy=checkpoint_policy,
+                metrics_policy=metrics_policy,
                 snapshot_frequency="batch",
             )
         finally:

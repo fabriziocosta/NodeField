@@ -661,21 +661,54 @@ def _ensure_scientific_state(config: Mapping[str, Any]) -> ScientificStateReposi
         repository.load()
         return repository
     loop_config = config.get("scientific_loop", {}) or {}
-    repository.initialize(
-        new_state(
-            campaign_id=str(config["campaign"]["id"]),
-            domain=str(config["campaign"]["domain"]),
-            objective=str(
-                loop_config.get(
-                    "objective",
-                    "Improve NodeField graph generation quality under a fixed campaign budget.",
-                )
-            ),
-            primary_metric=str(loop_config.get("primary_metric", "average_num_violations")),
-            budgets=loop_config.get("budgets"),
-            trigger_rules=loop_config.get("trigger_rules"),
-        )
+    initial = new_state(
+        campaign_id=str(config["campaign"]["id"]),
+        domain=str(config["campaign"]["domain"]),
+        objective=str(
+            loop_config.get(
+                "objective",
+                "Improve NodeField graph generation quality under a fixed campaign budget.",
+            )
+        ),
+        primary_metric=str(loop_config.get("primary_metric", "average_num_violations")),
+        budgets=loop_config.get("budgets"),
+        trigger_rules=loop_config.get("trigger_rules"),
     )
+    # One-time migration of legacy completed runs into immutable scientific summaries.
+    for legacy_run in sorted(_campaign_domain_root(config).glob(f"{config['campaign']['prefix']}_*")):
+        if not legacy_run.is_dir():
+            continue
+        legacy_state = _read_json_if_exists(legacy_run / "state.json")
+        proposal = _read_json_if_exists(legacy_run / "proposal.json")
+        metrics = _read_json_if_exists(legacy_run / "metrics" / "summary.json")
+        patches = proposal.get("sampled_patches", [])
+        metric_rows = metrics.get("trials", []) if isinstance(metrics, Mapping) else []
+        for index, patch in enumerate(patches, start=1):
+            row = metric_rows[index - 1] if index - 1 < len(metric_rows) else {}
+            initial, experiment_id = append_experiment(
+                initial,
+                {
+                    "status": "completed" if row else str(legacy_state.get("status", "unknown")),
+                    "purpose": {"description": proposal.get("reason", "Migrated legacy campaign run")},
+                    "configuration": patch,
+                    "execution": {"run_dir": str(legacy_run), "trial_id": index},
+                    "outcome": {"metrics": row},
+                    "interpretation_status": "migrated",
+                },
+            )
+            if row:
+                initial, _ = append_observation(
+                    initial,
+                    {
+                        "type": "trial_result",
+                        "source_experiment": experiment_id,
+                        "statement": "Migrated legacy trial metric summary.",
+                        "measurements": row,
+                        "detection": {"method": "legacy_artifact_migration"},
+                        "reliability": 0.7,
+                    },
+                )
+    repository.initialize(initial)
     return repository
 
 
@@ -1759,6 +1792,17 @@ def run_campaign_once(
                     status="failed",
                     error=state["latest_error"],
                 )
+                candidate_id_for_failure = proposal.get("scientific_candidate_id")
+                if candidate_id_for_failure:
+                    repository = _ensure_scientific_state(config)
+                    scientific_state = repository.load()
+                    candidate_entity = scientific_state["entities"]["candidate_experiments"].get(
+                        candidate_id_for_failure
+                    )
+                    if candidate_entity is not None:
+                        candidate_entity["status"] = "failed"
+                        scientific_state["controller_state"]["active_run"] = None
+                        repository.save(scientific_state)
             _write_json(
                 run_dir / "campaign_result.json",
                 {
@@ -1775,6 +1819,13 @@ def run_campaign_once(
             print(f"{trial_name}: failed; log={trial_log_path}", file=stream)
             raise
         trial_metrics = {"campaign_trial_id": index, **_summarize_result(result)}
+        if _scientific_loop_enabled(config):
+            trial_metrics["epoch_telemetry_path"] = str(
+                trial_dir / "metrics" / "epoch_telemetry.jsonl"
+            )
+            trial_metrics["scientific_observations_path"] = str(
+                trial_dir / "metrics" / "observations.jsonl"
+            )
         if loss_pdf_path:
             trial_metrics["loss_pdf_path"] = loss_pdf_path
         if generator_snapshot_path:
@@ -1831,6 +1882,14 @@ def run_campaign_once(
         state=state,
     )
     upsert_logbook_block(config["logbook"]["path"], run_dir.name, logbook_entry)
+    if _scientific_loop_enabled(config):
+        repository = _ensure_scientific_state(config)
+        scientific_state = repository.load()
+        scientific_state["controller_state"]["active_run"] = None
+        selected_candidate = proposal.get("scientific_candidate_id")
+        if selected_candidate in scientific_state["entities"]["candidate_experiments"]:
+            scientific_state["entities"]["candidate_experiments"][selected_candidate]["status"] = "completed"
+        repository.save(scientific_state)
     return {
         "run_dir": run_dir,
         "proposal": proposal,
@@ -2170,6 +2229,16 @@ def _handle_scientific_agent_decision(
             "selected": selected,
         }
         scientific_state["entities"]["candidate_experiments"][selected]["status"] = "approved"
+        remaining = scientific_state["controller_state"].get("budgets", {}).get("remaining_gpu_hours")
+        if remaining is not None:
+            cost = float(
+                scientific_state["entities"]["candidate_experiments"][selected]
+                .get("cost", {})
+                .get("estimated_gpu_hours", 0.0)
+            )
+            scientific_state["controller_state"]["budgets"]["remaining_gpu_hours"] = max(
+                0.0, float(remaining) - cost
+            )
         repository.save(scientific_state)
         launched = _launch_mini_batch_child(
             config,
