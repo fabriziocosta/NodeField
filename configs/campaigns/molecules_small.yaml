@@ -28,7 +28,14 @@ random_search:
   batch_size: 1
   random_state: 101
 
+scientific_loop:
+  primary_metric: average_num_violations
+  budgets:
+    maximum_single_experiment_gpu_hours: 20
+    maximum_parallel_runs: 1
+
 agent:
+  stateful_loop: true
   model: gpt-5.3-codex
   reasoning_effort: medium
   max_output_tokens: 2000

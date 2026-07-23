@@ -25,6 +25,17 @@ from .runtime_paths import (
     resolve_repo_root,
 )
 from .campaign_search import flatten_leaf_paths, sample_patch_space, validate_patch_space
+from .scientific_observations import read_jsonl
+from .scientific_state import (
+    ScientificStateRepository,
+    add_entity,
+    append_experiment,
+    append_observation,
+    new_state,
+    state_path,
+    update_experiment_lifecycle,
+    validate_candidate,
+)
 
 
 CAMPAIGN_CONFIGS = {
@@ -124,6 +135,24 @@ class AgentCampaignDecision:
     reason: str
     logbook_markdown: str
     campaign_patch: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ScientificStateDecision:
+    decision: str
+    operations: list[dict[str, Any]]
+    candidate_selection: str | None
+    rationale: str
+    evidence_ids: list[str]
+
+
+SCIENTIFIC_DECISIONS = {
+    "no_action",
+    "update_state",
+    "propose_experiment",
+    "stop_campaign",
+    "terminate_run_and_propose_experiment",
+}
 
 
 def _read_yaml_or_json(path: Path) -> dict[str, Any]:
@@ -311,6 +340,133 @@ def campaign_decision_text_format() -> dict[str, Any]:
     }
 
 
+def scientific_state_decision_text_format() -> dict[str, Any]:
+    """Return the strict schema for semantic belief-state decisions."""
+    operation_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "operation",
+            "entity_type",
+            "entity_id",
+            "path",
+            "old_value",
+            "new_value",
+            "value",
+        ],
+        "properties": {
+            "operation": {"type": "string", "enum": ["create_entity", "update_entity", "add_relation"]},
+            "entity_type": {"type": "string"},
+            "entity_id": {"type": ["string", "null"]},
+            "path": {"type": ["string", "null"]},
+            "old_value": {},
+            "new_value": {},
+            "value": {"type": ["object", "null"], "additionalProperties": True},
+        },
+    }
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "nodefield_scientific_state_decision",
+            "description": "A validated scientific belief-state controller decision.",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["decision", "operations", "candidate_selection", "rationale", "evidence_ids"],
+                "properties": {
+                    "decision": {"type": "string", "enum": sorted(SCIENTIFIC_DECISIONS)},
+                    "operations": {"type": "array", "items": operation_schema},
+                    "candidate_selection": {"type": ["string", "null"]},
+                    "rationale": {"type": "string"},
+                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        }
+    }
+
+
+def parse_scientific_state_decision(text: str) -> ScientificStateDecision:
+    payload = json.loads(text.strip())
+    if not isinstance(payload, dict):
+        raise ValueError("Scientific agent response must be a JSON object.")
+    decision = str(payload.get("decision", ""))
+    if decision not in SCIENTIFIC_DECISIONS:
+        raise ValueError(f"Unsupported scientific agent decision: {decision!r}")
+    rationale = str(payload.get("rationale") or "").strip()
+    if not rationale:
+        raise ValueError("Scientific agent decision requires rationale.")
+    operations = payload.get("operations") or []
+    if not isinstance(operations, list) or not all(isinstance(item, dict) for item in operations):
+        raise ValueError("Scientific decision operations must be a list of mappings.")
+    evidence_ids = payload.get("evidence_ids") or []
+    if not isinstance(evidence_ids, list) or not all(isinstance(item, str) for item in evidence_ids):
+        raise ValueError("Scientific decision evidence_ids must be a list of strings.")
+    return ScientificStateDecision(
+        decision=decision,
+        operations=operations,
+        candidate_selection=(
+            str(payload["candidate_selection"]) if payload.get("candidate_selection") is not None else None
+        ),
+        rationale=rationale,
+        evidence_ids=evidence_ids,
+    )
+
+
+def _scientific_agent_prompt_text(
+    config: Mapping[str, Any],
+    campaign_state: Mapping[str, Any],
+    result: Mapping[str, Any],
+    scientific_state: Mapping[str, Any],
+) -> str:
+    proposal_prompt = Path(str(config["agent"]["prompts"]["proposal"])).read_text(encoding="utf-8")
+    return "\n\n".join(
+        [
+            "You are the semantic controller for a NodeField scientific campaign.",
+            "Deterministic code owns metrics, observation detection, budgets, allowlists, and launching.",
+            "Do not create or update experiments or observations; they are immutable evidence managed by code.",
+            "Create or update hypotheses, beliefs, questions, candidate_experiments, and controlled relations.",
+            "Every update_entity operation must include old_value and cite evidence_ids.",
+            "Candidate experiments must include design.fixed, design.varied, design.seeds, expected_outcomes, cost.estimated_gpu_hours, and risks.",
+            "Return only the strict JSON object requested by the response schema.",
+            "Campaign proposal guidance:",
+            proposal_prompt,
+            "Current campaign execution config:",
+            json.dumps(_json_safe(config), indent=2, sort_keys=True),
+            "Controller state:",
+            json.dumps(_json_safe(campaign_state), indent=2, sort_keys=True),
+            "Latest result:",
+            json.dumps(_json_safe(result), indent=2, sort_keys=True),
+            "Scientific belief state:",
+            json.dumps(_json_safe(scientific_state), indent=2, sort_keys=True),
+        ]
+    )
+
+
+def request_scientific_state_decision(
+    config: Mapping[str, Any],
+    campaign_state: Mapping[str, Any],
+    result: Mapping[str, Any],
+    scientific_state: Mapping[str, Any],
+    *,
+    client: Any | None = None,
+) -> ScientificStateDecision:
+    if client is None:
+        from openai import OpenAI
+
+        api_key_env = str(config["agent"].get("api_key_env", "OPENAI_API_KEY"))
+        api_key = os.environ.get(api_key_env)
+        client = OpenAI(api_key=api_key) if api_key else OpenAI()
+    response = client.responses.create(
+        model=config["agent"].get("model", "gpt-5.3-codex"),
+        reasoning={"effort": config["agent"].get("reasoning_effort", "medium")},
+        max_output_tokens=int(config["agent"].get("max_output_tokens", 2000)),
+        text=scientific_state_decision_text_format(),
+        input=_scientific_agent_prompt_text(config, campaign_state, result, scientific_state),
+    )
+    return parse_scientific_state_decision(_response_output_text(response))
+
+
 def parse_agent_campaign_decision(text: str) -> AgentCampaignDecision:
     payload = json.loads(text.strip())
     if not isinstance(payload, dict):
@@ -485,6 +641,47 @@ def _campaign_artifact_root(config: Mapping[str, Any]) -> Path:
 
 def _campaign_domain_root(config: Mapping[str, Any]) -> Path:
     return _campaign_artifact_root(config) / str(config["campaign"]["domain"])
+
+
+def _scientific_state_path(config: Mapping[str, Any]) -> Path:
+    return state_path(
+        _campaign_artifact_root(config),
+        str(config["campaign"]["domain"]),
+        str(config["campaign"]["prefix"]),
+    )
+
+
+def _scientific_loop_enabled(config: Mapping[str, Any]) -> bool:
+    return bool((config.get("agent") or {}).get("stateful_loop", False))
+
+
+def _ensure_scientific_state(config: Mapping[str, Any]) -> ScientificStateRepository:
+    repository = ScientificStateRepository(_scientific_state_path(config))
+    if repository.path.is_file():
+        repository.load()
+        return repository
+    loop_config = config.get("scientific_loop", {}) or {}
+    repository.initialize(
+        new_state(
+            campaign_id=str(config["campaign"]["id"]),
+            domain=str(config["campaign"]["domain"]),
+            objective=str(
+                loop_config.get(
+                    "objective",
+                    "Improve NodeField graph generation quality under a fixed campaign budget.",
+                )
+            ),
+            primary_metric=str(loop_config.get("primary_metric", "average_num_violations")),
+            budgets=loop_config.get("budgets"),
+            trigger_rules=loop_config.get("trigger_rules"),
+        )
+    )
+    return repository
+
+
+def _scientific_state_context(config: Mapping[str, Any]) -> dict[str, Any]:
+    repository = _ensure_scientific_state(config)
+    return repository.load()
 
 
 def _campaign_state_path(config: Mapping[str, Any]) -> Path:
@@ -1224,13 +1421,33 @@ def _proposal_from_config(
     *,
     run_dir: Path,
     previous_result: Mapping[str, Any] | None = None,
+    candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     agent = config["agent"]
     previous_result = dict(previous_result or {})
     proposal_mode = str(agent.get("proposal_mode") or "range_search")
     patch_space = None
     flattened = {}
-    if proposal_mode == "range_search":
+    candidate = dict(candidate or {})
+    candidate_design = candidate.get("design") or {}
+    if candidate:
+        proposal_mode = "range_search"
+        patch_space = candidate_design.get("varied") or {}
+        if not isinstance(patch_space, Mapping) or not patch_space:
+            raise ValueError("Scientific candidate design.varied must be a non-empty mapping.")
+        flattened = validate_patch_space(
+            patch_space,
+            allowed_paths=list(agent["allowed_paths"]),
+            max_leaf_count=int(agent.get("max_search_leaf_count", 8)),
+        )
+        sampled = sample_patch_space(
+            patch_space,
+            n_samples=int(config["random_search"]["batch_size"]),
+            random_state=int(config["random_search"]["random_state"]),
+            allowed_paths=list(agent["allowed_paths"]),
+            max_leaf_count=int(agent.get("max_search_leaf_count", 8)),
+        )
+    elif proposal_mode == "range_search":
         patch_space = agent["default_trial_patch_space"]
         flattened = validate_patch_space(
             patch_space,
@@ -1258,6 +1475,8 @@ def _proposal_from_config(
         "allowed_paths": list(agent["allowed_paths"]),
         "prompt_paths": dict(agent.get("prompts", {})),
         "previous_result": previous_result,
+        "scientific_candidate_id": candidate.get("id"),
+        "candidate": candidate,
         "reason": _proposal_reason(agent, previous_result),
         "next_attempt": str(
             agent.get("next_attempt") or "Review metrics and narrow the best ranges."
@@ -1326,6 +1545,95 @@ def _write_summary_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _scientific_register_experiments(
+    config: Mapping[str, Any],
+    run_dir: Path,
+    proposal: Mapping[str, Any],
+) -> list[str]:
+    repository = _ensure_scientific_state(config)
+    state = repository.load()
+    experiment_ids: list[str] = []
+    for index, patch in enumerate(proposal.get("sampled_patches", []), start=1):
+        experiment = {
+            "status": "queued",
+            "parent_experiment": None,
+            "purpose": {
+                "description": proposal.get("reason", "Campaign trial"),
+                "candidate_experiment_id": proposal.get("scientific_candidate_id"),
+            },
+            "configuration": deepcopy(patch),
+            "execution": {
+                "run_dir": str(run_dir),
+                "trial_id": index,
+                "trial_dir": str(run_dir / "trials" / f"trial_{index:03d}"),
+            },
+            "outcome": {},
+            "interpretation_status": "unreviewed",
+        }
+        state, experiment_id = append_experiment(state, experiment)
+        experiment_ids.append(experiment_id)
+    repository.save(state)
+    return experiment_ids
+
+
+def _scientific_record_trial(
+    config: Mapping[str, Any],
+    *,
+    experiment_id: str,
+    trial_dir: Path,
+    trial_metrics: Mapping[str, Any] | None,
+    status: str,
+    error: Mapping[str, Any] | None = None,
+) -> None:
+    repository = _ensure_scientific_state(config)
+    state = repository.load()
+    observation_path = trial_dir / "metrics" / "observations.jsonl"
+    local_observations = read_jsonl(observation_path)
+    existing = {
+        (item.get("source_telemetry"), item.get("epoch"), item.get("type"))
+        for item in state["entities"]["observations"].values()
+        if isinstance(item, Mapping)
+    }
+    for observation in local_observations:
+        key = (observation.get("source_telemetry"), observation.get("epoch"), observation.get("type"))
+        if key in existing:
+            continue
+        observation = {
+            key: value
+            for key, value in observation.items()
+            if key != "local_id"
+        }
+        observation["source_experiment"] = experiment_id
+        state, _ = append_observation(state, observation)
+        existing.add(key)
+    if not local_observations and trial_metrics:
+        state, _ = append_observation(
+            state,
+            {
+                "type": "trial_result",
+                "source_experiment": experiment_id,
+                "statement": "The trial produced a completed campaign metric summary.",
+                "measurements": dict(trial_metrics),
+                "detection": {"method": "deterministic_trial_summary"},
+                "reliability": 0.8,
+            },
+        )
+    values = {
+        "status": status,
+        "execution": {
+            "trial_dir": str(trial_dir),
+            "telemetry_path": str(trial_dir / "metrics" / "epoch_telemetry.jsonl"),
+            "observations_path": str(observation_path),
+        },
+        "outcome": {
+            "metrics": dict(trial_metrics or {}),
+            "error": dict(error or {}),
+        },
+    }
+    state = update_experiment_lifecycle(state, experiment_id, values)
+    repository.save(state)
+
+
 def run_campaign_once(
     config: Mapping[str, Any],
     *,
@@ -1334,6 +1642,7 @@ def run_campaign_once(
     short_id: str | None = None,
     stream: TextIO | None = None,
     allow_existing_run_dir: bool = False,
+    candidate_id: str | None = None,
 ) -> dict[str, Any]:
     """Sample one mini-batch proposal and optionally execute it sequentially."""
     stream = stream or sys.stdout
@@ -1345,6 +1654,12 @@ def run_campaign_once(
         base_workflow_config = _load_campaign_workflow_config(config)
 
     previous_result = _latest_campaign_context(config)
+    candidate = None
+    if _scientific_loop_enabled(config) and candidate_id:
+        scientific_state = _scientific_state_context(config)
+        candidate = scientific_state["entities"]["candidate_experiments"].get(candidate_id)
+        if candidate is None:
+            raise ValueError(f"Selected scientific candidate does not exist: {candidate_id}")
     run_dir = _make_run_dir(
         config,
         now=now,
@@ -1356,6 +1671,7 @@ def run_campaign_once(
         config,
         run_dir=run_dir,
         previous_result=previous_result,
+        candidate=candidate,
     )
     state = _initial_state(config, run_dir, proposal)
     if dry_run:
@@ -1372,6 +1688,13 @@ def run_campaign_once(
         str(config["runner"]["config_path"]),
         run_dir / "configs" / "base_workflow.yaml",
     )
+    experiment_ids = (
+        _scientific_register_experiments(config, run_dir, proposal)
+        if _scientific_loop_enabled(config)
+        else []
+    )
+    for index, experiment_id in enumerate(experiment_ids):
+        state["queued_trials"][index]["experiment_id"] = experiment_id
 
     metrics_rows: list[dict[str, Any]] = []
 
@@ -1389,7 +1712,9 @@ def run_campaign_once(
         state["queued_trials"][index - 1]["log_path"] = str(trial_log_path)
         _write_json(run_dir / "state.json", state)
 
-        workflow_config = apply_exact_trial_patch(base_workflow_config, patch)
+        candidate_fixed = (candidate or {}).get("design", {}).get("fixed", {})
+        workflow_config = _deep_merge(base_workflow_config, candidate_fixed)
+        workflow_config = apply_exact_trial_patch(workflow_config, patch)
         experiment_config = workflow_config.setdefault("experiment", {})
         experiment_config["n_trials"] = 1
         experiment_config["verbose"] = MANAGED_EXPERIMENT_VERBOSE
@@ -1397,6 +1722,10 @@ def run_campaign_once(
         workflow_config["outputs"]["artifact_root"] = str(_campaign_artifact_root(config))
         workflow_config["outputs"]["artifact_subdir"] = str(config["campaign"]["domain"])
         workflow_config["outputs"]["artifact_prefix"] = str(config["campaign"]["prefix"])
+        workflow_config["scientific_monitoring"] = {
+            "telemetry_path": str(trial_dir / "metrics" / "epoch_telemetry.jsonl"),
+            "observations_path": str(trial_dir / "metrics" / "observations.jsonl"),
+        }
         _write_yaml_or_json(run_dir / "configs" / f"{trial_name}.yaml", workflow_config)
         _write_yaml_or_json(trial_dir / "config.yaml", workflow_config)
 
@@ -1421,6 +1750,15 @@ def run_campaign_once(
                 "log_path": str(trial_log_path),
             }
             _write_json(run_dir / "state.json", state)
+            if experiment_ids:
+                _scientific_record_trial(
+                    config,
+                    experiment_id=experiment_ids[index - 1],
+                    trial_dir=trial_dir,
+                    trial_metrics=None,
+                    status="failed",
+                    error=state["latest_error"],
+                )
             _write_json(
                 run_dir / "campaign_result.json",
                 {
@@ -1443,6 +1781,14 @@ def run_campaign_once(
             trial_metrics["generator_snapshot_path"] = generator_snapshot_path
         metrics_rows.append(trial_metrics)
         _write_json(trial_dir / "metrics.json", trial_metrics)
+        if experiment_ids:
+            _scientific_record_trial(
+                config,
+                experiment_id=experiment_ids[index - 1],
+                trial_dir=trial_dir,
+                trial_metrics=trial_metrics,
+                status="completed",
+            )
 
         state["queued_trials"][index - 1]["status"] = "completed"
         if loss_pdf_path:
@@ -1513,7 +1859,15 @@ def _launch_mini_batch_child(
     device: str = "cpu",
     run_timestamp: str | None = None,
     run_id: str | None = None,
+    candidate_id: str | None = None,
 ) -> dict[str, Any]:
+    if _scientific_loop_enabled(config) and candidate_id is None:
+        scientific_state = _scientific_state_context(config)
+        candidate_id = (
+            scientific_state.get("controller_state", {})
+            .get("pending_decision", {})
+            .get("selected")
+        )
     now, generated_id = _next_run_identity()
     if run_timestamp is not None:
         now = _parse_run_timestamp(run_timestamp)
@@ -1538,6 +1892,8 @@ def _launch_mini_batch_child(
         "--device",
         device,
     ]
+    if candidate_id:
+        command.extend(["--candidate-id", candidate_id])
     env = dict(os.environ)
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
@@ -1572,8 +1928,18 @@ def _launch_mini_batch_child(
         "config_path": str(config["campaign"]["config_path"]),
         "latest_decision": {},
         "latest_error": {},
+        "scientific_candidate_id": candidate_id,
     }
     _write_json(_campaign_state_path(config), state)
+    if _scientific_loop_enabled(config):
+        repository = _ensure_scientific_state(config)
+        scientific_state = repository.load()
+        scientific_state["controller_state"]["active_run"] = {
+            "run_dir": str(run_dir),
+            "candidate_experiment_id": candidate_id,
+            "started_at": _now_iso(),
+        }
+        repository.save(scientific_state)
     return state
 
 
@@ -1644,6 +2010,186 @@ def _campaign_state_for_decision(
         next_state["latest_error"] = dict(error)
     _write_json(_campaign_state_path(config), next_state)
     return next_state
+
+
+def _write_scientific_decision(
+    config: Mapping[str, Any],
+    run_dir: Path,
+    campaign_state: Mapping[str, Any],
+    decision: ScientificStateDecision,
+) -> dict[str, Any]:
+    row = {
+        "decision": decision.decision,
+        "operations": decision.operations,
+        "candidate_selection": decision.candidate_selection,
+        "rationale": decision.rationale,
+        "evidence_ids": decision.evidence_ids,
+        "campaign": config["campaign"]["id"],
+        "run_dir": str(run_dir),
+        "created_at": _now_iso(),
+        "previous_status": campaign_state.get("status"),
+    }
+    _write_json(run_dir / "agent_decision.json", row)
+    _append_jsonl(_agent_decisions_path(config), row)
+    upsert_logbook_block(
+        config["logbook"]["path"],
+        f"{run_dir.name}:agent",
+        f"### Scientific controller decision\n\n{decision.rationale}",
+    )
+    return row
+
+
+def _valid_scientific_candidates(
+    config: Mapping[str, Any],
+    scientific_state: Mapping[str, Any],
+) -> list[tuple[str, Mapping[str, Any]]]:
+    controller = scientific_state.get("controller_state") or {}
+    budgets = controller.get("budgets") or {}
+    remaining = budgets.get("remaining_gpu_hours")
+    maximum = budgets.get("maximum_single_experiment_gpu_hours")
+    candidates = []
+    for candidate_id, candidate in scientific_state["entities"]["candidate_experiments"].items():
+        if not isinstance(candidate, Mapping) or candidate.get("status", "proposed") not in {"proposed", "approved"}:
+            continue
+        try:
+            validate_candidate(
+                candidate,
+                allowed_paths=list(config["agent"]["allowed_paths"]),
+                remaining_gpu_hours=float(remaining) if remaining is not None else None,
+                maximum_single_experiment_gpu_hours=float(maximum) if maximum is not None else None,
+            )
+        except (TypeError, ValueError, KeyError):
+            continue
+        cost = float((candidate.get("cost") or {}).get("estimated_gpu_hours", 0.0))
+        value = float((candidate.get("decision_value") or {}).get("scientific_value", 0.0))
+        candidates.append((candidate_id, candidate, value / max(cost, 1e-9)))
+    candidates.sort(key=lambda item: (-item[2], item[0]))
+    return [(candidate_id, candidate) for candidate_id, candidate, _score in candidates]
+
+
+def _handle_scientific_agent_decision(
+    config: Mapping[str, Any],
+    *,
+    campaign_state: Mapping[str, Any],
+    campaign_name: str,
+    device: str,
+    active_process_pid: int | None = None,
+    active_run_running: bool = False,
+    client: Any | None = None,
+    stream: TextIO | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    stream = stream or sys.stdout
+    run_dir_text = campaign_state.get("run_dir")
+    run_dir = Path(str(run_dir_text)) if run_dir_text else (_latest_run_dir(config) or Path())
+    result = _campaign_result_summary(config, run_dir if run_dir_text else None)
+    scientific_state = _scientific_state_context(config)
+    try:
+        decision = request_scientific_state_decision(
+            config,
+            campaign_state,
+            result,
+            scientific_state,
+            client=client,
+        )
+        valid_ids = set(scientific_state["entities"]["observations"]) | set(
+            scientific_state["entities"]["hypotheses"]
+        ) | set(scientific_state["entities"]["beliefs"]) | set(
+            scientific_state["entities"]["questions"]
+        )
+        if any(evidence_id not in valid_ids for evidence_id in decision.evidence_ids):
+            raise ValueError("Scientific decision references an unknown evidence ID.")
+        if decision.decision in {"propose_experiment", "terminate_run_and_propose_experiment"}:
+            observation_ids = set(scientific_state["entities"]["observations"])
+            if not observation_ids.intersection(decision.evidence_ids):
+                raise ValueError("Experiment proposals require at least one observation evidence ID.")
+        repository = ScientificStateRepository(_scientific_state_path(config))
+        scientific_state = repository.apply_operations(decision.operations)
+    except Exception as exc:
+        error = {"type": type(exc).__name__, "message": str(exc), "at": _now_iso()}
+        state = _campaign_state_for_decision(
+            config,
+            campaign_state,
+            status="agent_decision_failed",
+            phase="scientific_decision",
+            error=error,
+        )
+        print(f"status: agent_decision_failed; retry_after={state['poll_seconds']}s", file=stream)
+        return state, dict(config)
+
+    decision_row = _write_scientific_decision(config, run_dir, campaign_state, decision)
+    print(f"scientific_decision: {decision.decision}", file=stream)
+    if active_run_running and decision.decision in {"no_action", "update_state"}:
+        return (
+            _campaign_state_for_decision(
+                config,
+                campaign_state,
+                status="running",
+                phase="mini_batch",
+                process_running=True,
+                decision_row=decision_row,
+            ),
+            dict(config),
+        )
+    if active_run_running and decision.decision == "stop_campaign":
+        _terminate_process_group(active_process_pid)
+        _mark_run_terminated_by_agent(run_dir, decision_row=decision_row)
+        return (
+            _campaign_state_for_decision(
+                config,
+                campaign_state,
+                status="campaign_completed",
+                phase="stopped",
+                decision_row=decision_row,
+            ),
+            dict(config),
+        )
+    if decision.decision in {"propose_experiment", "terminate_run_and_propose_experiment"}:
+        scientific_state = _scientific_state_context(config)
+        selected = decision.candidate_selection
+        valid_candidates = _valid_scientific_candidates(config, scientific_state)
+        if selected is not None and selected not in {candidate_id for candidate_id, _ in valid_candidates}:
+            raise ValueError(f"Selected scientific candidate is not valid: {selected}")
+        if selected is None:
+            selected = valid_candidates[0][0] if valid_candidates else None
+        if selected is None:
+            state = _campaign_state_for_decision(
+                config,
+                campaign_state,
+                status="analysis_completed",
+                phase="idle",
+                decision_row=decision_row,
+            )
+            return state, dict(config)
+        if decision.decision == "terminate_run_and_propose_experiment":
+            _terminate_process_group(active_process_pid)
+            _mark_run_terminated_by_agent(run_dir, decision_row=decision_row)
+        repository = ScientificStateRepository(_scientific_state_path(config))
+        scientific_state = repository.load()
+        scientific_state["controller_state"]["pending_decision"] = {
+            "candidate_experiments": [candidate_id for candidate_id, _ in valid_candidates],
+            "selected": selected,
+        }
+        scientific_state["entities"]["candidate_experiments"][selected]["status"] = "approved"
+        repository.save(scientific_state)
+        launched = _launch_mini_batch_child(
+            config,
+            campaign_name=campaign_name,
+            device=device,
+            candidate_id=selected,
+        )
+        launched["latest_decision"] = decision_row
+        _write_json(_campaign_state_path(config), launched)
+        return launched, dict(config)
+    return (
+        _campaign_state_for_decision(
+            config,
+            campaign_state,
+            status="analysis_completed",
+            phase="idle",
+            decision_row=decision_row,
+        ),
+        dict(config),
+    )
 
 
 def _mark_run_terminated_by_agent(
@@ -1877,6 +2423,17 @@ def _handle_agent_decision(
     stream: TextIO | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     stream = stream or sys.stdout
+    if _scientific_loop_enabled(config):
+        return _handle_scientific_agent_decision(
+            config,
+            campaign_state=campaign_state,
+            campaign_name=campaign_name,
+            device=device,
+            active_process_pid=active_process_pid,
+            active_run_running=active_run_running,
+            client=client,
+            stream=stream,
+        )
     run_dir_text = campaign_state.get("run_dir")
     run_dir = Path(str(run_dir_text)) if run_dir_text else (_latest_run_dir(config) or Path())
     result = _campaign_result_summary(config, run_dir if run_dir_text else None)
@@ -2006,6 +2563,9 @@ def run_campaign_loop(
         print("status: dry_run", file=stream)
         print(format_campaign_status(status), file=stream)
         return {"state": {"status": "dry_run"}, "status": status, "dry_run": True}
+
+    if _scientific_loop_enabled(config):
+        _ensure_scientific_state(config)
 
     lock_path = _acquire_campaign_lock(config, force=force_restart)
     active_config = dict(config)
@@ -2171,6 +2731,22 @@ def run_campaign_loop(
 def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> dict[str, Any]:
     """Read status from the latest campaign run state file."""
     campaign_state = _read_json_if_exists(_campaign_state_path(config))
+    scientific_path = _scientific_state_path(config)
+    scientific_state = (
+        ScientificStateRepository(scientific_path).load()
+        if scientific_path.is_file()
+        else {}
+    )
+    scientific_summary = {
+        "state_path": str(scientific_path),
+        "schema_version": scientific_state.get("schema_version"),
+        "beliefs": scientific_state.get("entities", {}).get("beliefs", {}),
+        "hypotheses": scientific_state.get("entities", {}).get("hypotheses", {}),
+        "questions": scientific_state.get("entities", {}).get("questions", {}),
+        "candidates": scientific_state.get("entities", {}).get("candidate_experiments", {}),
+        "observations": scientific_state.get("entities", {}).get("observations", {}),
+        "controller_state": scientific_state.get("controller_state", {}),
+    }
     run_dir = _latest_run_dir(config)
     if run_dir is None:
         return {
@@ -2192,6 +2768,7 @@ def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> d
             "latest_decision": campaign_state.get("latest_decision", {}),
             "latest_error": campaign_state.get("latest_error", {}),
             "log_tail": "",
+            "scientific": scientific_summary,
         }
     state_path = run_dir / "state.json"
     state = _read_json(state_path) if state_path.is_file() else {}
@@ -2226,6 +2803,7 @@ def campaign_status(config: Mapping[str, Any], *, log_tail_lines: int = 20) -> d
         "latest_error": campaign_state.get("latest_error") or state.get("latest_error", {}),
         "loss_pdf_paths": state.get("loss_pdf_paths", []),
         "log_tail": "\n".join(log_lines[-int(log_tail_lines) :]),
+        "scientific": scientific_summary,
     }
 
 
@@ -2363,7 +2941,23 @@ def format_campaign_status(status: Mapping[str, Any]) -> str:
         f"- Logs directory: {_display_path(status.get('logs_dir'))}",
         f"- Mini-batch log: {_display_path(status.get('child_log_path'))}",
         f"- Campaign state: {_display_path(status.get('campaign_state_path'))}",
+        f"- Scientific state: {_display_path((status.get('scientific') or {}).get('state_path'))}",
     ]
+
+    scientific = status.get("scientific") or {}
+    lines.extend(["", "Scientific belief state"])
+    if scientific.get("schema_version") is not None:
+        lines.append(f"- Schema version: `{scientific['schema_version']}`")
+        controller = scientific.get("controller_state") or {}
+        pending = (controller.get("pending_decision") or {}).get("selected")
+        lines.append(f"- Active candidate: `{pending or '-'}`")
+        lines.append(f"- Beliefs: {len(scientific.get('beliefs') or {})}")
+        lines.append(f"- Active hypotheses: {sum(1 for item in (scientific.get('hypotheses') or {}).values() if item.get('status', 'active') == 'active')}")
+        lines.append(f"- Open questions: {sum(1 for item in (scientific.get('questions') or {}).values() if item.get('status', 'open') == 'open')}")
+        lines.append(f"- Pending candidates: {sum(1 for item in (scientific.get('candidates') or {}).values() if item.get('status', 'proposed') in {'proposed', 'approved'})}")
+        lines.append(f"- Recorded observations: {len(scientific.get('observations') or {})}")
+    else:
+        lines.append("- State has not been initialized yet.")
 
     queued = status.get("queued_trials") or []
     lines.extend(["", "Trials"])
@@ -2464,18 +3058,22 @@ def terminate_campaign(config: Mapping[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "AgentCampaignDecision",
+    "ScientificStateDecision",
     "CAMPAIGN_CONFIGS",
     "MUTABLE_GROUP_PATHS",
     "apply_campaign_patch",
     "apply_exact_trial_patch",
     "campaign_decision_text_format",
+    "scientific_state_decision_text_format",
     "campaign_status",
     "format_campaign_status",
     "force_restart_campaign",
     "list_campaigns",
     "load_campaign_config",
     "parse_agent_campaign_decision",
+    "parse_scientific_state_decision",
     "request_agent_campaign_decision",
+    "request_scientific_state_decision",
     "resolve_campaign_config",
     "run_campaign_loop",
     "run_campaign_once",

@@ -76,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     mini_batch_parser.add_argument("--config", type=Path, required=True)
     mini_batch_parser.add_argument("--run-timestamp", required=True)
     mini_batch_parser.add_argument("--run-id", required=True)
+    mini_batch_parser.add_argument("--candidate-id")
     mini_batch_parser.add_argument(
         "--device",
         choices=("cpu", "auto", "cuda"),
@@ -162,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             now=now,
             short_id=args.run_id,
             allow_existing_run_dir=True,
+            candidate_id=args.candidate_id,
         )
         print(f"run_dir: {result['run_dir']}")
         print(f"queued_trials: {len(result['proposal']['sampled_patches'])}")

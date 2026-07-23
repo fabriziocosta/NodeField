@@ -11,6 +11,8 @@ The campaign implementation lives in:
 - [`../conditional_node_field_graph_generator/nodefield_campaign.py`](../conditional_node_field_graph_generator/nodefield_campaign.py)
 - [`../conditional_node_field_graph_generator/campaign_search.py`](../conditional_node_field_graph_generator/campaign_search.py)
 - [`../run_nodefield_campaign.py`](../run_nodefield_campaign.py)
+- [`../conditional_node_field_graph_generator/scientific_state.py`](../conditional_node_field_graph_generator/scientific_state.py)
+- [`../conditional_node_field_graph_generator/scientific_observations.py`](../conditional_node_field_graph_generator/scientific_observations.py)
 
 The default campaign configs live in:
 
@@ -20,6 +22,12 @@ The default campaign configs live in:
 - [`../configs/campaigns/artificial_graphs_large.yaml`](../configs/campaigns/artificial_graphs_large.yaml)
 
 ## Goal
+
+The campaign also maintains a separate scientific belief state at
+`artifact/<domain>/<prefix>_state.yaml`. It records immutable experiment
+summaries, deterministic observations, hypotheses, beliefs, open questions,
+candidate experiments, controlled relations, and controller budgets. Full epoch
+curves remain in trial-local JSONL/CSV/PDF artifacts.
 
 The loop is designed for iterative hyperparameter campaigns, not one-off notebook
 experiments. Each campaign attempt:
@@ -149,6 +157,21 @@ process group, marks the run state as `terminated_by_agent`, writes
 and immediately launches the next timestamped run. This is semantic early
 stopping: it should be used only when partial metrics, logs, or repeated failure
 patterns make the current run clearly uninformative.
+
+## Scientific State Controller
+
+Built-in campaigns enable `agent.stateful_loop`. The LLM returns typed
+operations over hypotheses, beliefs, questions, candidates, and relations. It
+cannot rewrite experiments or observations. Deterministic code validates
+allowlisted parameter paths, candidate cost, budgets, and evidence references,
+then chooses the highest scientific-value-per-GPU-hour candidate with stable
+ID tie-breaking.
+
+Training writes `metrics/epoch_telemetry.jsonl` and
+`metrics/observations.jsonl` for each trial. The latter contains deterministic
+signals such as validation plateaus, generalisation gaps, non-finite metrics,
+gradient instability, and anomalous runtime. At controller boundaries these
+signals are imported into the campaign `state.yaml`.
 
 ## Proposal Modes
 

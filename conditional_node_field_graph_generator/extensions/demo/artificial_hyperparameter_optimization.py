@@ -173,6 +173,7 @@ def run_artificial_hyperparameter_optimization(
     model_config = config["model"]
     generation_config = config["generation"]
     output_config = config["outputs"]
+    scientific_config = config.get("scientific_monitoring", {}) or {}
 
     artifact_base = _resolve_campaign_base_from_config(output_config, notebook_context)
     _context_path(notebook_context, "NOTEBOOK_DATA_ROOT", Path("notebooks") / "datasets")
@@ -216,6 +217,12 @@ def run_artificial_hyperparameter_optimization(
             "verbose": int(experiment["verbose"]),
             "artifact_root": trial_root / "artifacts",
             "checkpoint_root": trial_root / "checkpoints",
+            "scientific_telemetry_path": scientific_config.get(
+                "telemetry_path", str(trial_root / "metrics" / "epoch_telemetry.jsonl")
+            ),
+            "scientific_observations_path": scientific_config.get(
+                "observations_path", str(trial_root / "metrics" / "observations.jsonl")
+            ),
         }
         graph_generator = build_graph_generator(**generator_kwargs)
         graph_generator = fit_graph_generator(

@@ -1002,6 +1002,13 @@ def build_graph_generator(
     embedding_svd_transform_batch_size=10_000,
     embedding_svd_n_iter=2,
     embedding_svd_n_oversamples=5,
+    scientific_telemetry_path=None,
+    scientific_observations_path=None,
+    scientific_plateau_window_epochs=8,
+    scientific_plateau_minimum_improvement=0.002,
+    scientific_generalisation_gap_threshold=0.12,
+    scientific_gradient_norm_threshold=1000.0,
+    scientific_runtime_multiplier=3.0,
 ):
     if nbits is not None:
         if node_vectorizer_nbits is None:
@@ -1164,6 +1171,19 @@ def build_graph_generator(
         model_name=model_name,
         model_dir=str(model_dir) if model_dir is not None else None,
     )
+    conditional_node_generator_model.scientific_telemetry_path = scientific_telemetry_path
+    conditional_node_generator_model.scientific_observations_path = scientific_observations_path
+    conditional_node_generator_model.scientific_plateau_window_epochs = int(scientific_plateau_window_epochs)
+    conditional_node_generator_model.scientific_plateau_minimum_improvement = float(
+        scientific_plateau_minimum_improvement
+    )
+    conditional_node_generator_model.scientific_generalisation_gap_threshold = float(
+        scientific_generalisation_gap_threshold
+    )
+    conditional_node_generator_model.scientific_gradient_norm_threshold = float(
+        scientific_gradient_norm_threshold
+    )
+    conditional_node_generator_model.scientific_runtime_multiplier = float(scientific_runtime_multiplier)
     graph_decoder = ConditionalNodeFieldGraphDecoder(
         verbose=verbose,
         direct_edge_probability_threshold=decoder_direct_edge_probability_threshold,

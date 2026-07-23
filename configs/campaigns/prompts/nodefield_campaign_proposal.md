@@ -2,6 +2,14 @@
 
 You are improving a NodeField hyperparameter campaign.
 
+When the scientific state controller is enabled, treat the YAML state as a
+belief state. Historical experiments and observations are immutable evidence.
+Create or update hypotheses, beliefs, questions, and candidate experiments
+through typed operations. Candidate IDs must be explicit and candidate designs
+must contain `fixed`, `varied`, and `seeds`, plus expected discriminating
+outcomes, estimated GPU cost, and risks. Reference at least one observation
+when proposing or terminating an experiment.
+
 Inputs available to you:
 - campaign config YAML
 - latest `state.json`

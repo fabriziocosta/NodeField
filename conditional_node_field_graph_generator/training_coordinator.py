@@ -21,6 +21,7 @@ from .metrics_collection import (
     GraphGeneratorTrainingSampleCallback,
     MetricsLogger,
 )
+from .scientific_observations import ObservationPolicy, ScientificMetricsCallback
 from .runtime_utils import verbose_log, run_trainer_fit
 from .training_policy import (
     build_training_callbacks,
@@ -105,6 +106,7 @@ class TrainingCoordinator:
             metrics_logger=MetricsLogger(),
             epoch_snapshot_callback=snapshot_callback,
             sample_progress_callback=sample_progress_callback,
+            scientific_metrics_callback=self._build_scientific_metrics_callback(),
         )
         if owner.model_name is not None:
             verbose_log(owner, f"Save target model_name={owner.model_name} model_dir={owner.model_dir}")
@@ -157,6 +159,29 @@ class TrainingCoordinator:
                 owner.plot_metrics()
             except Exception as exc:
                 logger.warning("Unable to plot training metrics: %s", exc)
+
+    def _build_scientific_metrics_callback(self):
+        telemetry_path = getattr(self.owner, "scientific_telemetry_path", None)
+        if telemetry_path is None:
+            return None
+        policy = ObservationPolicy(
+            plateau_window_epochs=int(getattr(self.owner, "scientific_plateau_window_epochs", 8)),
+            plateau_minimum_improvement=float(
+                getattr(self.owner, "scientific_plateau_minimum_improvement", 0.002)
+            ),
+            generalisation_gap_threshold=float(
+                getattr(self.owner, "scientific_generalisation_gap_threshold", 0.12)
+            ),
+            gradient_norm_threshold=float(
+                getattr(self.owner, "scientific_gradient_norm_threshold", 1000.0)
+            ),
+            runtime_multiplier=float(getattr(self.owner, "scientific_runtime_multiplier", 3.0)),
+        )
+        return ScientificMetricsCallback(
+            telemetry_path,
+            getattr(self.owner, "scientific_observations_path", None),
+            policy=policy,
+        )
 
     def fit_from_prebuilt_batches(
         self,
