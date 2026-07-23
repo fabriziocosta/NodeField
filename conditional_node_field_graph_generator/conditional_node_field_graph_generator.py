@@ -94,6 +94,42 @@ from .oracle_utils import (
     normalize_violating_node_sets as _normalize_violating_node_sets,
     update_oracle_edge_memory as _update_oracle_edge_memory,
 )
+
+
+class DecodeStageVariants(dict):
+    """Effort-indexed decode stages with semantic compatibility aliases.
+
+    The canonical keys remain ``effort_0`` ... ``effort_N``.  Older notebooks
+    can use ``raw``, ``ilp``, and ``oracle`` without changing iteration or the
+    serialized dictionary shape.
+    """
+
+    def _alias_key(self, key: Any) -> Any:
+        if dict.__contains__(self, key):
+            return key
+        if not isinstance(key, str) or not key.startswith(("raw", "ilp", "oracle")):
+            return key
+        effort_keys = sorted(
+            (name for name in dict.keys(self) if isinstance(name, str) and name.startswith("effort_")),
+            key=lambda name: int(name.split("_", 1)[1]),
+        )
+        if not effort_keys:
+            return key
+        aliases = {
+            "raw": effort_keys[0],
+            "ilp": effort_keys[min(1, len(effort_keys) - 1)],
+            "oracle": effort_keys[-1],
+        }
+        return aliases.get(key, key)
+
+    def __getitem__(self, key: Any):
+        return dict.__getitem__(self, self._alias_key(key))
+
+    def get(self, key: Any, default: Any = None):
+        return dict.get(self, self._alias_key(key), default)
+
+    def __contains__(self, key: object) -> bool:
+        return dict.__contains__(self, self._alias_key(key))
 from .parallel_utils import _normalize_n_jobs, _parallel_map
 
 DEFAULT_DUMMY_NODE_LABEL = "__dummy_node_label__"
@@ -3291,10 +3327,10 @@ class ConditionalNodeFieldGraphGenerator(object):
             desired_target=desired_target,
             guidance_scale=guidance_scale,
         )
-        variants: Dict[str, List[Optional[nx.Graph]]] = {
+        variants: Dict[str, List[Optional[nx.Graph]]] = DecodeStageVariants({
             f"effort_{effort}": [None] * int(n_samples)
             for effort in range(int(max_effort) + 1)
-        }
+        })
         for slot_idx in range(int(n_samples)):
             slot_conditioning = self._slice_graph_conditioning(sampled_conditioning, [slot_idx])
             slot_generated_nodes = _build_single_generated_node_batch(initial_generated_nodes, slot_idx)
