@@ -92,10 +92,10 @@ NodeField/
 │   │       └── README.md
 │   └── PREFERENCES.md
 ├── notebooks/
-│   ├── demo.ipynb
-│   ├── demo_chem.ipynb
-│   ├── demo_optimization.ipynb
-│   └── demo_zinc.ipynb
+│   ├── end_to_end_graph_generation_experiment.ipynb
+│   ├── molecular_generation_and_guidance.ipynb
+│   ├── similarity_pruned_target_optimization.ipynb
+│   └── zinc_molecular_generation_development.ipynb
 ├── tests/
 ├── .artifacts/
 └── README.md
@@ -244,10 +244,10 @@ both the legacy hard decode channels and richer full-shape distribution tensors
 for node labels, edge existence, and edge labels. The interface details are
 documented in [`docs/4_MAIN_CLASS_INTERFACES_README.md`](docs/4_MAIN_CLASS_INTERFACES_README.md).
 
-Notebook examples:
-- `notebooks/demo.ipynb`
-- `notebooks/demo_chem.ipynb`
-- `notebooks/demo_optimization.ipynb`
+Notebook examples are organized by purpose rather than by a generic `demo_`
+prefix. See the complete [notebook guide](docs/NOTEBOOKS.md) for the full
+catalog, recommended starting points, and the distinction between training,
+sampling, analysis, optimization, and validation notebooks.
 
 ## Running Tests
 

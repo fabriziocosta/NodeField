@@ -46,6 +46,7 @@ artifact/
 notebooks/datasets/
 notebooks/artificial_dataset_config_*.yaml
 notebooks/artificial-cycle-path-star-*.yaml
+notebooks/configs/artificial_datasets/*.yaml
 
 # ---- IDE / OS clutter ----
 .DS_Store

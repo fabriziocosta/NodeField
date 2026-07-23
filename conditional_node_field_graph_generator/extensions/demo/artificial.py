@@ -123,8 +123,13 @@ def _unlabel_base_and_mapped_subgraphs(abstract_graph, label="-"):
 
 
 def find_latest_artificial_dataset_config(root: str | Path, pattern: str = "artificial-cycle-path-star*.yaml") -> Path:
-    """Return the newest artificial cycle/path/star dataset config under ``root``."""
-    matches = sorted(Path(root).glob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
+    """Return the newest artificial dataset config under ``root``.
+
+    The search is recursive so configs can live under a dedicated directory
+    such as ``notebooks/configs/artificial_datasets`` without polluting the
+    notebook root.
+    """
+    matches = sorted(Path(root).rglob(pattern), key=lambda path: path.stat().st_mtime, reverse=True)
     if not matches:
         raise FileNotFoundError(f"No files matching {pattern!r} under {root}.")
     return matches[0]

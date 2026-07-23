@@ -676,8 +676,10 @@ def _artificial_dataset_config_stem(config):
     return sanitize_model_token("-".join(crumbs))
 
 
-def _write_artificial_dataset_config(config):
-    path = Path(f"{_artificial_dataset_config_stem(config)}.yaml")
+def _write_artificial_dataset_config(config, directory=None):
+    output_dir = Path.cwd() if directory is None else Path(directory)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{_artificial_dataset_config_stem(config)}.yaml"
     path.write_text(_dump_simple_yaml(config), encoding="utf-8")
     print(f"Saved artificial dataset config: {path}")
     return path
@@ -698,9 +700,15 @@ def generate_artificial_dataset(
     component_specific_alphabets=True,
     seed=None,
     save_config=True,
+    save_config_dir=None,
     load_from_file=None,
 ):
-    """Generate cycle -> path -> star-ray artificial NetworkX graphs."""
+    """Generate cycle -> path -> star-ray artificial NetworkX graphs.
+
+    When ``save_config`` is enabled, configs are written to the current
+    directory by default for backwards compatibility. Pass ``save_config_dir``
+    to keep generated configs in a dedicated artifact/config directory.
+    """
 
     config = {
         "num_graphs": num_graphs,
@@ -755,7 +763,7 @@ def generate_artificial_dataset(
         raise ValueError("n_iterations must be an integer >= 1.")
 
     if save_config:
-        _write_artificial_dataset_config(config)
+        _write_artificial_dataset_config(config, directory=save_config_dir)
 
     rng = random.Random(seed)
     graphs = []

@@ -208,6 +208,11 @@ The function prints the generated YAML file name, for example:
 Saved artificial dataset config: artificial-cycle-path-star-n100-c3-6-p1-4-r3x1-3.yaml
 ```
 
+For notebook workflows, pass
+`save_config_dir=REPO_ROOT / "notebooks" / "configs" / "artificial_datasets"`
+so generated dataset configs stay in the dedicated config directory rather
+than the notebook root.
+
 The same configuration can be loaded later:
 
 ```python
@@ -224,7 +229,7 @@ alphabets. Pass `save_config=False` when no config file should be written.
 
 ### Conditioning-vector analysis notebook
 
-`notebooks/artificial_conditioning_vector_test.ipynb` compares generated graphs
+`notebooks/artificial_structural_conditioning_analysis.ipynb` compares generated graphs
 against conditioning graphs for this artificial family.
 
 Important analysis behavior:
