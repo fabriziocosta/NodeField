@@ -72,6 +72,26 @@ def test_generate_artificial_dataset_saves_n_iterations_config(tmp_path, monkeyp
     assert len(graphs[0].graph["metadata"]["iteration_parameters"]) == 2
 
 
+def test_generate_artificial_dataset_can_write_config_to_dedicated_directory(tmp_path, capsys):
+    config_dir = tmp_path / "configs" / "artificial_datasets"
+
+    generate_artificial_dataset(
+        num_graphs=1,
+        cycle_length=4,
+        path_length=2,
+        num_rays=1,
+        ray_length=1,
+        save_config_dir=config_dir,
+    )
+
+    output = capsys.readouterr().out
+    match = re.search(r"Saved artificial dataset config: (.+\.yaml)", output)
+
+    assert match is not None
+    assert list(config_dir.glob("artificial-cycle-path-star-*.yaml"))
+    assert not list(tmp_path.glob("artificial-cycle-path-star-*.yaml"))
+
+
 def test_generate_artificial_dataset_returns_graphs_and_plot_function(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 

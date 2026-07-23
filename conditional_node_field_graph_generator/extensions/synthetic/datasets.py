@@ -681,7 +681,7 @@ def _write_artificial_dataset_config(config, directory=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{_artificial_dataset_config_stem(config)}.yaml"
     path.write_text(_dump_simple_yaml(config), encoding="utf-8")
-    print(f"Saved artificial dataset config: {path}")
+    print(f"Saved artificial dataset config: {path.name}")
     return path
 
 
