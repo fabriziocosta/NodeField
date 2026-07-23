@@ -5,6 +5,11 @@ not use a generic `demo_` prefix because the useful distinction is whether a
 notebook trains a model, samples from one, analyzes an experiment, prepares
 data, or validates an invariant.
 
+Notebooks are thin, reproducible entry points rather than storage for results:
+shared code belongs in package extensions, and execution outputs are cleared
+before commit. Generated datasets, checkpoints, plots, and state artifacts stay
+under ignored artifact/data paths.
+
 ## Start here
 
 - [Molecular generation and guidance](../notebooks/molecular_generation_and_guidance.ipynb)

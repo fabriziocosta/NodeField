@@ -184,7 +184,7 @@ def run_conditioning_vector_test(
     *,
     experiment_type: str = "path_length",
     samples_per_conditioning_graph: int = 32,
-    apply_feasibility_filtering: bool = False,
+    feasibility_effort: int = 0,
 ) -> dict[str, Any]:
     """Run one conditioning experiment and return dataframes plus generated graphs."""
     if experiment_type not in EXPERIMENTS:
@@ -202,7 +202,7 @@ def run_conditioning_vector_test(
     generated_by_graph = graph_generator.conditional_sample(
         conditioning_graphs,
         n_samples=int(samples_per_conditioning_graph),
-        apply_feasibility_filtering=apply_feasibility_filtering,
+        feasibility_effort=int(feasibility_effort),
     )
     rows = []
     for index, (conditioning_graph, conditioning_value, generated_graphs) in enumerate(

@@ -4,6 +4,11 @@ Each notebook below is linked to its `.ipynb` file so it can be opened directly
 from VS Code. Start with the notebook that matches the task rather than treating
 these as one linear tutorial.
 
+The notebooks are intentionally thin drivers: reusable helpers live in the
+package extensions, and saved cell outputs are not committed. Run a notebook
+from the repository environment and regenerate its artifacts locally when you
+need plots or tables.
+
 ## Core workflows
 
 - [Molecular generation and guidance](./molecular_generation_and_guidance.ipynb) — maintained chemistry workflow for molecular training, decoding, feasibility, guidance, and interpolation.
