@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/nodefield-logo.png" alt="NodeField — graph nodes and edges integrated with flowing field contours" width="640" />
+</p>
+
 # Conditional Node Field for Graph Generation
 
 NodeField is a conditional graph generation framework based on decompositional encoding and decoding, coupled with stationary node-field dynamics. Its central premise is to use an explicit graph kernel to derive node embeddings without end-to-end training while incorporating user-defined priors, thereby enabling the rapid injection of structured prior knowledge independently of the available data. The framework supports both classifier-free guidance (CFG) for target-conditioned sampling and separate post-hoc guidance through an auxiliary classifier or regressor.
@@ -97,9 +101,13 @@ NodeField/
 │   │       └── README.md
 │   └── PREFERENCES.md
 ├── notebooks/
-│   ├── molecular_generation_and_guidance.ipynb
-│   ├── similarity_pruned_target_optimization.ipynb
-│   └── zinc_molecular_generation_development.ipynb
+│   ├── README.md                 # Task chooser and prerequisites
+│   ├── setup.ipynb
+│   ├── synthetic/
+│   ├── molecular/
+│   ├── campaigns/
+│   ├── experiments/
+│   └── validation/
 ├── tests/
 ├── .artifacts/
 └── README.md

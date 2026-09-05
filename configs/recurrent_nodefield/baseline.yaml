@@ -1,0 +1,105 @@
+seed: 0
+seeds:
+- 0
+- 1
+- 2
+- 3
+- 4
+dataset:
+  num_graphs: 1000
+  cycle_length:
+  - 3
+  - 8
+  num_cycles: 1
+  n_iterations: 1
+  path_length: 2
+  num_rays: 3
+  ray_length: 1
+  node_alphabet_size: 3
+  edge_alphabet_size: 1
+  node_alphabet_kind: int
+  edge_alphabet_kind: int
+  component_specific_alphabets: true
+  seed: 42
+parameter_count: computed_after_setup
+model:
+  latent_embedding_dimension: 64
+  number_of_transformer_layers: 1
+  transformer_attention_head_count: 4
+  transformer_dropout: 0.1
+  batch_size: 16
+  learning_rate: 0.0001
+  maximum_epochs: 250
+  early_stopping_patience: 20
+  early_stopping_min_delta: 0.0
+  node_field_sigma: 0.2
+  sampling_step_size: 0.05
+  langevin_noise_scale: 0.0
+  recurrent_training_steps: 8
+  recurrent_hidden_dimension: 64
+  recurrent_detach_interval: 4
+  recurrent_update_scale: 1.0
+  recurrent_initial_state: zeros
+  recurrent_state_normalization: true
+  recurrent_sigma_min: 0.02
+  recurrent_sigma_max: 0.2
+  recurrent_supervise_all_steps: true
+  recurrent_loss_discount: 1.0
+  node_embedding_svd_dimension: 32
+  graph_embedding_svd_dimension: 32
+  node_vectorizer_parallel: false
+  graph_vectorizer_parallel: false
+  feasibility_parallel: false
+  decoder_n_jobs: 1
+  decoder_solver_threads: 1
+  locality_horizon: 2
+  use_feasibility_filtering: false
+  feasibility_oracle_candidates_per_attempt: 0
+  verbose: false
+  node_field_mode: baseline
+  recurrent_corruption_schedule: constant
+experiment:
+  split_seed: 42
+  split_fractions:
+  - 0.8
+  - 0.1
+  - 0.1
+  smoke_graphs: 100
+  smoke_epochs: 10
+  smoke_seeds:
+  - 0
+  smoke_depths:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  depths:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  - 128
+  - 256
+  reset_fractions:
+  - 0.25
+  - 0.5
+  - 0.75
+  shuffle_seeds:
+  - 0
+  - 1
+  - 2
+  noise_scales:
+  - 0.02
+  - 0.2
+  - 1.0
+  langevin_original: 0.01
+  stability_consecutive_steps: 3
+  primary_metric: feasible_condition_match
+  minimum_effect: 0.05
+  decode_time_limit_seconds: 5.0
+  threads: 1

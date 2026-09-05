@@ -191,4 +191,4 @@ For detailed configuration and legacy migration behavior, see the
 [agent campaign optimization reference](2E_AGENT_CAMPAIGN_OPTIMIZATION_README.md).
 
 To inspect the newest campaign without supplying a campaign name, open the
-[automatic campaign state dashboard](../notebooks/automatic_campaign_state_dashboard.ipynb).
+[automatic campaign state dashboard](../notebooks/campaigns/monitor.ipynb).

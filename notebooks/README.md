@@ -1,47 +1,61 @@
 # NodeField notebooks
 
-Each notebook below is linked to its `.ipynb` file so it can be opened directly
-from VS Code. Start with the notebook that matches the task rather than treating
-these as one linear tutorial.
+Start with [setup.ipynb](setup.ipynb) to install dependencies. Restart the kernel afterward,
+then select the same Python environment in the notebook you want to run.
 
-The notebooks are intentionally thin drivers: reusable helpers live in the
-package extensions, and saved cell outputs are not committed. Run a notebook
-from the repository environment and regenerate its artifacts locally when you
-need plots or tables.
+Choose a task below. Each notebook explains its prerequisites, settings, next steps,
+and outputs. Review data sizes and training budgets before running training cells.
 
-## Core workflows
+## Synthetic graphs
 
-- [Automatic campaign state dashboard](./automatic_campaign_state_dashboard.ipynb) — auto-discover the latest campaign and inspect its current experiment, observations, hypotheses, and Graphviz state graph at detail levels 0–3.
-- [Molecular generation and guidance](./molecular_generation_and_guidance.ipynb) — maintained chemistry workflow for molecular training, decoding, feasibility, guidance, and interpolation.
-- [ZINC molecular-generation development](./zinc_molecular_generation_development.ipynb) — larger cached-ZINC development and evaluation workspace.
-- [Artificial non-streaming training and sampling](./artificial_non_streaming_training_and_sampling.ipynb) — train on generated cycle/path/star graphs and inspect samples.
+| Task | Before you start | Results |
+| --- | --- | --- |
+| [Train a synthetic graph model](synthetic/train.ipynb) | NSPPK; generated data | Saved model, dataset configuration, and sample plots |
+| [Sample a synthetic graph model](synthetic/sample.ipynb) | Saved synthetic model and dataset configuration | Sample plots and feasibility comparisons |
+| [Reconstruct partial graphs](synthetic/reconstruct.ipynb) | NSPPK; generated data | Reconstruction comparisons |
+| [Evaluate structural conditioning](synthetic/evaluate_conditioning.ipynb) | Saved synthetic model and dataset configuration | Structure and label comparisons |
 
-## Artificial graph experiments
+## Molecules
 
-- [Artificial partial-graph token reconstruction](./artificial_partial_graph_token_reconstruction.ipynb) — reconstruct full artificial graphs from partial graph token conditioning.
-- [Artificial structural conditioning analysis](./artificial_structural_conditioning_analysis.ipynb) — test whether path, cycle, and ray conditioning steers generated graph structure.
-- [Sample latest artificial generator](./sample_latest_artificial_generator.ipynb) — load the newest saved artificial generator and inspect generated samples and feasibility.
+| Task | Before you start | Results |
+| --- | --- | --- |
+| [Generate and compare molecules](molecular/generate.ipynb) | NSPPK, RDKit, and access to PubChem data | Trained model, molecule samples, and interpolation plots |
+| [Train on ZINC in memory](molecular/train_zinc.ipynb) | NSPPK, RDKit, and a ZINC CSV; sufficient RAM for the selected data | Model and training progress artifacts |
+| [Train on a ZINC stream](molecular/train_zinc_streaming.ipynb) | NSPPK, RDKit, and the selected ZINC CSV | Model, streaming statistics, and sample plots |
+| [Prepare ZINC data](molecular/prepare_zinc.ipynb) | RDKit; network access if the source data is missing | Filtered ZINC CSV files |
+| [Evaluate molecular feasibility](molecular/evaluate_feasibility.ipynb) | Saved molecular model and matching ZINC data | Decode traces, score comparisons, and interpolation plots |
 
-## Molecular training and sampling
+## Campaigns
 
-- [ZINC non-streaming training and sampling](./zinc_non_streaming_training_and_sampling.ipynb) — materialize a ZINC subset, train in memory, and compare filtered/unfiltered samples.
-- [ZINC streaming training and sampling](./zinc_streaming_training_and_sampling.ipynb) — train directly from the ZINC CSV through the streaming path.
-- [Campaign best-trial sampling review](./campaign_best_trial_sampling_review.ipynb) — reload the best completed campaign trial and review its outputs.
+| Task | Before you start | Results |
+| --- | --- | --- |
+| [Tune a ZINC model](campaigns/tune_zinc.ipynb) | ZINC data, molecular dependencies, and a search configuration | Trial results, best model, and sample comparisons |
+| [Monitor a campaign](campaigns/monitor.ipynb) | Existing campaign state; Graphviz support for relationship diagrams | Interactive campaign dashboard |
+| [Review the best campaign trial](campaigns/review_best_trial.ipynb) | Completed campaign trials and saved model artifacts | Trial ranking and generated molecule review |
 
-## Optimization and feasibility studies
+## Experiments
 
-- [Similarity-pruned target optimization](./similarity_pruned_target_optimization.ipynb) — train and evaluate a generator optimized toward a hidden similarity target.
-- [ZINC molecule hyperparameter optimization](./zinc_molecule_hyperparameter_optimization.ipynb) — run the YAML-driven ZINC molecule hyperparameter search.
-- [ZINC feasibility oracle analysis](./zinc_feasibility_oracle_analysis.ipynb) — compare oracle-off and oracle-on decoding, traces, and interpolation.
-- [ZINC guidance bootstrap and cycle analysis](./zinc_guidance_bootstrap_and_cycle_analysis.ipynb) — bootstrap guidance and compare guided versus unguided sampling cycles.
+| Task | Before you start | Results |
+| --- | --- | --- |
+| [Experiment with guidance cycles](experiments/guidance_cycles.ipynb) | NSPPK, RDKit, ZINC data, and a saved model or training budget | Guidance cycle summaries and sample comparisons |
+| [Experiment with ZINC generation](experiments/zinc_generation.ipynb) | NSPPK, RDKit, and ZINC data | Development model, sampling and interpolation comparisons |
+| [Optimize graph similarity](experiments/target_similarity.ipynb) | NSPPK, RDKit, and access to the selected dataset | Saved model and similarity-guidance comparisons |
 
-## Data preparation and validation
+## Validation
 
-- [Filter ZINC molecules by node count](./filter_zinc_molecules_by_node_count.ipynb) — create ZINC CSV subsets by molecular graph size.
-- [Initialize notebook environment](./initialize_notebook_environment.ipynb) — prepare the kernel, repository paths, and optional NSPPK dependency.
-- [Validate node-order equivariance](./validate_node_order_equivariance.ipynb) — verify permutation consistency through the NodeField data and encoder paths.
+| Task | Before you start | Results |
+| --- | --- | --- |
+| [Validate node-order equivariance](validation/node_order_equivariance.ipynb) | NSPPK; generated data | Permutation checks and diagnostic output |
 
-Generated artificial dataset configs are kept in
-[configs/artificial_datasets](./configs/artificial_datasets), rather than in
-this folder’s common space. For the longer documentation catalog, see
-[../docs/NOTEBOOKS.md](../docs/NOTEBOOKS.md).
+## Files and conventions
+
+- `configs/` contains shared workflow settings; generated synthetic configurations go in `configs/artificial_datasets/`.
+- `datasets/` contains input data. Moving a notebook does not move its data.
+- `.artifacts/` at the project root contains models and training outputs; campaigns use `artifact/`.
+- Run notebooks in order within each file. There is no required order across workflows except their stated prerequisites.
+- Keep reusable computation and plotting helpers in the package. Keep notebook settings and explanations near the steps they control.
+- Clear execution outputs before committing. Save generated results in the artifact folders.
+
+The in-memory and streaming ZINC training notebooks remain separate because their
+model settings, preprocessing, and training interfaces differ. Sampling a saved
+synthetic model has its own notebook so it does not require training again.

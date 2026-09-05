@@ -229,7 +229,7 @@ alphabets. Pass `save_config=False` when no config file should be written.
 
 ### Conditioning-vector analysis notebook
 
-`notebooks/artificial_structural_conditioning_analysis.ipynb` compares generated graphs
+`notebooks/synthetic/evaluate_conditioning.ipynb` compares generated graphs
 against conditioning graphs for this artificial family.
 
 Important analysis behavior:

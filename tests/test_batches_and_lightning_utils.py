@@ -961,6 +961,9 @@ def test_package_exports_only_new_primary_names():
         "ConditionalNodeFieldGenerator",
         "ConditionalNodeFieldGraphDecoder",
         "ConditionalNodeFieldGraphGenerator",
+        "RecurrentIntervention",
+        "RecurrentNodeFieldState",
+        "RecurrentNodeFieldTrajectory",
         "feasibility_effort_map",
         "resolve_feasibility_effort",
     ]

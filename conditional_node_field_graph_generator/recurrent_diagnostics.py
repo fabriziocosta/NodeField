@@ -1,6 +1,8 @@
 """Detached trajectory diagnostics; these describe stability, not convergence."""
+
 from dataclasses import dataclass, field
 from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -42,15 +44,23 @@ def rms(value):
 def cosine(a, b: Optional[torch.Tensor]):
     if b is None or a.norm() == 0 or b.norm() == 0:
         return None
-    return float(F.cosine_similarity(a.detach().float().flatten(), b.detach().to(a).float().flatten(), dim=0).cpu())
+    return float(
+        F.cosine_similarity(
+            a.detach().float().flatten(), b.detach().to(a).float().flatten(), dim=0
+        ).cpu()
+    )
 
 
 def state_diagnostics(x, h, x_next, h_next, score, phi, previous_score=None):
-    return dict(hidden_norm=rms(h_next), hidden_delta_norm=rms(h_next-h),
-                score_norm=rms(score), x_delta_norm=rms(x_next-x),
-                phi=float(phi.detach().mean().cpu()),
-                cosine_hidden_consecutive=cosine(h_next, h),
-                cosine_score_consecutive=cosine(score, previous_score))
+    return dict(
+        hidden_norm=rms(h_next),
+        hidden_delta_norm=rms(h_next - h),
+        score_norm=rms(score),
+        x_delta_norm=rms(x_next - x),
+        phi=float(phi.detach().mean().cpu()),
+        cosine_hidden_consecutive=cosine(h_next, h),
+        cosine_score_consecutive=cosine(score, previous_score),
+    )
 
 
 def prediction_deltas(current, previous):
