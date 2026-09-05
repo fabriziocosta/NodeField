@@ -89,7 +89,7 @@ def _star_stats(graph: nx.Graph, nodes: Iterable[Any]) -> dict[str, Any]:
     subgraph = graph.subgraph(nodes).copy()
     ray_sizes: list[int] = []
     hub_degrees: list[int] = []
-    valid = nx.is_forest(subgraph)
+    valid = subgraph.number_of_nodes() == 0 or nx.is_forest(subgraph)
     for component_nodes in nx.connected_components(subgraph):
         component = subgraph.subgraph(component_nodes).copy()
         if component.number_of_nodes() == 1:

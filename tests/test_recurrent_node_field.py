@@ -391,3 +391,25 @@ def test_all_structural_heads_train_at_each_step():
     ):
         assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in head.parameters())
     assert {"edge_count_loss", "node_count_loss", "degree_edge_consistency_loss"} <= losses.keys()
+
+
+def test_validation_under_lightning_inference_mode():
+    from unittest.mock import patch
+
+    m = model().eval()
+    with torch.inference_mode():
+        x, c, mask, degree = inputs()
+        with patch.object(m, "log"):
+            loss = m.validation_step((x, c, mask, degree), 0)
+    assert torch.isfinite(loss)
+
+
+def test_all_padding_is_finite():
+    m = model().eval()
+    x, c, mask, degree = inputs()
+    mask.zero_()
+    h = torch.zeros(2, 3, 8)
+    score, phi, _, hn = m._compute_recurrent_score_field(x, h, c, mask, create_graph=True)
+    assert torch.isfinite(score).all() and torch.isfinite(hn).all()
+    assert torch.count_nonzero(score) == torch.count_nonzero(hn) == 0
+    assert torch.count_nonzero(phi) == 0

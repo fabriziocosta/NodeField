@@ -1009,19 +1009,29 @@ def build_graph_generator(
     scientific_generalisation_gap_threshold=0.12,
     scientific_gradient_norm_threshold=1000.0,
     scientific_runtime_multiplier=3.0,
-    node_field_mode='baseline',
-    recurrent_hidden_dimension=None,
-    recurrent_training_steps=8,
-    recurrent_detach_interval=4,
-    recurrent_update_scale=1.0,
-    recurrent_initial_state='zeros',
-    recurrent_state_normalization=True,
-    recurrent_corruption_schedule='annealed',
-    recurrent_sigma_min=0.02,
-    recurrent_sigma_max=None,
-    recurrent_supervise_all_steps=True,
-    recurrent_loss_discount=1.0,
+    node_field_mode: str = "baseline",
+    recurrent_hidden_dimension: Optional[int] = None,
+    recurrent_training_steps: int = 8,
+    recurrent_detach_interval: Optional[int] = 4,
+    recurrent_update_scale: float = 1.0,
+    recurrent_initial_state: str = "zeros",
+    recurrent_state_normalization: bool = True,
+    recurrent_corruption_schedule: str = "annealed",
+    recurrent_sigma_min: float = 0.02,
+    recurrent_sigma_max: Optional[float] = None,
+    recurrent_supervise_all_steps: bool = True,
+    recurrent_loss_discount: float = 1.0,
 ):
+    """Build the standard vectorizer, node-field model, and graph decoder.
+
+    The reusable factory defaults to ``baseline`` for existing callers. Training
+    notebooks explicitly select ``recurrent_energy`` and expose the stationary
+    recurrent rollout settings. ``recurrent_hidden_dimension=None`` follows the
+    latent width; ``recurrent_sigma_max=None`` follows ``node_field_sigma``.
+    All recurrent options are forwarded to ConditionalNodeFieldGenerator, which
+    validates them and passes them to the module during setup. Setting the detach
+    interval to None enables full backpropagation through recurrent memory.
+    """
     if nbits is not None:
         if node_vectorizer_nbits is None:
             node_vectorizer_nbits = nbits

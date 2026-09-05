@@ -90,7 +90,14 @@ class RecurrentNodeFieldMixin:
         x_latent = self.linear_encoder_input_to_latent(self.layernorm_in(input_rows))
         h_latent = self.recurrent_hidden_projection(hidden_state)
         latent = self.recurrent_input_fusion(torch.cat([x_latent, h_latent], dim=-1))
-        return self._run_conditioned_transformer(latent, global_condition_vector, node_mask)
+        attention_mask = node_mask
+        if node_mask is not None and (~node_mask.any(dim=1)).any():
+            # A temporary sentinel avoids all-masked attention softmax NaNs. No sentinel
+            # state escapes: the original padding mask zeros every empty-graph output.
+            attention_mask = node_mask.clone()
+            attention_mask[~node_mask.any(dim=1), 0] = True
+        latent = self._run_conditioned_transformer(latent, global_condition_vector, attention_mask)
+        return latent if node_mask is None else latent * node_mask.unsqueeze(-1)
 
     def _update_recurrent_hidden(self, latent_tokens, hidden_state, node_mask=None):
         h = self.recurrent_state_norm(
@@ -409,7 +416,7 @@ class RecurrentNodeFieldMixin:
                 trajectory.h.append(detached(hn))
                 trajectory.score.append(detached(score))
                 trajectory.phi.append(detached(phi))
-                # This sampler has no corruption sigma; replacement distributions are in intervention events.
+                # No sampling corruption sigma; replacement distributions are in events.
                 trajectory.sigma.append(0.0)
                 trajectory.readouts.append(readout)
                 previous_score, previous_readout = score.detach(), readout

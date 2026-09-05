@@ -19,6 +19,19 @@ dataset:
 
 model:
   fixed:
+    # Shared stationary recurrence; use baseline to reproduce the original architecture.
+    node_field_mode: recurrent_energy
+    recurrent_hidden_dimension: null
+    recurrent_training_steps: 8
+    recurrent_detach_interval: 4
+    recurrent_update_scale: 1.0
+    recurrent_initial_state: zeros
+    recurrent_state_normalization: true
+    recurrent_corruption_schedule: annealed
+    recurrent_sigma_min: 0.02
+    recurrent_sigma_max: null
+    recurrent_supervise_all_steps: true
+    recurrent_loss_discount: 1.0
     nbits: 11
     latent_embedding_dimension: 64
     node_embedding_svd_dimension: 64

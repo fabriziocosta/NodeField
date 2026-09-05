@@ -82,3 +82,170 @@ def test_notebook_is_thin_and_valid():
     for c in nb.cells:
         if c.cell_type == "code":
             compile(c.source, str(path), "exec")
+
+
+def test_missing_star_component_is_a_metric_outcome():
+    from conditional_node_field_graph_generator.extensions.demo.artificial_conditioning import (
+        artificial_graph_stats,
+    )
+
+    graph = nx.path_graph(3)
+    nx.set_node_attributes(graph, 0, "label")
+    graph.graph["metadata"] = {
+        "node_alphabets_by_component": {"cycle": [1], "path": [0], "star": [2]}
+    }
+    stats = artificial_graph_stats(graph)
+    assert stats["ray_count"] == 0 and stats["star_hub_count"] == 0
+
+
+def test_anytime_driver_uses_validation_and_reports_test_only(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from conditional_node_field_graph_generator.extensions.demo import (
+        recurrent_experiments as experiment_module,
+    )
+    from conditional_node_field_graph_generator.recurrent_diagnostics import (
+        RecurrentNodeFieldTrajectory,
+    )
+
+    class Conditions:
+        def take(self, indices):
+            return indices
+
+    class Owner:
+        model = SimpleNamespace(langevin_noise_scale=0.0)
+
+        def predict_recurrent(self, condition, total_steps, return_trajectory):
+            trace = RecurrentNodeFieldTrajectory()
+            trace.diagnostics = [
+                dict(hidden_delta_norm=0.01, prediction_delta=0.01, score_norm=0.01)
+                for _ in range(total_steps)
+            ]
+            return torch.zeros(1), trace
+
+    experiment = experiment_module.RecurrentExperiment.__new__(
+        experiment_module.RecurrentExperiment
+    )
+    experiment.models = {
+        (0, "recurrent_energy_annealed"): SimpleNamespace(conditional_node_generator_model=Owner())
+    }
+    experiment.config = {"experiment": {"depths": [4], "stability_consecutive_steps": 2}}
+    experiment.splits = {"validation": [0], "test": [1]}
+    experiment.conditions = {"validation": Conditions(), "test": Conditions()}
+    experiment.graphs = [nx.path_graph(2), nx.path_graph(2)]
+    experiment.run_dir = tmp_path
+    monkeypatch.setattr(experiment_module, "_readout_graph", lambda *args: nx.path_graph(2))
+    monkeypatch.setattr(
+        experiment_module, "primary_metrics", lambda *args: {"feasible_condition_match": True}
+    )
+    frame = experiment.evaluate_anytime()
+    assert set(frame.split) == {"validation", "test"}
+    assert (tmp_path / "anytime_thresholds.json").exists()
+    assert (tmp_path / "anytime_summary.csv").exists()
+    assert frame.quality_loss.eq(0).all()
+
+
+def test_factory_exposes_and_forwards_every_recurrent_setting():
+    import inspect
+
+    from conditional_node_field_graph_generator.extensions.demo.pipeline import (
+        build_graph_generator,
+    )
+
+    options = dict(
+        node_field_mode="recurrent_energy",
+        recurrent_hidden_dimension=11,
+        recurrent_training_steps=3,
+        recurrent_detach_interval=2,
+        recurrent_update_scale=0.7,
+        recurrent_initial_state="zeros",
+        recurrent_state_normalization=False,
+        recurrent_corruption_schedule="constant",
+        recurrent_sigma_min=0.03,
+        recurrent_sigma_max=0.4,
+        recurrent_supervise_all_steps=False,
+        recurrent_loss_discount=0.6,
+    )
+    assert options.keys() <= inspect.signature(build_graph_generator).parameters.keys()
+    generator = build_graph_generator(
+        **options,
+        verbose=0,
+        latent_embedding_dimension=8,
+        transformer_attention_head_count=2,
+        use_feasibility_filtering=False,
+        feasibility_oracle_candidates_per_attempt=0,
+    )
+    owner = generator.conditional_node_generator_model
+    for key, value in options.items():
+        assert getattr(owner, key) == value
+    assert (
+        inspect.signature(build_graph_generator).parameters["node_field_mode"].default == "baseline"
+    )
+
+
+def test_model_building_notebooks_default_to_recurrence():
+    import ast
+    import inspect
+    import json
+
+    from conditional_node_field_graph_generator.extensions.demo.pipeline import (
+        build_graph_generator,
+    )
+
+    root = Path(__file__).parents[1]
+    count = 0
+    required = {
+        k for k in inspect.signature(build_graph_generator).parameters if k.startswith("recurrent_")
+    } | {"node_field_mode"}
+    for path in (root / "notebooks").rglob("*.ipynb"):
+        if "datasets" in path.parts:
+            continue
+        notebook = json.loads(path.read_text())
+        source = "\n".join(
+            "".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"
+        )
+        if "build_graph_generator(" not in source:
+            continue
+        source = "\n".join(line for line in source.splitlines() if not line.startswith(("%", "!")))
+        tree = ast.parse(source)
+        settings = next(
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "NODE_FIELD_CONFIG"
+                for target in node.targets
+            )
+        )
+        options = ast.literal_eval(settings)
+        assert options.keys() == required, path
+        assert options["node_field_mode"] == "recurrent_energy", path
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "build_graph_generator"
+            ):
+                assert any(
+                    kw.arg is None
+                    and isinstance(kw.value, ast.Name)
+                    and kw.value.id == "NODE_FIELD_CONFIG"
+                    for kw in node.keywords
+                ), path
+        count += 1
+    assert count >= 9
+
+
+def test_hyperparameter_notebook_configs_use_recurrence():
+    import yaml
+
+    root = Path(__file__).parents[1]
+    for name in [
+        "artificial_graph_hyperparameter_optimization",
+        "zinc_molecule_hyperparameter_optimization",
+    ]:
+        config = yaml.safe_load((root / "notebooks" / "configs" / f"{name}.yaml").read_text())
+        assert config["model"]["fixed"]["node_field_mode"] == "recurrent_energy"
+        assert config["model"]["fixed"]["recurrent_training_steps"] == 8

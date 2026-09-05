@@ -77,6 +77,50 @@ def test_training_coordinator_restores_best_checkpoint_and_plots(monkeypatch):
     assert owner.plot_calls == 1
 
 
+def test_training_coordinator_logs_clickable_loss_curves_path(monkeypatch, tmp_path, caplog):
+    owner = _Owner()
+    owner.model_name = "artificial-cycle-path-star-n50000-c[3, 8]-p2"
+    owner.model_dir = tmp_path
+    coordinator = TrainingCoordinator(owner)
+
+    monkeypatch.setattr(
+        tc_module,
+        "build_training_callbacks",
+        lambda **kwargs: (
+            [],
+            str(tmp_path / "checkpoints"),
+            types.SimpleNamespace(best_model_path=None, best_model_score=None),
+        ),
+    )
+    monkeypatch.setattr(tc_module, "create_trainer", lambda **kwargs: types.SimpleNamespace(current_epoch=0))
+    monkeypatch.setattr(tc_module, "run_trainer_fit", lambda *args, **kwargs: None)
+
+    with caplog.at_level("INFO"):
+        coordinator.run_training(
+            train_loader=[1],
+            val_loader=[2],
+            ckpt_path=None,
+            context="unit",
+            train_loader_length=1,
+            training_policy=TrainingPolicy(
+                maximum_epochs=1,
+                early_stopping_monitor="val_total",
+                early_stopping_mode="min",
+                enable_early_stopping=False,
+                early_stopping_patience=1,
+                early_stopping_min_delta=0.0,
+            ),
+            checkpoint_policy=CheckpointPolicy(
+                restore_best_checkpoint=False,
+                checkpoint_root_dir=str(tmp_path / "checkpoints"),
+            ),
+            metrics_policy=MetricsPolicy(plot_on_train_end=False),
+        )
+
+    expected_path = tmp_path / "artificial-cycle-path-star-n50000-c-3-8-p2.loss-curves.pdf"
+    assert f"Loss curves PDF: {expected_path}" in caplog.text
+
+
 def test_training_coordinator_builds_sample_progress_callback(monkeypatch, tmp_path):
     owner = _Owner()
     sample_owner = types.SimpleNamespace(model_name=None)

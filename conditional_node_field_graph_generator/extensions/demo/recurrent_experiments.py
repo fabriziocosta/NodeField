@@ -79,7 +79,10 @@ def environment_metadata():
         if torch.cuda.is_available()
         else platform.processor() or "CPU",
         date=datetime.now(timezone.utc).isoformat(),
-        determinism="Seeded Python/NumPy/Torch; deterministic algorithms warn on unsupported operations; solver and accelerator versions can affect results.",
+        determinism=(
+            "Seeded Python/NumPy/Torch; deterministic algorithms warn on unsupported "
+            "operations; solver and accelerator versions can affect results."
+        ),
     )
 
 
@@ -274,8 +277,12 @@ class RecurrentExperiment:
                 decisions=dict(
                     primary_metric="feasible_condition_match",
                     minimum_effect=0.05,
-                    significance="paired seed-level 95% CI excludes zero; smoke has no significance claim",
-                    parameter_matching="raw RENF; compare equal field evaluations and report parameters",
+                    significance=(
+                        "paired seed-level 95% CI excludes zero; smoke has no significance claim"
+                    ),
+                    parameter_matching=(
+                        "raw RENF; compare equal field evaluations and report parameters"
+                    ),
                     checkpoint_D="alias of C selected by validation loss",
                     anytime="validation-calibrated thresholds, 3 consecutive stable steps",
                 ),
@@ -595,35 +602,33 @@ class RecurrentExperiment:
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.synchronize()
-        try:
+        # Sampling errors are implementation/numerical failures and abort the run.
+        # Decode failures are experimental outcomes, retained with their trajectories.
+        seed_everything(sampling_seed)
+        if name == "baseline":
+            batch = owner.predict(condition)
+        else:
+            batch = owner.predict_recurrent(condition, total_steps=depth, intervention=intervention)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        generation_seconds = time.perf_counter() - started
+        generation_peak_memory = (
+            torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None
+        )
+        if name != "baseline":
+            ds = time.perf_counter()
             seed_everything(sampling_seed)
-            if name == "baseline":
-                batch = owner.predict(condition)
-            else:
-                batch = owner.predict_recurrent(
-                    condition, total_steps=depth, intervention=intervention
-                )
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            generation_seconds = time.perf_counter() - started
-            decode_started = time.perf_counter()
+            _, trajectory = owner.predict_recurrent(
+                condition, total_steps=depth, intervention=intervention, return_trajectory=True
+            )
+            diagnostic_seconds = time.perf_counter() - ds
+        decode_started = time.perf_counter()
+        try:
             graph = self._decode(generator, batch, condition)
-            decode_seconds = time.perf_counter() - decode_started
-            metrics = primary_metrics(graph, target, generator)
-            if name != "baseline":
-                ds = time.perf_counter()
-                seed_everything(sampling_seed)
-                _, trajectory = owner.predict_recurrent(
-                    condition, total_steps=depth, intervention=intervention, return_trajectory=True
-                )
-                diagnostic_seconds = time.perf_counter() - ds
-        except FloatingPointError:
-            raise
         except (RuntimeError, ValueError, nx.NetworkXException) as exc:
             failure = f"{type(exc).__name__}: {exc}"
-            generation_seconds = time.perf_counter() - started
-            decode_seconds = 0.0
-            metrics = primary_metrics(None, target, generator)
+        decode_seconds = time.perf_counter() - decode_started
+        metrics = primary_metrics(graph, target, generator)
         items = (
             []
             if intervention is None
@@ -658,9 +663,7 @@ class RecurrentExperiment:
             field_evaluations=depth,
             diagnostic_readouts=depth if trajectory is not None else 0,
             final_readout_field_evaluations=1 if name == "baseline" else 0,
-            peak_gpu_memory=torch.cuda.max_memory_allocated()
-            if torch.cuda.is_available()
-            else None,
+            peak_gpu_memory=generation_peak_memory,
             failure=failure,
         )
         self.rows.append(row)
@@ -680,9 +683,30 @@ class RecurrentExperiment:
                     else readout["node_embeddings"].shape[1]
                 )
                 head_error = abs(exist - target.number_of_nodes())
+                step_metrics = {}
+                # Dense readouts at training depth support immediate intervention/recovery plots.
+                # Other depths retain tensors for arbitrary later readout without repeated ILPs.
+                if depth == owner.recurrent_training_steps:
+                    try:
+                        step_graph = _readout_graph(
+                            self, generator, trajectory, step + 1, condition
+                        )
+                    except (RuntimeError, ValueError, nx.NetworkXException):
+                        step_graph = None
+                    step_metrics = {
+                        "readout_" + key: value
+                        for key, value in primary_metrics(step_graph, target, generator).items()
+                    }
                 self.diagnostic_rows.append(
-                    dict(base, **diagnostic, head_node_count_error=head_error, trajectory=str(path))
+                    dict(
+                        base,
+                        **diagnostic,
+                        **step_metrics,
+                        head_node_count_error=head_error,
+                        trajectory=str(path),
+                    )
                 )
+
         return row
 
     def evaluate(self):
@@ -874,7 +898,7 @@ class RecurrentExperiment:
                     )
                 )
             # Separate decoder-unchanged candidate: evaluate isomorphism, not node ordering.
-            # This expensive diagnostic is evaluated on validation first and uses the same fixed M on test.
+            # Evaluate on validation first and use the same fixed M on test.
             for split in ("validation", "test"):
                 for index, example_id, condition, trace in traces[split]:
                     last = None
@@ -948,6 +972,7 @@ class RecurrentExperiment:
             self.evaluate()
             summarize_results(self.run_dir)
             plot_results(self.run_dir)
+            decision_report(self.run_dir)
             write_json(self.run_dir / "status.json", dict(status="complete", smoke=self.smoke))
         except Exception as exc:
             self.save_tables()
@@ -1104,7 +1129,9 @@ def plot_results(run_dir):
             )
         ax.axvline(ktrain, color="gray", ls="--", label="K_train")
         ax.set_xscale("log", base=2)
-        ax.set(xlabel="Field evaluations / inference depth", ylabel=metric)
+        ax.set(xlabel="Inference depth (score updates)", ylabel=metric)
+        if metric in {"feasible_condition_match", "decoder_success", "valid"}:
+            ax.set_ylim(0, 1)
         ax.legend(fontsize=7)
         fig.tight_layout()
         fig.savefig(out / filename, dpi=150)
@@ -1119,6 +1146,28 @@ def plot_results(run_dir):
         & (df.model == "recurrent_energy_annealed")
     ]
     depth_plot(memory, "feasible_condition_match", "03_memory_interventions.png", ("intervention",))
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    memory_steps = diagnostics[
+        (diagnostics.model == "recurrent_energy_annealed")
+        & (diagnostics.K_test == ktrain)
+        & diagnostics.intervention.str.startswith(("normal", "reset_h", "shuffle_h"))
+    ]
+    for label, group in memory_steps.groupby("intervention"):
+        for ax, metric in zip(axes, ["head_node_count_error", "readout_feasible_condition_match"]):
+            if metric not in group:
+                continue
+            means = group.groupby("step")[metric].mean()
+            ax.plot(means.index + 1, means.values, label=label)
+            ax.set(xlabel="Completed recurrent steps", ylabel=metric)
+        for step in group.intervention_step.dropna().unique():
+            for ax in axes:
+                ax.axvline(step + 1, color="gray", ls=":", alpha=0.4)
+    for ax in axes:
+        ax.legend(fontsize=6)
+    axes[1].set_ylim(0, 1)
+    fig.tight_layout()
+    fig.savefig(out / "03_memory_recovery.png", dpi=150)
+    plt.close(fig)
     channels = df[
         df.intervention.isin(
             [
@@ -1258,7 +1307,10 @@ def decision_report(run_dir):
     if config["smoke"]:
         report = {
             "scope": "smoke",
-            "conclusion": "Numerical and workflow checks only; no significance or mechanism claim from one seed.",
+            "conclusion": (
+                "Numerical and workflow checks only; "
+                "no significance or mechanism claim from one seed."
+            ),
         }
     else:
         effects = pd.read_csv(root / "paired_effects.csv")
@@ -1268,7 +1320,10 @@ def decision_report(run_dir):
         report = {
             "scope": "full",
             "paired_comparisons": effects.to_dict(orient="records"),
-            "interpretation": "Intervention effects are evidence of functional dependence, not semantic decoding of memory or proof of convergence.",
+            "interpretation": (
+                "Intervention effects are evidence of functional dependence, "
+                "not semantic decoding of memory or proof of convergence."
+            ),
         }
     write_json(root / "decision_report.json", report)
     write_json(root / "status.json", dict(status="complete", smoke=config["smoke"]))

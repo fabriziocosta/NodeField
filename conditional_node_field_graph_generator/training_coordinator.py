@@ -21,8 +21,10 @@ from .metrics_collection import (
     GraphGeneratorTrainingSampleCallback,
     MetricsLogger,
 )
+from .naming_utils import sanitize_model_token
+from .runtime_paths import resolve_saved_generator_dir
+from .runtime_utils import get_runtime_logger, run_trainer_fit, verbose_log
 from .scientific_observations import ObservationPolicy, ScientificMetricsCallback
-from .runtime_utils import verbose_log, run_trainer_fit
 from .training_policy import (
     build_training_callbacks,
     create_trainer,
@@ -111,6 +113,12 @@ class TrainingCoordinator:
         if owner.model_name is not None:
             verbose_log(owner, f"Save target model_name={owner.model_name} model_dir={owner.model_dir}")
         verbose_log(owner, f"Writing checkpoints to {checkpoint_dir}")
+        if owner.model_name is not None:
+            loss_curves_pdf_path = (
+                resolve_saved_generator_dir(model_dir=getattr(owner, "model_dir", None))
+                / f"{sanitize_model_token(owner.model_name)}.loss-curves.pdf"
+            )
+            verbose_log(owner, f"Loss curves PDF: {loss_curves_pdf_path.resolve()}")
         trainer = create_trainer(
             maximum_epochs=training_policy.maximum_epochs,
             callbacks=callbacks,
