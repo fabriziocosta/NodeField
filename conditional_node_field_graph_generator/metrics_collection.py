@@ -219,6 +219,8 @@ class MetricsLogger(pl.callbacks.Callback):
                 val_total, val_components, val_dominant, val_dominant_share = self._component_summary(pl_module, m, "val")
                 max_epochs = getattr(trainer, "max_epochs", None)
                 eta_label = None
+                next_output_eta_label = None
+                next_output_epochs = None
                 if (
                     isinstance(max_epochs, int)
                     and max_epochs > 0
@@ -233,6 +235,11 @@ class MetricsLogger(pl.callbacks.Callback):
                             recent_epoch_seconds = elapsed_seconds / float(current_epoch)
                     if recent_epoch_seconds is not None:
                         eta_seconds = remaining_epochs * float(recent_epoch_seconds)
+                        next_output_epochs = min(interval, remaining_epochs)
+                        if next_output_epochs > 0:
+                            next_output_eta_label = self._format_duration(
+                                next_output_epochs * float(recent_epoch_seconds)
+                            )
                         previous_eta = getattr(pl_module, "_last_eta_seconds", None)
                         previous_eta_logged_at = getattr(pl_module, "_last_eta_logged_at", None)
                         if previous_eta is not None and previous_eta_logged_at is not None:
@@ -251,6 +258,11 @@ class MetricsLogger(pl.callbacks.Callback):
                 )
                 if eta_label is not None:
                     epoch_label += f" | ETA {eta_label}"
+                if next_output_eta_label is not None:
+                    epoch_label += (
+                        f" | Next output ETA {next_output_eta_label}"
+                        f" ({next_output_epochs} epochs)"
+                    )
                 ordered_labels = []
                 for label, *_ in train_components + val_components:
                     if label not in ordered_labels:

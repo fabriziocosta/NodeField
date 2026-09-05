@@ -187,3 +187,52 @@ def test_metrics_logger_validation_summary_uses_logger(monkeypatch):
     assert logged_messages[0].startswith("Epoch 1/5")
     assert any("train" in message for message in logged_messages[1:])
     assert any("val" in message for message in logged_messages[1:])
+
+
+def test_metrics_logger_validation_summary_reports_next_output_eta(monkeypatch):
+    logged_messages = []
+    monkeypatch.setattr(
+        metrics_collection.logger,
+        "info",
+        lambda msg, *args: logged_messages.append(msg % args if args else msg),
+    )
+    monkeypatch.setattr(metrics_collection.time, "time", lambda: 112.0)
+
+    callback = MetricsLogger()
+    trainer = types.SimpleNamespace(
+        callback_metrics={
+            "train_total": torch.tensor(1.0),
+            "train_node_field": torch.tensor(0.5),
+            "train_deg_ce": torch.tensor(0.1),
+            "val_total": torch.tensor(0.9),
+            "val_node_field": torch.tensor(0.4),
+            "val_deg_ce": torch.tensor(0.2),
+        },
+        current_epoch=9,
+        max_epochs=350,
+        logged_metrics={},
+    )
+    pl_module = types.SimpleNamespace(
+        val_losses=[],
+        val_deg_ce=[],
+        val_node_field=[],
+        verbose=1,
+        verbose_epoch_interval=10,
+        _epoch_started_at=100.0,
+        _epoch_duration_seconds=[],
+        _fit_start_time=100.0,
+        _ema_metrics={},
+        lambda_degree_importance=1.0,
+        use_locality_supervision=False,
+        use_auxiliary_locality_supervision=False,
+        train_losses=[1.0],
+        train_deg_ce=[0.1],
+        train_node_field=[0.5],
+    )
+
+    callback.on_validation_epoch_end(trainer, pl_module)
+
+    assert logged_messages[0] == (
+        "Epoch 10/350 | ETA 1h 08m 00s | "
+        "Next output ETA 0h 02m 00s (10 epochs):"
+    )

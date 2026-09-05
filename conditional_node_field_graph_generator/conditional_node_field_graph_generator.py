@@ -56,7 +56,7 @@ from .graph_generator_state import (
 from .decode_service import DecodeService
 from .conditioning_sampler import ConditioningSampler
 from .encoding_pipeline import EncodingPipeline
-from .fit_artifacts import build_fit_artifacts
+from .fit_artifacts import _format_minutes_seconds, build_fit_artifacts
 from .feasibility_effort import (
     DEFAULT_FEASIBILITY_EFFORT_PROFILE,
     feasibility_effort_map as _feasibility_effort_map,
@@ -1963,16 +1963,25 @@ class ConditionalNodeFieldGraphGenerator(object):
         sample_training_progress_plot_fn: Optional[Callable] = None,
     ) -> 'ConditionalNodeFieldGraphGenerator':
         """Fit vectorizers, derive supervision, and optionally train the node generator."""
+        fit_started_at = time.perf_counter()
         if int(sample_training_progress_n_samples) < 1:
             raise ValueError("sample_training_progress_n_samples must be >= 1.")
         if int(sample_training_progress_every_n_epochs) < 1:
             raise ValueError("sample_training_progress_every_n_epochs must be >= 1.")
         if self.model_name is not None:
+            verbose_log(self, "_" * 80)
             verbose_log(
                 self,
-                f"Fit target model_name={self.model_name} model_dir={self.model_dir}",
+                f"Training target: model '{self.model_name}'. "
+                f"Saved model files will go to '{self.model_dir}'.",
             )
-        verbose_log(self, f"Fitting model on {len(graphs)} graphs")
+        verbose_log(self, "_" * 80)
+        verbose_log(
+            self,
+            f"Starting training on {len(graphs):,} synthetic graphs. "
+            "Next, the generator will learn graph representations, prepare its training targets, "
+            "and train the neural graph generator. This may take some time.",
+        )
         self._require_fit_components(train_node_generator=train_node_generator)
         if targets is not None and len(targets) != len(graphs):
             raise ValueError(
@@ -2037,11 +2046,16 @@ class ConditionalNodeFieldGraphGenerator(object):
             )
             verbose_log(
                 self,
-                f"Training conditional model on {len(node_batch)} graphs "
-                f"with up to {node_batch.node_presence_mask.shape[1]} nodes each.",
+                "Training data is ready: "
+                f"{len(node_batch):,} graphs with up to "
+                f"{node_batch.node_presence_mask.shape[1]:,} nodes each.",
             )
             if node_batch.edge_pairs is not None and node_batch.edge_targets is not None:
-                verbose_log(self, f"Using direct-edge supervision with {len(node_batch.edge_pairs)} labelled pairs.")
+                verbose_log(
+                    self,
+                    f"The neural model will also learn from {len(node_batch.edge_pairs):,} "
+                    "direct edge examples.",
+                )
             self.conditional_node_generator_model.setup(
                 node_batch=node_batch,
                 graph_conditioning=graph_conditioning,
@@ -2085,8 +2099,28 @@ class ConditionalNodeFieldGraphGenerator(object):
                         plot_fn=sample_training_progress_plot_fn,
                     ),
                 )
-                self.conditional_node_generator_model.fit(
-                    **fit_kwargs,
+                verbose_log(self, "_" * 80)
+                verbose_log(
+                    self,
+                    "Next: train the neural graph generator. "
+                    "Purpose: learn to create graphs that match the representations and targets prepared above.",
+                )
+                training_started_at = time.perf_counter()
+                try:
+                    self.conditional_node_generator_model.fit(
+                        **fit_kwargs,
+                    )
+                except Exception:
+                    verbose_log(
+                        self,
+                        "Neural graph-generator training failed after "
+                        f"{_format_minutes_seconds(time.perf_counter() - training_started_at)}.",
+                    )
+                    raise
+                verbose_log(
+                    self,
+                    "Done: the neural graph generator finished training. "
+                    f"Time: {_format_minutes_seconds(time.perf_counter() - training_started_at)}.",
                 )
             finally:
                 if previous_sample_progress_config_present:
@@ -2102,6 +2136,16 @@ class ConditionalNodeFieldGraphGenerator(object):
                         pass
 
         self.is_fitted_ = True
+        verbose_log(self, "_" * 80)
+        if train_node_generator:
+            completion = "The generator is ready to create graphs."
+        else:
+            completion = "Graph representations are ready; neural-model training was skipped."
+        verbose_log(
+            self,
+            f"Training complete: {completion} "
+            f"Total time: {_format_minutes_seconds(time.perf_counter() - fit_started_at)}.",
+        )
         return self
 
     def _resolve_sample_training_progress_pdf_path(
