@@ -3485,6 +3485,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             val_metrics=val_metrics,
             window=window,
             alpha=alpha,
+            best_checkpoint_epoch=getattr(self, "best_checkpoint_epoch_", None),
         )
 
     def _collect_metric_histories(self) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
@@ -3526,6 +3527,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             output_path=output_path,
             window=window,
             alpha=alpha,
+            best_checkpoint_epoch=getattr(self, "best_checkpoint_epoch_", None),
         )
 
 def __getattr__(name: str):

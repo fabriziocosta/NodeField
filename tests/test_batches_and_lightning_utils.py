@@ -28,6 +28,7 @@ from conditional_node_field_graph_generator.metrics_collection import (
 from conditional_node_field_graph_generator.extensions.demo.pipeline import fit_graph_generator
 from conditional_node_field_graph_generator.extensions.demo.storage import find_latest_checkpoint
 from conditional_node_field_graph_generator.metrics_visualization import (
+    _build_metrics_figure,
     plot_metrics,
 )
 from conditional_node_field_graph_generator.persistence import (
@@ -1174,6 +1175,33 @@ def test_plot_metrics_accepts_node_field_key():
         val_metrics={"total": [11.0, 10.0], "node_field": [9.0, 8.0]},
         window=2,
     )
+
+
+def test_loss_figure_marks_best_checkpoint_epoch_on_each_panel():
+    figure = _build_metrics_figure(
+        train_metrics={
+            "total": [10.0, 9.0, 8.0],
+            "node_field": [8.0, 7.0, 6.0],
+            "node_label_ce": [1.0, 0.9, 0.8],
+        },
+        val_metrics={
+            "total": [11.0, 10.0, 9.0],
+            "node_field": [9.0, 8.0, 7.0],
+            "node_label_ce": [1.1, 1.0, 0.9],
+        },
+        best_checkpoint_epoch=1,
+    )
+
+    assert figure is not None
+    marker_lines = [
+        line
+        for axis in figure.axes
+        for line in axis.lines
+        if line.get_label() == "best model epoch"
+    ]
+    assert len(marker_lines) == 2
+    assert all(np.array_equal(line.get_xdata(), [2, 2]) for line in marker_lines)
+    plt.close(figure)
 
 
 def test_tokenized_graph_conditioning_composes_and_scales_as_memory_tokens():

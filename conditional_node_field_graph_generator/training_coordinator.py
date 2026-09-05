@@ -134,14 +134,15 @@ class TrainingCoordinator:
         owner.best_checkpoint_path_ = checkpoint_callback.best_model_path or None
         best_score = checkpoint_callback.best_model_score
         owner.best_checkpoint_score_ = float(best_score.item()) if best_score is not None else None
-        if checkpoint_policy.restore_best_checkpoint and owner.best_checkpoint_path_:
+        if owner.best_checkpoint_path_:
             checkpoint = torch.load(owner.best_checkpoint_path_, map_location=owner.device, weights_only=False)
             best_epoch = checkpoint.get("epoch")
             owner.best_checkpoint_epoch_ = int(best_epoch) if best_epoch is not None else None
-            state_dict = checkpoint.get("state_dict", checkpoint)
-            owner.model.load_state_dict(state_dict)
-            owner.model.to(owner.device)
-            if int(owner.verbose) >= 1:
+            if checkpoint_policy.restore_best_checkpoint:
+                state_dict = checkpoint.get("state_dict", checkpoint)
+                owner.model.load_state_dict(state_dict)
+                owner.model.to(owner.device)
+            if checkpoint_policy.restore_best_checkpoint and int(owner.verbose) >= 1:
                 stopped_epoch = int(getattr(trainer, "current_epoch", -1)) + 1
                 raw_best_val_node_field_loss = None
                 if (

@@ -81,8 +81,14 @@ def _build_metrics_figure(
     window: int = 10,
     alpha: float = 0.55,
     log_scale: bool = True,
+    best_checkpoint_epoch: int | None = None,
 ) -> plt.Figure | None:
-    """Create the metrics figure without displaying it."""
+    """Create the metrics figure without displaying it.
+
+    ``best_checkpoint_epoch`` is the zero-based epoch number stored by the
+    checkpoint callback. The plotted epoch axis is one-based, so the marker
+    is placed at ``best_checkpoint_epoch + 1``.
+    """
     raw_train_alpha = 0.3
     raw_val_alpha = 0.3
     smoothed_train_alpha = 0.7
@@ -139,6 +145,7 @@ def _build_metrics_figure(
     color_by_metric["total"] = "black"
     train_lines, train_labels = [], []
     val_lines, val_labels = [], []
+    best_epoch_line = None
 
     for ax, (panel_title, panel_metrics) in zip(flat_axes, active_panels):
         for metric_idx, name in enumerate(panel_metrics):
@@ -205,6 +212,17 @@ def _build_metrics_figure(
 
         ax.set_title(panel_title)
         ax.grid(True, which="both", linestyle="--", linewidth=0.5)
+        if best_checkpoint_epoch is not None:
+            best_epoch = int(best_checkpoint_epoch) + 1
+            best_epoch_line = ax.axvline(
+                best_epoch,
+                color="black",
+                linestyle="--",
+                linewidth=1.5,
+                alpha=0.9,
+                zorder=5,
+                label="best model epoch",
+            )
 
     for ax in flat_axes[-ncols:]:
         ax.set_xlabel("Epoch")
@@ -213,7 +231,10 @@ def _build_metrics_figure(
     for train_line, train_label, val_line, val_label in zip(train_lines, train_labels, val_lines, val_labels):
         legend_lines.extend([train_line, val_line])
         legend_labels.extend([train_label, val_label])
-    legend_ncols = max(1, len(train_lines))
+    if best_epoch_line is not None:
+        legend_lines.append(best_epoch_line)
+        legend_labels.append(f"best model epoch ({int(best_checkpoint_epoch) + 1})")
+    legend_ncols = max(1, len(train_lines) + (1 if best_epoch_line is not None else 0))
     fig.legend(legend_lines, legend_labels, loc="upper center", ncol=legend_ncols, fontsize="small")
     if ncols == 2:
         fig.subplots_adjust(left=0.07, right=0.93, top=0.86, bottom=0.12, wspace=0.55)
@@ -228,6 +249,7 @@ def plot_metrics(
     window: int = 10,
     alpha: float = 0.55,
     log_scale: bool = True,
+    best_checkpoint_epoch: int | None = None,
 ) -> None:
     """Visualise train/validation metrics with LOESS-smoothed overlays."""
     fig = _build_metrics_figure(
@@ -236,6 +258,7 @@ def plot_metrics(
         window=window,
         alpha=alpha,
         log_scale=log_scale,
+        best_checkpoint_epoch=best_checkpoint_epoch,
     )
     if fig is None:
         return
@@ -250,6 +273,7 @@ def save_metrics_pdf(
     window: int = 10,
     alpha: float = 0.55,
     log_scale: bool = True,
+    best_checkpoint_epoch: int | None = None,
 ) -> Path | None:
     """Render the metrics figure to a PDF file."""
     fig = _build_metrics_figure(
@@ -258,6 +282,7 @@ def save_metrics_pdf(
         window=window,
         alpha=alpha,
         log_scale=log_scale,
+        best_checkpoint_epoch=best_checkpoint_epoch,
     )
     if fig is None:
         return None
