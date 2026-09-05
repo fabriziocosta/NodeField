@@ -1,6 +1,9 @@
 """Maintained NodeField modules."""
 
 __all__ = [
+    "RecurrentNodeFieldState",
+    "RecurrentNodeFieldTrajectory",
+    "RecurrentIntervention",
     "ConditionalNodeFieldGraphDecoder",
     "ConditionalNodeFieldGraphGenerator",
     "ConditionalNodeFieldGenerator",
@@ -10,6 +13,12 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name in {"RecurrentNodeFieldState", "RecurrentNodeFieldTrajectory"}:
+        from . import recurrent_diagnostics
+        return getattr(recurrent_diagnostics, name)
+    if name == "RecurrentIntervention":
+        from .recurrent_interventions import RecurrentIntervention
+        return RecurrentIntervention
     if name == "ConditionalNodeFieldGenerator":
         from .conditional_node_field_generator import ConditionalNodeFieldGenerator
 

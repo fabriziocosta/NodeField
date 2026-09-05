@@ -59,6 +59,12 @@ def _restore_loaded_vectorizer_fit_state(graph_generator) -> None:
 def _restore_loaded_generator_runtime_defaults(graph_generator) -> None:
     """Backfill runtime attrs added after older persisted generators were saved."""
     node_generator = getattr(graph_generator, "conditional_node_generator_model", None)
+    if node_generator is not None:
+        if not hasattr(node_generator, "node_field_mode"):
+            node_generator.node_field_mode = "baseline"
+        module = getattr(node_generator, "model", None)
+        if module is not None and not hasattr(module, "node_field_mode"):
+            module.node_field_mode = "baseline"
     if node_generator is not None and not hasattr(node_generator, "locality_horizon_"):
         node_generator.locality_horizon_ = int(getattr(graph_generator, "locality_horizon", 1))
     if not hasattr(graph_generator, "feasibility_oracle_candidates_per_attempt"):

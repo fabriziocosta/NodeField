@@ -576,7 +576,10 @@ class PrebuiltBatchIterableDataset(IterableDataset):
             yield item
 
 
-class ConditionalNodeFieldModule(pl.LightningModule):
+from .recurrent_node_field import RecurrentNodeFieldMixin, configure_recurrence
+
+
+class ConditionalNodeFieldModule(RecurrentNodeFieldMixin, pl.LightningModule):
     """Conditional node-field module with an explicit scalar energy and score via autograd."""
 
     def __init__(
@@ -640,6 +643,18 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         edge_count_condition_min: float = 0.0,
         cfg_condition_dropout_prob: float = 0.1,
         cfg_null_target_strategy: str = "zero",
+        node_field_mode: str = "baseline",
+        recurrent_hidden_dimension: Optional[int] = None,
+        recurrent_training_steps: int = 8,
+        recurrent_detach_interval: Optional[int] = 4,
+        recurrent_update_scale: float = 1.0,
+        recurrent_initial_state: str = "zeros",
+        recurrent_state_normalization: bool = True,
+        recurrent_corruption_schedule: str = "annealed",
+        recurrent_sigma_min: float = 0.02,
+        recurrent_sigma_max: Optional[float] = None,
+        recurrent_supervise_all_steps: bool = True,
+        recurrent_loss_discount: float = 1.0,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["verbose"])
@@ -828,6 +843,23 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                 hidden_dim=2 * latent_embedding_dimension,
                 dropout=transformer_dropout,
             )
+
+        configure_recurrence(self, latent_embedding_dimension, node_field_sigma, **{
+            "node_field_mode": node_field_mode,
+            "recurrent_hidden_dimension": recurrent_hidden_dimension,
+            "recurrent_training_steps": recurrent_training_steps,
+            "recurrent_detach_interval": recurrent_detach_interval,
+            "recurrent_update_scale": recurrent_update_scale,
+            "recurrent_initial_state": recurrent_initial_state,
+            "recurrent_state_normalization": recurrent_state_normalization,
+            "recurrent_corruption_schedule": recurrent_corruption_schedule,
+            "recurrent_sigma_min": recurrent_sigma_min,
+            "recurrent_sigma_max": recurrent_sigma_max,
+            "recurrent_supervise_all_steps": recurrent_supervise_all_steps,
+            "recurrent_loss_discount": recurrent_loss_discount,
+        })
+        if self.node_field_mode == "recurrent_energy":
+            self._initialize_recurrent_modules(latent_embedding_dimension)
 
     def _compute_pair_probability_matrices(
         self,
@@ -1034,6 +1066,9 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         x_norm = self.layernorm_in(input_rows)
         latent_tokens = self.linear_encoder_input_to_latent(x_norm)
 
+        return self._run_conditioned_transformer(latent_tokens, global_condition_vector, node_mask)
+
+    def _run_conditioned_transformer(self, latent_tokens, global_condition_vector, node_mask=None):
         if global_condition_vector.dim() == 2:
             cond_tokens = global_condition_vector.unsqueeze(1)
         elif global_condition_vector.dim() == 3:
@@ -1188,6 +1223,14 @@ class ConditionalNodeFieldModule(pl.LightningModule):
 
         denoised = noisy_input + noise_scale.pow(2) * score
         latent_clean = self._encode_with_condition(denoised, global_condition, node_mask=node_presence_mask)
+        losses = self._node_structural_losses(
+            latent_clean, loss_node_field, input_examples, node_presence_mask,
+            node_degree_targets, node_label_targets,
+        )
+        return losses, latent_clean if self.use_locality_supervision else latent_noisy
+
+    def _node_structural_losses(self, latent_clean, loss_node_field, input_examples,
+                                node_presence_mask, node_degree_targets, node_label_targets):
         logits_deg = self.degree_head(latent_clean)
         logits_exist = self.exist_head(latent_clean).squeeze(-1) if self.use_existence_head else None
         logits_label = self.node_label_head(latent_clean) if self.use_node_label_head else None
@@ -1251,18 +1294,95 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         if self.use_node_label_head:
             total_loss = total_loss + self.lambda_node_label_importance * loss_label_ce
 
-        return (
-            {
-                "total": total_loss,
-                "node_field": loss_node_field,
-                "exist": loss_exist,
-                "deg_ce": loss_deg_ce,
-                "label_ce": loss_label_ce,
-            },
-            latent_clean if self.use_locality_supervision else latent_noisy,
-        )
+        return {
+            "total": total_loss, "node_field": loss_node_field, "exist": loss_exist,
+            "deg_ce": loss_deg_ce, "label_ce": loss_label_ce,
+        }
+
+    def _additional_structural_losses(self, total_loss, latent_tokens, global_condition,
+                                      node_presence_mask, edge_idx, edge_labels,
+                                      edge_label_idx, edge_label_targets, aux_edge_idx, aux_edge_labels):
+        metrics = {}
+        if self.use_locality_supervision and edge_idx.numel() > 0:
+            b, i, j = edge_idx.unbind(1)
+            h_i = latent_tokens[b, i]
+            h_j = latent_tokens[b, j]
+            edge_logits = self.edge_head(h_i, h_j)
+            edge_loss = F.binary_cross_entropy_with_logits(
+                edge_logits,
+                edge_labels,
+                pos_weight=self.edge_pos_weight,
+            )
+            total_loss = total_loss + self.lambda_direct_edge_importance * edge_loss
+
+            with torch.no_grad():
+                edge_pred = (torch.sigmoid(edge_logits) > 0.5).float()
+                edge_acc = (edge_pred == edge_labels).float().mean()
+
+            metrics["edge_ce"] = edge_loss
+            metrics["edge_acc"] = edge_acc
+
+        if self.use_locality_supervision and self.lambda_edge_count_importance > 0.0:
+            edge_probs_full = self._compute_edge_probability_matrices(latent_tokens)
+            edge_count_loss = self._compute_edge_count_loss(
+                edge_probs=edge_probs_full,
+                node_presence_mask=node_presence_mask,
+                target_edge_counts=self._recover_edge_count_targets(global_condition),
+            )
+            total_loss = total_loss + self.lambda_edge_count_importance * edge_count_loss
+            metrics["edge_count_loss"] = edge_count_loss
+        if self.use_existence_head and self.lambda_node_count_importance > 0.0:
+            node_count_loss = self._compute_node_count_loss(
+                logits_exist=self.exist_head(latent_tokens).squeeze(-1),
+                target_node_counts=self._recover_node_count_targets(global_condition),
+            )
+            total_loss = total_loss + self.lambda_node_count_importance * node_count_loss
+            metrics["node_count_loss"] = node_count_loss
+        if self.lambda_degree_edge_consistency_importance > 0.0:
+            degree_edge_consistency_loss = self._compute_degree_edge_consistency_loss(
+                logits_deg=self.degree_head(latent_tokens),
+                node_presence_mask=node_presence_mask,
+                target_edge_counts=self._recover_edge_count_targets(global_condition),
+            )
+            total_loss = (
+                total_loss
+                + self.lambda_degree_edge_consistency_importance * degree_edge_consistency_loss
+            )
+            metrics["degree_edge_consistency_loss"] = degree_edge_consistency_loss
+
+        if self.use_edge_label_head and edge_label_idx.numel() > 0:
+            b, i, j = edge_label_idx.unbind(1)
+            h_i = latent_tokens[b, i]
+            h_j = latent_tokens[b, j]
+            edge_label_logits = self.edge_label_head(h_i, h_j)
+            edge_label_loss = F.cross_entropy(edge_label_logits, edge_label_targets)
+            total_loss = total_loss + self.lambda_edge_label_importance * edge_label_loss
+            metrics["edge_label_ce"] = edge_label_loss
+
+        if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
+            b, i, j = aux_edge_idx.unbind(1)
+            h_i = latent_tokens[b, i]
+            h_j = latent_tokens[b, j]
+            aux_edge_logits = self.auxiliary_edge_head(h_i, h_j)
+            aux_edge_loss = F.binary_cross_entropy_with_logits(
+                aux_edge_logits,
+                aux_edge_labels,
+                pos_weight=self.auxiliary_edge_pos_weight,
+            )
+            total_loss = total_loss + self.lambda_auxiliary_edge_importance * aux_edge_loss
+
+            with torch.no_grad():
+                aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
+                aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
+
+            metrics["aux_locality_ce"] = aux_edge_loss
+            metrics["aux_edge_acc"] = aux_edge_acc
+
+        return total_loss, metrics
 
     def training_step(self, batch, batch_idx):
+        if getattr(self, "node_field_mode", "baseline") == "recurrent_energy":
+            return self._recurrent_batch_step(batch, training=True)
         batch_started_at = time.perf_counter()
         uses_pairwise_supervision = (
             self.use_locality_supervision
@@ -1299,86 +1419,14 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         )
         total_loss = losses["total"]
 
-        if self.use_locality_supervision and edge_idx.numel() > 0:
-            b, i, j = edge_idx.unbind(1)
-            h_i = latent_tokens[b, i]
-            h_j = latent_tokens[b, j]
-            edge_logits = self.edge_head(h_i, h_j)
-            edge_loss = F.binary_cross_entropy_with_logits(
-                edge_logits,
-                edge_labels,
-                pos_weight=self.edge_pos_weight,
-            )
-            total_loss = total_loss + self.lambda_direct_edge_importance * edge_loss
-
-            with torch.no_grad():
-                edge_pred = (torch.sigmoid(edge_logits) > 0.5).float()
-                edge_acc = (edge_pred == edge_labels).float().mean()
-
-            self.log("train_edge_ce", edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-            self.log("train_edge_acc", edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if self.use_locality_supervision and self.lambda_edge_count_importance > 0.0:
-            edge_probs_full = self._compute_edge_probability_matrices(latent_tokens)
-            edge_count_loss = self._compute_edge_count_loss(
-                edge_probs=edge_probs_full,
-                node_presence_mask=node_presence_mask,
-                target_edge_counts=self._recover_edge_count_targets(global_condition),
-            )
-            total_loss = total_loss + self.lambda_edge_count_importance * edge_count_loss
-            self.log("train_edge_count_loss", edge_count_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-        if self.use_existence_head and self.lambda_node_count_importance > 0.0:
-            node_count_loss = self._compute_node_count_loss(
-                logits_exist=self.exist_head(latent_tokens).squeeze(-1),
-                target_node_counts=self._recover_node_count_targets(global_condition),
-            )
-            total_loss = total_loss + self.lambda_node_count_importance * node_count_loss
-            self.log("train_node_count_loss", node_count_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-        if self.lambda_degree_edge_consistency_importance > 0.0:
-            degree_edge_consistency_loss = self._compute_degree_edge_consistency_loss(
-                logits_deg=self.degree_head(latent_tokens),
-                node_presence_mask=node_presence_mask,
-                target_edge_counts=self._recover_edge_count_targets(global_condition),
-            )
-            total_loss = (
-                total_loss
-                + self.lambda_degree_edge_consistency_importance * degree_edge_consistency_loss
-            )
-            self.log(
-                "train_degree_edge_consistency_loss",
-                degree_edge_consistency_loss,
-                on_step=False,
-                on_epoch=True,
-                batch_size=batch_size,
-            )
-
-        if self.use_edge_label_head and edge_label_idx.numel() > 0:
-            b, i, j = edge_label_idx.unbind(1)
-            h_i = latent_tokens[b, i]
-            h_j = latent_tokens[b, j]
-            edge_label_logits = self.edge_label_head(h_i, h_j)
-            edge_label_loss = F.cross_entropy(edge_label_logits, edge_label_targets)
-            total_loss = total_loss + self.lambda_edge_label_importance * edge_label_loss
-            self.log("train_edge_label_ce", edge_label_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-
-        if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
-            b, i, j = aux_edge_idx.unbind(1)
-            h_i = latent_tokens[b, i]
-            h_j = latent_tokens[b, j]
-            aux_edge_logits = self.auxiliary_edge_head(h_i, h_j)
-            aux_edge_loss = F.binary_cross_entropy_with_logits(
-                aux_edge_logits,
-                aux_edge_labels,
-                pos_weight=self.auxiliary_edge_pos_weight,
-            )
-            total_loss = total_loss + self.lambda_auxiliary_edge_importance * aux_edge_loss
-
-            with torch.no_grad():
-                aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
-                aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
-
-            self.log("train_aux_locality_ce", aux_edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-            self.log("train_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
+        total_loss, extra_metrics = self._additional_structural_losses(
+            total_loss, latent_tokens, global_condition, node_presence_mask,
+            edge_idx if uses_pairwise_supervision else None,
+            edge_labels if uses_pairwise_supervision else None,
+            edge_label_idx, edge_label_targets, aux_edge_idx, aux_edge_labels,
+        )
+        for key, value in extra_metrics.items():
+            self.log("train_" + key, value, on_step=False, on_epoch=True, batch_size=batch_size)
 
         self.log("train_total", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.log(
@@ -1445,6 +1493,8 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
+        if getattr(self, "node_field_mode", "baseline") == "recurrent_energy":
+            return self._recurrent_batch_step(batch, training=False)
         with torch.enable_grad():
             uses_pairwise_supervision = (
                 self.use_locality_supervision
@@ -1480,84 +1530,14 @@ class ConditionalNodeFieldModule(pl.LightningModule):
             )
             total_loss = losses["total"]
 
-            if self.use_locality_supervision and edge_idx.numel() > 0:
-                b, i, j = edge_idx.unbind(1)
-                h_i = latent_tokens[b, i]
-                h_j = latent_tokens[b, j]
-                edge_logits = self.edge_head(h_i, h_j)
-                edge_loss = F.binary_cross_entropy_with_logits(
-                    edge_logits,
-                    edge_labels,
-                    pos_weight=self.edge_pos_weight,
-                )
-                total_loss = total_loss + self.lambda_direct_edge_importance * edge_loss
-
-                edge_pred = (torch.sigmoid(edge_logits) > 0.5).float()
-                edge_acc = (edge_pred == edge_labels).float().mean()
-
-                self.log("val_edge_ce", edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-                self.log("val_edge_acc", edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
-
-            if self.use_locality_supervision and self.lambda_edge_count_importance > 0.0:
-                edge_probs_full = self._compute_edge_probability_matrices(latent_tokens)
-                edge_count_loss = self._compute_edge_count_loss(
-                    edge_probs=edge_probs_full,
-                    node_presence_mask=node_presence_mask,
-                    target_edge_counts=self._recover_edge_count_targets(global_condition),
-                )
-                total_loss = total_loss + self.lambda_edge_count_importance * edge_count_loss
-                self.log("val_edge_count_loss", edge_count_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-            if self.use_existence_head and self.lambda_node_count_importance > 0.0:
-                node_count_loss = self._compute_node_count_loss(
-                    logits_exist=self.exist_head(latent_tokens).squeeze(-1),
-                    target_node_counts=self._recover_node_count_targets(global_condition),
-                )
-                total_loss = total_loss + self.lambda_node_count_importance * node_count_loss
-                self.log("val_node_count_loss", node_count_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-            if self.lambda_degree_edge_consistency_importance > 0.0:
-                degree_edge_consistency_loss = self._compute_degree_edge_consistency_loss(
-                    logits_deg=self.degree_head(latent_tokens),
-                    node_presence_mask=node_presence_mask,
-                    target_edge_counts=self._recover_edge_count_targets(global_condition),
-                )
-                total_loss = (
-                    total_loss
-                    + self.lambda_degree_edge_consistency_importance * degree_edge_consistency_loss
-                )
-                self.log(
-                    "val_degree_edge_consistency_loss",
-                    degree_edge_consistency_loss,
-                    on_step=False,
-                    on_epoch=True,
-                    batch_size=batch_size,
-                )
-
-            if self.use_edge_label_head and edge_label_idx.numel() > 0:
-                b, i, j = edge_label_idx.unbind(1)
-                h_i = latent_tokens[b, i]
-                h_j = latent_tokens[b, j]
-                edge_label_logits = self.edge_label_head(h_i, h_j)
-                edge_label_loss = F.cross_entropy(edge_label_logits, edge_label_targets)
-                total_loss = total_loss + self.lambda_edge_label_importance * edge_label_loss
-                self.log("val_edge_label_ce", edge_label_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-
-            if self.use_auxiliary_locality_supervision and aux_edge_idx.numel() > 0:
-                b, i, j = aux_edge_idx.unbind(1)
-                h_i = latent_tokens[b, i]
-                h_j = latent_tokens[b, j]
-                aux_edge_logits = self.auxiliary_edge_head(h_i, h_j)
-                aux_edge_loss = F.binary_cross_entropy_with_logits(
-                    aux_edge_logits,
-                    aux_edge_labels,
-                    pos_weight=self.auxiliary_edge_pos_weight,
-                )
-                total_loss = total_loss + self.lambda_auxiliary_edge_importance * aux_edge_loss
-
-                aux_edge_pred = (torch.sigmoid(aux_edge_logits) > 0.5).float()
-                aux_edge_acc = (aux_edge_pred == aux_edge_labels).float().mean()
-
-                self.log("val_aux_locality_ce", aux_edge_loss, on_step=False, on_epoch=True, batch_size=batch_size)
-                self.log("val_aux_edge_acc", aux_edge_acc, on_step=False, on_epoch=True, batch_size=batch_size)
+            total_loss, extra_metrics = self._additional_structural_losses(
+                total_loss, latent_tokens, global_condition, node_presence_mask,
+                edge_idx if uses_pairwise_supervision else None,
+                edge_labels if uses_pairwise_supervision else None,
+                edge_label_idx, edge_label_targets, aux_edge_idx, aux_edge_labels,
+            )
+            for key, value in extra_metrics.items():
+                self.log("val_" + key, value, on_step=False, on_epoch=True, batch_size=batch_size)
 
             self.log("val_total", total_loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
             self.log(
@@ -1601,6 +1581,14 @@ class ConditionalNodeFieldModule(pl.LightningModule):
         use_heads_projection: bool = False,
         exist_threshold: float = 0.5,
     ) -> torch.Tensor:
+        if getattr(self, "node_field_mode", "baseline") == "recurrent_energy":
+            return self.generate_recurrent(
+                global_condition, total_steps=total_steps, desired_target=desired_target,
+                guidance_scale=guidance_scale,
+                global_condition_unconditional=global_condition_unconditional,
+                classifier_guidance_fn=classifier_guidance_fn, classifier_scale=classifier_scale,
+                use_heads_projection=use_heads_projection, exist_threshold=exist_threshold,
+            )
         del desired_target
         if guidance_scale < 0:
             raise ValueError(f"guidance_scale must be >= 0 (got {guidance_scale}).")
@@ -1678,48 +1666,53 @@ class ConditionalNodeFieldModule(pl.LightningModule):
                     node_mask=node_mask,
                     create_graph=False,
                 )
-            with torch.no_grad():
-                logits_deg = self.degree_head(latent_tokens)
-                logits_exist = self.exist_head(latent_tokens).squeeze(-1) if self.use_existence_head else None
-                logits_label = self.node_label_head(latent_tokens) if self.use_node_label_head else None
-
-            if self.use_existence_head:
-                exist_probs = torch.sigmoid(logits_exist)
-                self._last_node_existence_probabilities = exist_probs.detach().cpu()
-                self._last_node_presence_mask = (exist_probs >= exist_threshold).detach().cpu()
-            else:
-                self._last_node_existence_probabilities = torch.ones(
-                    batch_size,
-                    self.number_of_rows_per_example,
-                    dtype=torch.float32,
-                    device=x.device,
-                ).cpu()
-                self._last_node_presence_mask = torch.ones(
-                    batch_size,
-                    self.number_of_rows_per_example,
-                    dtype=torch.bool,
-                    device=x.device,
-                ).cpu()
-            self._last_deg_classes = torch.argmax(logits_deg, dim=-1).detach().cpu()
-            if logits_label is not None:
-                self._last_node_label_logits = logits_label.detach().cpu()
-                self._last_node_label_probabilities = torch.softmax(logits_label, dim=-1).detach().cpu()
-                self._last_node_label_classes = torch.argmax(logits_label, dim=-1).detach().cpu()
-            if self.use_locality_supervision:
-                edge_probs = self._compute_edge_probability_matrices(latent_tokens)
-                self._last_edge_existence_probabilities = edge_probs.detach().cpu()
-                self._last_edge_probability_matrices = edge_probs.detach().cpu()
-            if self.use_auxiliary_locality_supervision:
-                horizon_probs = self._compute_horizon_probability_matrices(latent_tokens)
-                self._last_horizon_probability_matrices = horizon_probs.detach().cpu()
-            if self.use_edge_label_head:
-                edge_label_logits = self._compute_edge_label_logits(latent_tokens)
-                self._last_edge_label_logits = edge_label_logits.detach().cpu()
-                self._last_edge_label_probabilities = torch.softmax(edge_label_logits, dim=-1).detach().cpu()
-                edge_label_classes = torch.argmax(edge_label_logits, dim=-1)
-                self._last_edge_label_matrices = edge_label_classes.detach().cpu()
+            self._cache_generation_heads(latent_tokens, exist_threshold)
 
         return x.detach()
+
+    def _cache_generation_heads(self, latent_tokens, exist_threshold=0.5):
+        batch_size = latent_tokens.shape[0]
+        with torch.no_grad():
+            logits_deg = self.degree_head(latent_tokens)
+            logits_exist = self.exist_head(latent_tokens).squeeze(-1) if self.use_existence_head else None
+            logits_label = self.node_label_head(latent_tokens) if self.use_node_label_head else None
+
+        if self.use_existence_head:
+            exist_probs = torch.sigmoid(logits_exist)
+            self._last_node_existence_probabilities = exist_probs.detach().cpu()
+            self._last_node_presence_mask = (exist_probs >= exist_threshold).detach().cpu()
+        else:
+            self._last_node_existence_probabilities = torch.ones(
+                batch_size,
+                self.number_of_rows_per_example,
+                dtype=torch.float32,
+                device=latent_tokens.device,
+            ).cpu()
+            self._last_node_presence_mask = torch.ones(
+                batch_size,
+                self.number_of_rows_per_example,
+                dtype=torch.bool,
+                device=latent_tokens.device,
+            ).cpu()
+        self._last_deg_classes = torch.argmax(logits_deg, dim=-1).detach().cpu()
+        if logits_label is not None:
+            self._last_node_label_logits = logits_label.detach().cpu()
+            self._last_node_label_probabilities = torch.softmax(logits_label, dim=-1).detach().cpu()
+            self._last_node_label_classes = torch.argmax(logits_label, dim=-1).detach().cpu()
+        if self.use_locality_supervision:
+            edge_probs = self._compute_edge_probability_matrices(latent_tokens)
+            self._last_edge_existence_probabilities = edge_probs.detach().cpu()
+            self._last_edge_probability_matrices = edge_probs.detach().cpu()
+        if self.use_auxiliary_locality_supervision:
+            horizon_probs = self._compute_horizon_probability_matrices(latent_tokens)
+            self._last_horizon_probability_matrices = horizon_probs.detach().cpu()
+        if self.use_edge_label_head:
+            edge_label_logits = self._compute_edge_label_logits(latent_tokens)
+            self._last_edge_label_logits = edge_label_logits.detach().cpu()
+            self._last_edge_label_probabilities = torch.softmax(edge_label_logits, dim=-1).detach().cpu()
+            edge_label_classes = torch.argmax(edge_label_logits, dim=-1)
+            self._last_edge_label_matrices = edge_label_classes.detach().cpu()
+
 
 
 class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
@@ -1812,6 +1805,18 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         cfg_null_target_strategy: str = "zero",
         model_name: Optional[str] = None,
         model_dir: Optional[str] = None,
+        node_field_mode: str = "baseline",
+        recurrent_hidden_dimension: Optional[int] = None,
+        recurrent_training_steps: int = 8,
+        recurrent_detach_interval: Optional[int] = 4,
+        recurrent_update_scale: float = 1.0,
+        recurrent_initial_state: str = "zeros",
+        recurrent_state_normalization: bool = True,
+        recurrent_corruption_schedule: str = "annealed",
+        recurrent_sigma_min: float = 0.02,
+        recurrent_sigma_max: Optional[float] = None,
+        recurrent_supervise_all_steps: bool = True,
+        recurrent_loss_discount: float = 1.0,
     ):
         self.latent_embedding_dimension = latent_embedding_dimension
         self.number_of_transformer_layers = number_of_transformer_layers
@@ -1937,6 +1942,21 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.best_checkpoint_score_ = None
         self.best_checkpoint_epoch_ = None
         self.is_setup_ = False
+
+        configure_recurrence(self, latent_embedding_dimension, node_field_sigma, **{
+            "node_field_mode": node_field_mode,
+            "recurrent_hidden_dimension": recurrent_hidden_dimension,
+            "recurrent_training_steps": recurrent_training_steps,
+            "recurrent_detach_interval": recurrent_detach_interval,
+            "recurrent_update_scale": recurrent_update_scale,
+            "recurrent_initial_state": recurrent_initial_state,
+            "recurrent_state_normalization": recurrent_state_normalization,
+            "recurrent_corruption_schedule": recurrent_corruption_schedule,
+            "recurrent_sigma_min": recurrent_sigma_min,
+            "recurrent_sigma_max": recurrent_sigma_max,
+            "recurrent_supervise_all_steps": recurrent_supervise_all_steps,
+            "recurrent_loss_discount": recurrent_loss_discount,
+        })
 
     @staticmethod
     def _normalize_cfg_target_mode(cfg_target_mode: Optional[str]) -> Optional[str]:
@@ -2644,6 +2664,18 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
             use_node_label_head=self.use_node_label_head,
             num_edge_label_classes=0 if self.edge_label_classes_ is None else len(self.edge_label_classes_),
             use_edge_label_head=self.use_edge_label_head,
+            node_field_mode=getattr(self, "node_field_mode", "baseline"),
+            recurrent_hidden_dimension=getattr(self, "recurrent_hidden_dimension", None),
+            recurrent_training_steps=getattr(self, "recurrent_training_steps", 8),
+            recurrent_detach_interval=getattr(self, "recurrent_detach_interval", 4),
+            recurrent_update_scale=getattr(self, "recurrent_update_scale", 1.0),
+            recurrent_initial_state=getattr(self, "recurrent_initial_state", 'zeros'),
+            recurrent_state_normalization=getattr(self, "recurrent_state_normalization", True),
+            recurrent_corruption_schedule=getattr(self, "recurrent_corruption_schedule", 'annealed'),
+            recurrent_sigma_min=getattr(self, "recurrent_sigma_min", 0.02),
+            recurrent_sigma_max=getattr(self, "recurrent_sigma_max", None),
+            recurrent_supervise_all_steps=getattr(self, "recurrent_supervise_all_steps", True),
+            recurrent_loss_discount=getattr(self, "recurrent_loss_discount", 1.0),
             node_field_sigma=self.node_field_sigma,
             sparse_supervision_mask_ratio=self.sparse_supervision_mask_ratio,
             sampling_step_size=self.sampling_step_size,
@@ -3262,6 +3294,19 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         desired_target: Optional[Union[int, float, Sequence[Any]]] = None,
         guidance_scale: float = 1.0,
     ) -> GeneratedNodeBatch:
+        return self._predict_impl(graph_conditioning, desired_target, guidance_scale)
+
+    def predict_recurrent(self, graph_conditioning, desired_target=None, guidance_scale=1.0,
+                          *, total_steps=None, intervention=None, return_trajectory=False):
+        """Generate with recurrent interventions; optionally return (batch, trajectory)."""
+        if getattr(self, "node_field_mode", "baseline") != "recurrent_energy":
+            raise ValueError("predict_recurrent requires recurrent_energy mode")
+        return self._predict_impl(graph_conditioning, desired_target, guidance_scale,
+                                  recurrent_options=dict(total_steps=total_steps,
+                                      intervention=intervention, return_trajectory=return_trajectory))
+
+    def _predict_impl(self, graph_conditioning, desired_target=None, guidance_scale=1.0,
+                      recurrent_options=None):
         """Generate node-field predictions from graph conditioning, optionally with CFG guidance."""
         if guidance_scale < 0:
             raise ValueError(f"guidance_scale must be >= 0 (got {guidance_scale}).")
@@ -3306,18 +3351,26 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
                 cond_uncond_scaled[:, target_slice] = 0.0
             cond_uncond_tensor = torch.tensor(cond_uncond_scaled, dtype=torch.float32, device=self.device)
 
-        generated = self.model.generate(
+        options = dict(recurrent_options or {})
+        steps = options.pop("total_steps", None)
+        generate = self.model.generate if recurrent_options is None else self.model.generate_recurrent
+        generated = generate(
             cond_tensor,
-            total_steps=self.sampling_steps,
+            total_steps=self.sampling_steps if steps is None else steps,
             desired_target=desired_target,
             guidance_scale=guidance_scale,
             global_condition_unconditional=cond_uncond_tensor,
             use_heads_projection=True,
+            **options,
         )
 
+        trajectory = None
+        if isinstance(generated, tuple):
+            generated, trajectory = generated
         gen_np = generated.detach().cpu().numpy()
         gen_orig = self._inverse_transform_input(gen_np)
-        return self._build_generated_node_batch(gen_orig)
+        result = self._build_generated_node_batch(gen_orig)
+        return (result, trajectory) if trajectory is not None else result
 
     def predict_classifier_guided(
         self,
