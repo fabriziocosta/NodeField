@@ -668,7 +668,20 @@ python -m conditional_node_field_graph_generator.extensions.demo.recurrent_exper
 
 Each run creates a unique directory containing the resolved configuration, dataset/split information, preprocessing, checkpoints, selected generators, logs, per-attempt results, trajectories, diagnostics, and regenerated figures. Failures remain in the metric denominator rather than silently disappearing.
 
-The primary structural metric requires feasible decoding and exact measured node/edge and cycle/path/star structure. Node labels are compared as distributions because generated nodes do not have a guaranteed one-to-one identity match with reference slots.
+The primary structural metric is computed from the decoded graph itself: it requires a
+successful decode, a connected graph with valid measured cycle/path/star components,
+and exact measured node/edge and cycle/path/star structure relative to the condition.
+It does not use the learned feasibility estimator as an oracle. That estimator is fit
+on the training split, can report false positives for held-out synthetic graphs, and
+is therefore retained only as an optional secondary diagnostic. Node labels are
+compared as distributions because generated nodes do not have a guaranteed one-to-one
+identity match with reference slots.
+
+The anytime study uses validation data to choose stopping thresholds. The separate
+decoder-isomorphism check is sampled at the configured stride (16 by default) and
+always includes the full-budget step; this keeps the full experiment computationally
+manageable while making the reduced checking schedule explicit in the saved
+configuration.
 
 Parameter counts and equal field-evaluation comparisons are reported. Exact parameter matching between baseline and recurrent variants is intentionally deferred, because the recurrent mode adds memory-related parameters. The main evidence criterion is a positive paired 95% confidence interval together with at least a 0.05 absolute improvement in the primary metric. Intervention and stopping studies are secondary exploratory analyses.
 

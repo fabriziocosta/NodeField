@@ -38,6 +38,25 @@ SEEDS = [0, 1, 2, 3, 4]
 CONFIG_NAMES = ("baseline", "recurrent_energy_constant", "recurrent_energy_annealed")
 
 
+def mps_available():
+    """Return whether the Apple Metal backend is usable in this process."""
+    return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+
+
+def experiment_accelerator():
+    """Select the fastest accelerator supported by the current PyTorch build."""
+    if torch.cuda.is_available():
+        return "gpu"
+    if mps_available():
+        return "mps"
+    return "cpu"
+
+
+def experiment_device():
+    accelerator = experiment_accelerator()
+    return torch.device("cuda" if accelerator == "gpu" else accelerator)
+
+
 def seed_everything(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -69,15 +88,28 @@ def environment_metadata():
         dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], text=True).strip())
     except (OSError, subprocess.CalledProcessError):
         commit, dirty = None, None
+    try:
+        import sklearn
+
+        sklearn_version = str(sklearn.__version__)
+    except ImportError:
+        sklearn_version = None
+    accelerator = experiment_accelerator()
     return dict(
         git_commit=commit,
         git_dirty=dirty,
         python_version=platform.python_version(),
         torch_version=str(torch.__version__),
+        sklearn_version=sklearn_version,
         cuda_version=torch.version.cuda,
-        device_name=torch.cuda.get_device_name(0)
-        if torch.cuda.is_available()
-        else platform.processor() or "CPU",
+        accelerator=accelerator,
+        device_name=(
+            torch.cuda.get_device_name(0)
+            if accelerator == "gpu"
+            else "Apple MPS"
+            if accelerator == "mps"
+            else platform.processor() or "CPU"
+        ),
         date=datetime.now(timezone.utc).isoformat(),
         determinism=(
             "Seeded Python/NumPy/Torch; deterministic algorithms warn on unsupported "
@@ -92,8 +124,14 @@ def load_config(name, root=None):
         return yaml.safe_load(f)
 
 
-def primary_metrics(graph, condition_graph, generator):
-    """Structural fidelity uses measured statistics, never generated metadata."""
+def primary_metrics(graph, condition_graph, generator, *, include_feasibility_diagnostics=False):
+    """Measure graph fidelity from the decoded graph itself.
+
+    The learned feasibility estimator is a secondary diagnostic.  It is trained on
+    the training split and therefore is not an oracle for held-out synthetic graphs;
+    in particular, it must not turn a structurally valid target into an invalid one.
+    It is also expensive, so it is opt-in for diagnostic runs.
+    """
     from .artificial_conditioning import artificial_graph_stats
 
     missing = dict(
@@ -129,11 +167,11 @@ def primary_metrics(graph, condition_graph, generator):
     structural_valid = all(
         actual[k] for k in ("cycles_are_valid", "path_is_valid", "rays_are_valid")
     ) and nx.is_connected(graph)
-    estimator = generator.feasibility_estimator
-    if estimator is None:
-        raise RuntimeError("Canonical experiment requires the repository feasibility estimator")
-    violations = float(np.asarray(estimator.number_of_violations([graph])).reshape(-1)[0])
-    valid = structural_valid and violations == 0
+    violations = np.nan
+    if include_feasibility_diagnostics:
+        estimator = getattr(generator, "feasibility_estimator", None)
+        if estimator is not None:
+            violations = float(np.asarray(estimator.number_of_violations([graph])).reshape(-1)[0])
 
     def distribution_error(first, second):
         a, b = Counter(first), Counter(second)
@@ -141,9 +179,9 @@ def primary_metrics(graph, condition_graph, generator):
         return 0.5 * sum(abs(a[k] / na - b[k] / nb) for k in a.keys() | b.keys())
 
     return dict(
-        valid=valid,
+        valid=structural_valid,
         decoder_success=True,
-        feasible_condition_match=bool(valid and mismatches == 0),
+        feasible_condition_match=bool(structural_valid and mismatches == 0),
         node_count_accuracy=actual["total_nodes"] == target["total_nodes"],
         edge_count_accuracy=actual["total_edges"] == target["total_edges"],
         condition_error=mismatches / len(keys),
@@ -284,7 +322,13 @@ class RecurrentExperiment:
                         "raw RENF; compare equal field evaluations and report parameters"
                     ),
                     checkpoint_D="alias of C selected by validation loss",
-                    anytime="validation-calibrated thresholds, 3 consecutive stable steps",
+                    anytime=(
+                        "validation-calibrated thresholds, 3 consecutive stable observations; "
+                        "decoder-isomorphism check sampled every configured stride"
+                    ),
+                    anytime_decoder_check_stride=self.config["experiment"].get(
+                        "anytime_decoder_check_stride", 16
+                    ),
                 ),
             ),
         )
@@ -346,7 +390,7 @@ class RecurrentExperiment:
         owner.supervision_plan_ = generator.supervision_plan_
         generator.conditional_node_generator_model = owner
         owner.setup(self.batches["train"], self.conditions["train"])
-        owner.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        owner.device = experiment_device()
         owner.model.to(owner.device)
         generator.is_fitted_ = True
         return generator
@@ -504,7 +548,7 @@ class RecurrentExperiment:
                     )
                 trainer = pl.Trainer(
                     max_epochs=epochs,
-                    accelerator="gpu" if torch.cuda.is_available() else "cpu",
+                    accelerator=experiment_accelerator(),
                     devices=1,
                     logger=CSVLogger(str(directory), name="logs"),
                     callbacks=callbacks,
@@ -608,20 +652,18 @@ class RecurrentExperiment:
         if name == "baseline":
             batch = owner.predict(condition)
         else:
-            batch = owner.predict_recurrent(condition, total_steps=depth, intervention=intervention)
+            batch, trajectory = owner.predict_recurrent(
+                condition,
+                total_steps=depth,
+                intervention=intervention,
+                return_trajectory=True,
+            )
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         generation_seconds = time.perf_counter() - started
         generation_peak_memory = (
             torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None
         )
-        if name != "baseline":
-            ds = time.perf_counter()
-            seed_everything(sampling_seed)
-            _, trajectory = owner.predict_recurrent(
-                condition, total_steps=depth, intervention=intervention, return_trajectory=True
-            )
-            diagnostic_seconds = time.perf_counter() - ds
         decode_started = time.perf_counter()
         try:
             graph = self._decode(generator, batch, condition)
@@ -797,6 +839,9 @@ class RecurrentExperiment:
         thresholds = []
         depth = max(self.config["experiment"]["depths"])
         consecutive = self.config["experiment"]["stability_consecutive_steps"]
+        decoder_check_stride = max(
+            1, int(self.config["experiment"].get("anytime_decoder_check_stride", 16))
+        )
         for (seed, name), generator in self.models.items():
             if name == "baseline":
                 continue
@@ -904,7 +949,7 @@ class RecurrentExperiment:
                     last = None
                     streak = 0
                     step = depth
-                    for k in range(1, depth + 1):
+                    for k in sampled_steps(depth, decoder_check_stride):
                         try:
                             graph = _readout_graph(self, generator, trace, k, condition)
                         except (RuntimeError, ValueError, nx.NetworkXException):
@@ -940,7 +985,7 @@ class RecurrentExperiment:
                             model=name,
                             example_id=example_id,
                             split=split,
-                            rule="decoder_unchanged_fixed_M",
+                            rule="decoder_unchanged_sampled_fixed_M",
                             steps=step,
                             steps_saved=depth - step,
                             quality_loss=full - early,
@@ -1082,6 +1127,16 @@ def stabilization_step(
         if streak >= consecutive:
             return index + 1
     return len(records)
+
+
+def sampled_steps(depth, stride):
+    """Return decoder checkpoints while always retaining the final full-budget step."""
+    depth = int(depth)
+    stride = max(1, int(stride))
+    steps = list(range(1, depth + 1, stride))
+    if not steps or steps[-1] != depth:
+        steps.append(depth)
+    return steps
 
 
 def _readout_graph(experiment, generator, trajectory, step, condition):

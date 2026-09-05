@@ -1,12 +1,14 @@
 from pathlib import Path
 
 import networkx as nx
+import numpy as np
 import pandas as pd
 
 from conditional_node_field_graph_generator.extensions.demo.recurrent_experiments import (
     experiment_conditions,
     load_config,
     primary_metrics,
+    sampled_steps,
     stabilization_step,
     summarize_results,
 )
@@ -35,6 +37,46 @@ def test_stabilization_requires_consecutive_observations():
 def test_failure_remains_primary_metric_zero():
     result = primary_metrics(None, nx.path_graph(3), None)
     assert result["feasible_condition_match"] is False and result["decoder_success"] is False
+
+
+def test_learned_feasibility_estimator_does_not_gate_structural_metric(monkeypatch):
+    from types import SimpleNamespace
+
+    from conditional_node_field_graph_generator.extensions.demo import artificial_conditioning
+
+    graph = nx.path_graph(2)
+    stats = {
+        "total_nodes": 2,
+        "total_edges": 1,
+        "cycle_count": 0,
+        "cycle_sizes": (),
+        "path_length": 2,
+        "path_component_sizes": (2,),
+        "ray_count": 0,
+        "ray_sizes": (),
+        "star_hub_count": 0,
+        "cycles_are_valid": True,
+        "path_is_valid": True,
+        "rays_are_valid": True,
+    }
+    monkeypatch.setattr(artificial_conditioning, "artificial_graph_stats", lambda *_: stats)
+    generator = SimpleNamespace(
+        feasibility_estimator=SimpleNamespace(number_of_violations=lambda _: [99])
+    )
+
+    result = primary_metrics(graph, graph, generator)
+    assert result["valid"] is True
+    assert result["feasible_condition_match"] is True
+    assert np.isnan(result["feasibility_violations"])
+    diagnostic = primary_metrics(
+        graph, graph, generator, include_feasibility_diagnostics=True
+    )
+    assert diagnostic["feasibility_violations"] == 99
+
+
+def test_sampled_steps_always_include_full_budget():
+    assert sampled_steps(16, 4) == [1, 5, 9, 13, 16]
+    assert sampled_steps(16, 100) == [1, 16]
 
 
 def test_statistics_pair_examples_then_seeds(tmp_path):
@@ -131,7 +173,13 @@ def test_anytime_driver_uses_validation_and_reports_test_only(tmp_path, monkeypa
     experiment.models = {
         (0, "recurrent_energy_annealed"): SimpleNamespace(conditional_node_generator_model=Owner())
     }
-    experiment.config = {"experiment": {"depths": [4], "stability_consecutive_steps": 2}}
+    experiment.config = {
+        "experiment": {
+            "depths": [4],
+            "stability_consecutive_steps": 2,
+            "anytime_decoder_check_stride": 2,
+        }
+    }
     experiment.splits = {"validation": [0], "test": [1]}
     experiment.conditions = {"validation": Conditions(), "test": Conditions()}
     experiment.graphs = [nx.path_graph(2), nx.path_graph(2)]

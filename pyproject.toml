@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nodefield"
-version = "0.0.1"
+version = "3.0.1"
 description = "Conditional node field graph generation framework"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "Fabrizio", email = "fabrizio@example.com" }]
+authors = [{ name = "Fabrizio Costa", email = "f.costa@exeter.ac.uk" }]
 keywords = ["graph", "generation", "pytorch", "node-field", "conditional"]
 classifiers = [
   "Programming Language :: Python :: 3",

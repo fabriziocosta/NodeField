@@ -99,6 +99,7 @@ experiment:
   - 1.0
   langevin_original: 0.01
   stability_consecutive_steps: 3
+  anytime_decoder_check_stride: 16
   primary_metric: feasible_condition_match
   minimum_effect: 0.05
   decode_time_limit_seconds: 5.0
