@@ -12,6 +12,8 @@ under ignored artifact/data paths.
 
 ## Start here
 
+- [Automatic campaign state dashboard](../notebooks/automatic_campaign_state_dashboard.ipynb)
+  discovers the newest campaign `state.yaml` and provides four levels of interactive inspection.
 - [Molecular generation and guidance](../notebooks/molecular_generation_and_guidance.ipynb)
   is the maintained chemistry-focused workflow.
 - [ZINC molecular-generation development](../notebooks/zinc_molecular_generation_development.ipynb)

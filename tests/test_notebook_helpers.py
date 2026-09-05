@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_ROOT = PROJECT_ROOT / "notebooks"
 SCRIPT_ROOT = PROJECT_ROOT / "scripts"
 MAINTAINED_NOTEBOOKS = [
+    NOTEBOOK_ROOT / "automatic_campaign_state_dashboard.ipynb",
     NOTEBOOK_ROOT / "artificial_non_streaming_training_and_sampling.ipynb",
     NOTEBOOK_ROOT / "artificial_partial_graph_token_reconstruction.ipynb",
     NOTEBOOK_ROOT / "artificial_structural_conditioning_analysis.ipynb",

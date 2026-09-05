@@ -11,6 +11,7 @@ need plots or tables.
 
 ## Core workflows
 
+- [Automatic campaign state dashboard](./automatic_campaign_state_dashboard.ipynb) — auto-discover the latest campaign and inspect its current experiment, observations, hypotheses, and Graphviz state graph at detail levels 0–3.
 - [Molecular generation and guidance](./molecular_generation_and_guidance.ipynb) — maintained chemistry workflow for molecular training, decoding, feasibility, guidance, and interpolation.
 - [ZINC molecular-generation development](./zinc_molecular_generation_development.ipynb) — larger cached-ZINC development and evaluation workspace.
 - [Artificial non-streaming training and sampling](./artificial_non_streaming_training_and_sampling.ipynb) — train on generated cycle/path/star graphs and inspect samples.

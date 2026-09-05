@@ -10,6 +10,11 @@ Training is supplemented by auxiliary objectives, including node-degree predicti
 
 The main technical documentation lives under [`docs/`](docs/). The documents are split by responsibility so that the modeling details, orchestration layer, decoder logic, and API surface can each be read independently.
 
+For the automatic experiment controller, start with
+[`docs/AUTOMATIC_CAMPAIGN.md`](docs/AUTOMATIC_CAMPAIGN.md). It explains the
+campaign loop, scientific `state.yaml`, candidate validation, CLI commands, and
+artifact layout.
+
 [`docs/1_CONDITIONAL_NODE_FIELD_GRAPH_GENERATOR_README.md`](docs/1_CONDITIONAL_NODE_FIELD_GRAPH_GENERATOR_README.md)
 
 This document focuses on the graph-generator orchestration layer. It explains how raw graphs are vectorized, how supervision channels are assembled, how the node generator and decoder are coordinated, how graph-level sampling and interpolation work, and how feasibility filtering and graph-level guidance are exposed.

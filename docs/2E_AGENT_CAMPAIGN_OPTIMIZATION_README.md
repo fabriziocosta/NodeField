@@ -1,5 +1,9 @@
 # Agent Campaign Optimization Loop
 
+For a concise user-facing explanation of the automatic controller, see
+[`AUTOMATIC_CAMPAIGN.md`](AUTOMATIC_CAMPAIGN.md). This reference continues with
+the detailed configuration, proposal, and migration behavior.
+
 This document describes the NodeField campaign loop used to optimize graph-generation
 hyperparameters across the two supported domains:
 

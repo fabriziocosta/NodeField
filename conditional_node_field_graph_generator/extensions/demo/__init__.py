@@ -22,6 +22,8 @@ _EXPORTS = {
     "collect_oracle_trace_rows": ".oracle",
     "compare_real_vs_generated": ".visualization",
     "describe_resume_checkpoint": ".storage",
+    "discover_latest_campaign_state": ".campaign_dashboard",
+    "display_latest_campaign_dashboard": ".campaign_dashboard",
     "draw_artificial_graphs": ".artificial",
     "find_latest_checkpoint": ".storage",
     "find_latest_campaign_state": ".campaign_best_model",
