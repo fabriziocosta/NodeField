@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import platform
 import random
 import subprocess
@@ -32,6 +33,7 @@ from ...conditional_node_field_generator import (
     collate_conditional_node_field_graph_with_edges,
 )
 from ...recurrent_interventions import RecurrentIntervention
+from ...runtime_utils import run_trainer_fit
 
 EXPERIMENT_NAME = "recurrent_energy_nodefield_ablation_v1"
 SEEDS = [0, 1, 2, 3, 4]
@@ -63,7 +65,14 @@ def seed_everything(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(True, warn_only=True)
+    if mps_available():
+        # MPS has no deterministic implementation for the indexed accumulation
+        # used by the score-field gradient.  Enabling warn-only determinism here
+        # produces a warning on every training run without making the kernel
+        # deterministic, so use seeded-but-not-bitwise-deterministic MPS mode.
+        torch.use_deterministic_algorithms(False)
+    else:
+        torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 def _json_default(value):
@@ -112,8 +121,9 @@ def environment_metadata():
         ),
         date=datetime.now(timezone.utc).isoformat(),
         determinism=(
-            "Seeded Python/NumPy/Torch; deterministic algorithms warn on unsupported "
-            "operations; solver and accelerator versions can affect results."
+            "Seeded Python/NumPy/Torch; deterministic algorithms are enabled where "
+            "supported; MPS uses seeded but not bitwise-deterministic kernels; solver "
+            "and accelerator versions can affect results."
         ),
     )
 
@@ -457,6 +467,20 @@ class RecurrentExperiment:
         return pd.DataFrame(self.sanity_rows)
 
     def train(self):
+        # Lightning emits startup diagnostics and a generic num_workers hint at
+        # INFO/WARNING level.  This experiment intentionally uses in-memory
+        # loaders with num_workers=0: additional workers add process overhead and
+        # do not improve this small, already-materialized dataset.  Keep the
+        # experiment's own finite-gradient checks visible while silencing only
+        # Lightning's infrastructure chatter.
+        for logger_name in (
+            "pytorch_lightning",
+            "lightning",
+            "lightning.pytorch",
+            "lightning_fabric",
+            "lightning_utilities",
+        ):
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
         import pytorch_lightning as pl
         from pytorch_lightning.callbacks import Callback, EarlyStopping, ModelCheckpoint
         from pytorch_lightning.loggers import CSVLogger
@@ -493,6 +517,8 @@ class RecurrentExperiment:
                     raise FloatingPointError("Nonfinite validation loss")
 
         seeds = self.config["experiment"]["smoke_seeds"] if self.smoke else self.config["seeds"]
+        total_training_runs = len(seeds) * len(CONFIG_NAMES)
+        completed_training_runs = 0
         from .pipeline import build_graph_generator
 
         defaults = {
@@ -575,9 +601,25 @@ class RecurrentExperiment:
                     seed,
                     False,
                 )
+                run_number = completed_training_runs + 1
+                print(
+                    f"[Training {run_number}/{total_training_runs}] start "
+                    f"model={name} seed={seed} accelerator={experiment_accelerator()} "
+                    f"epochs={epochs} batches_per_epoch={len(train_loader)} "
+                    f"train_graphs={len(self.splits['train'])} "
+                    f"validation_graphs={len(self.splits['validation'])}",
+                    flush=True,
+                )
                 started = time.perf_counter()
                 seed_everything(seed)
-                trainer.fit(owner.model, train_loader, val_loader)
+                run_trainer_fit(
+                    trainer,
+                    owner.model,
+                    train_loader,
+                    val_loader,
+                    context=f"Training model={name} seed={seed}",
+                )
+                elapsed = time.perf_counter() - started
                 owner.model.load_state_dict(
                     torch.load(
                         checkpoint.best_model_path, map_location=owner.device, weights_only=False
@@ -588,16 +630,28 @@ class RecurrentExperiment:
                 with (directory / "generator.pkl").open("wb") as f:
                     dill.dump(generator, f)
                 self.models[(seed, name)] = generator
+                best_validation_loss = float(checkpoint.best_model_score)
                 write_json(
                     directory / "training.json",
                     dict(
-                        seconds=time.perf_counter() - started,
+                        seconds=elapsed,
                         updates=trainer.global_step,
                         best_checkpoint=checkpoint.best_model_path,
-                        best_validation_loss=float(checkpoint.best_model_score),
+                        best_validation_loss=best_validation_loss,
                     ),
                 )
-                print(f"Trained {name} seed={seed} updates={trainer.global_step}", flush=True)
+                completed_training_runs += 1
+                elapsed_label = (
+                    f"{elapsed / 60:.1f}m" if elapsed >= 60.0 else f"{elapsed:.1f}s"
+                )
+                print(
+                    f"[Training {completed_training_runs}/{total_training_runs}] complete "
+                    f"model={name} seed={seed} updates={trainer.global_step} "
+                    f"best_val_total={best_validation_loss:.6f} "
+                    f"elapsed={elapsed_label} "
+                    f"checkpoint={Path(checkpoint.best_model_path).name}",
+                    flush=True,
+                )
         write_json(
             self.run_dir / "checkpoint_aliases.json",
             {"D": "recurrent_energy_annealed (C), same validation-selected checkpoint"},
@@ -1187,7 +1241,9 @@ def plot_results(run_dir):
         ax.set(xlabel="Inference depth (score updates)", ylabel=metric)
         if metric in {"feasible_condition_match", "decoder_success", "valid"}:
             ax.set_ylim(0, 1)
-        ax.legend(fontsize=7)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, fontsize=7)
         fig.tight_layout()
         fig.savefig(out / filename, dpi=150)
         plt.close(fig)
@@ -1218,7 +1274,9 @@ def plot_results(run_dir):
             for ax in axes:
                 ax.axvline(step + 1, color="gray", ls=":", alpha=0.4)
     for ax in axes:
-        ax.legend(fontsize=6)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, fontsize=6)
     axes[1].set_ylim(0, 1)
     fig.tight_layout()
     fig.savefig(out / "03_memory_recovery.png", dpi=150)
@@ -1253,7 +1311,9 @@ def plot_results(run_dir):
             ax.plot(mean.index + 1, mean.values, label=name)
         ax.axvline(ktrain, color="gray", ls="--")
         ax.set(xlabel="Completed recurrent steps", ylabel=metric)
-        ax.legend(fontsize=7)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, fontsize=7)
     fig.tight_layout()
     fig.savefig(out / "05_state_dynamics.png", dpi=150)
     plt.close(fig)
@@ -1287,7 +1347,9 @@ def plot_results(run_dir):
                         values = group.dropna(subset=[metric])
                         ax.plot(values.step, values[metric], label=f"{model}/{metric}")
             ax.set(xlabel="Optimization step", ylabel="Loss")
-            ax.legend(fontsize=6)
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(handles, labels, fontsize=6)
             fig.tight_layout()
             fig.savefig(out / f"{name}.png", dpi=150)
             plt.close(fig)
