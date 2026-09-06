@@ -292,7 +292,10 @@ class TrainingCoordinator:
             "persistent_workers": training_num_workers > 0,
         }
         if isinstance(dataset, ConditionalNodeFieldGraphWithEdgesDataset):
-            train_dataset, val_dataset = owner._build_train_val_subsets(dataset)
+            train_dataset, val_dataset = owner._build_train_val_subsets(
+                dataset,
+                train_on_all_examples=bool(getattr(owner, "train_on_all_examples", False)),
+            )
             train_loader = DataLoader(
                 train_dataset,
                 batch_size=owner.batch_size,
@@ -308,7 +311,10 @@ class TrainingCoordinator:
                 **loader_worker_kwargs,
             )
         else:
-            train_dataset, val_dataset = owner._build_train_val_subsets(dataset)
+            train_dataset, val_dataset = owner._build_train_val_subsets(
+                dataset,
+                train_on_all_examples=bool(getattr(owner, "train_on_all_examples", False)),
+            )
             train_loader = DataLoader(
                 train_dataset,
                 batch_size=owner.batch_size,

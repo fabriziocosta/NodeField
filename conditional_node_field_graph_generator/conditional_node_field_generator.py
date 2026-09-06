@@ -1769,6 +1769,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         learning_rate: float = 1e-3,
         maximum_epochs: int = 10,
         batch_size: int = 32,
+        train_on_all_examples: bool = False,
         training_num_workers: int = 0,
         total_steps: int = 100,
         verbose: bool = False,
@@ -1825,6 +1826,7 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         self.learning_rate = learning_rate
         self.maximum_epochs = maximum_epochs
         self.batch_size = batch_size
+        self.train_on_all_examples = bool(train_on_all_examples)
         self.training_num_workers = int(training_num_workers)
         if self.training_num_workers < 0:
             raise ValueError("training_num_workers must be >= 0")
@@ -2302,15 +2304,21 @@ class ConditionalNodeFieldGenerator(ConditionalNodeGeneratorBase):
         return 1.0
 
     @staticmethod
-    def _build_train_val_subsets(dataset):
+    def _build_train_val_subsets(dataset, *, train_on_all_examples: bool = False):
         """Create non-empty train/validation subsets for tiny datasets.
 
         For a single-example dataset, reuse the same sample for both training and
         validation so Lightning callbacks that monitor validation metrics still work.
+        Deliberate overfit diagnostics can also reuse the complete dataset on both
+        sides, ensuring every requested seen example contributes gradients.
         """
         dataset_size = len(dataset)
         if dataset_size < 1:
             raise ValueError("Training dataset must contain at least one example.")
+        if train_on_all_examples:
+            indices = list(range(dataset_size))
+            subset = torch.utils.data.Subset(dataset, indices)
+            return subset, subset
         if dataset_size == 1:
             single_index = [0]
             subset = torch.utils.data.Subset(dataset, single_index)

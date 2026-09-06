@@ -981,6 +981,22 @@ def test_build_train_val_subsets_keeps_both_sides_non_empty_for_two_examples():
     assert len(val_dataset) == 1
 
 
+def test_build_train_val_subsets_can_reuse_all_examples_for_overfit_diagnostics():
+    dataset = torch.utils.data.TensorDataset(
+        torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float32)
+    )
+
+    train_dataset, val_dataset = ConditionalNodeFieldGenerator._build_train_val_subsets(
+        dataset,
+        train_on_all_examples=True,
+    )
+
+    assert len(train_dataset) == 3
+    assert len(val_dataset) == 3
+    assert [train_dataset[index][0].item() for index in range(3)] == [1.0, 2.0, 3.0]
+    assert [val_dataset[index][0].item() for index in range(3)] == [1.0, 2.0, 3.0]
+
+
 def test_build_train_val_subsets_rejects_empty_dataset():
     dataset = torch.utils.data.TensorDataset(torch.empty((0, 1), dtype=torch.float32))
 

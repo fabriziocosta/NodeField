@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
+import random
 from typing import Any, Mapping, Sequence
 
 import networkx as nx
@@ -16,6 +18,33 @@ RECONSTRUCTION_ERROR_METRICS = (
     "degree_hist_l1",
     "edge_label_hist_l1",
 )
+
+
+@contextmanager
+def _seeded_generation(seed: int):
+    """Make paired stochastic decodes use the same initial random states."""
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch = None
+    torch_state = None
+    try:
+        import torch as _torch
+
+        torch = _torch
+        torch_state = torch.random.get_rng_state()
+    except ImportError:
+        pass
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    if torch is not None:
+        torch.manual_seed(int(seed))
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        if torch is not None and torch_state is not None:
+            torch.random.set_rng_state(torch_state)
 
 
 def same_labeled_graph(reference: nx.Graph, candidate: nx.Graph) -> bool:
@@ -98,7 +127,7 @@ def shuffled_embedding_conditioning(
     conditioning: GraphConditioningBatch,
     donor_conditioning: GraphConditioningBatch,
 ) -> GraphConditioningBatch:
-    """Pair target counts with graph embeddings from the opposite split."""
+    """Pair target counts with a cyclically mismatched donor embedding batch."""
     if len(donor_conditioning) < 1:
         return conditioning
     permutation = np.roll(np.arange(len(donor_conditioning), dtype=np.int64), 1)
@@ -144,9 +173,10 @@ def evaluate_overfit_generalization(
     *,
     samples_per_graph: int = 6,
     use_ilp_decoder: bool = True,
+    evaluation_seed: int = 2026,
     targets: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate seen, held-out, and opposite-split conditioning controls."""
+    """Evaluate seen, held-out, and within-split mismatched conditioning controls."""
     if len(graph_generator.training_graph_conditioning_) != len(fit_graphs):
         raise RuntimeError(
             "This generator was not trained on the holdout split. "
@@ -159,20 +189,22 @@ def evaluate_overfit_generalization(
         "min_shuffled_gap": 0.20,
     })
     print("Evaluate conditional reconstruction on seen and held-out graphs.")
-    train_conditioned = graph_generator.conditional_sample(
-        fit_graphs,
-        n_samples=samples_per_graph,
-        feasibility_effort=0,
-        feasibility_filter="none",
-        use_ilp_decoder=use_ilp_decoder,
-    )
-    heldout_conditioned = graph_generator.conditional_sample(
-        heldout_graphs,
-        n_samples=samples_per_graph,
-        feasibility_effort=0,
-        feasibility_filter="none",
-        use_ilp_decoder=use_ilp_decoder,
-    )
+    with _seeded_generation(evaluation_seed):
+        train_conditioned = graph_generator.conditional_sample(
+            fit_graphs,
+            n_samples=samples_per_graph,
+            feasibility_effort=0,
+            feasibility_filter="none",
+            use_ilp_decoder=use_ilp_decoder,
+        )
+    with _seeded_generation(evaluation_seed):
+        heldout_conditioned = graph_generator.conditional_sample(
+            heldout_graphs,
+            n_samples=samples_per_graph,
+            feasibility_effort=0,
+            feasibility_filter="none",
+            use_ilp_decoder=use_ilp_decoder,
+        )
     train_score = score_conditioned_reconstruction(fit_graphs, train_conditioned)
     heldout_score = score_conditioned_reconstruction(heldout_graphs, heldout_conditioned)
     print("Seen/train conditions:", train_score)
@@ -184,18 +216,20 @@ def evaluate_overfit_generalization(
 
     fit_conditioning = graph_generator.graph_encode(fit_graphs)
     heldout_conditioning = graph_generator.graph_encode(heldout_graphs)
-    shuffled_fit_conditioned = decode_conditioning_repeated(
-        graph_generator,
-        shuffled_embedding_conditioning(fit_conditioning, heldout_conditioning),
-        repeats=samples_per_graph,
-        use_ilp_decoder=use_ilp_decoder,
-    )
-    shuffled_heldout_conditioned = decode_conditioning_repeated(
-        graph_generator,
-        shuffled_embedding_conditioning(heldout_conditioning, fit_conditioning),
-        repeats=samples_per_graph,
-        use_ilp_decoder=use_ilp_decoder,
-    )
+    with _seeded_generation(evaluation_seed):
+        shuffled_fit_conditioned = decode_conditioning_repeated(
+            graph_generator,
+            shuffled_embedding_conditioning(fit_conditioning, fit_conditioning),
+            repeats=samples_per_graph,
+            use_ilp_decoder=use_ilp_decoder,
+        )
+    with _seeded_generation(evaluation_seed):
+        shuffled_heldout_conditioned = decode_conditioning_repeated(
+            graph_generator,
+            shuffled_embedding_conditioning(heldout_conditioning, heldout_conditioning),
+            repeats=samples_per_graph,
+            use_ilp_decoder=use_ilp_decoder,
+        )
     shuffled_fit_score = score_conditioned_reconstruction(fit_graphs, shuffled_fit_conditioned)
     shuffled_heldout_score = score_conditioned_reconstruction(
         heldout_graphs, shuffled_heldout_conditioned
@@ -237,6 +271,120 @@ def evaluate_overfit_generalization(
         "shuffled_heldout_score": shuffled_heldout_score,
         "overfit_metrics": overfit_metrics,
     }
+
+
+def plot_overfit_summary(
+    evaluation: Mapping[str, Any],
+    *,
+    figsize: tuple[float, float] = (15.0, 7.0),
+) -> None:
+    """Display intuitive error, gap, and target comparisons for an evaluation."""
+    from IPython.display import HTML, display
+    import matplotlib.pyplot as plt
+
+    scores = {
+        "Seen/train": evaluation["train_score"],
+        "Held-out": evaluation["heldout_score"],
+        "Shuffled seen": evaluation["shuffled_fit_score"],
+        "Shuffled held-out": evaluation["shuffled_heldout_score"],
+    }
+    metrics = evaluation["overfit_metrics"]
+    targets = metrics["targets"]
+    success = bool(metrics["overfit_success"])
+    status = "OVERFIT TARGETS MET" if success else "OVERFIT TARGETS NOT MET"
+    status_color = "#16803c" if success else "#b42318"
+    display(HTML(
+        '<hr style="border:0;border-top:3px solid #555;margin:24px 0 12px;">'
+        f'<h2>OVERFIT EVALUATION SUMMARY</h2>'
+        f'<p style="color:{status_color};font-size:18px;font-weight:bold;">{status}</p>'
+    ))
+
+    labels = list(scores)
+    composite_values = [composite_reconstruction_error(score) for score in scores.values()]
+    component_values = np.asarray([
+        [score[metric] for metric in RECONSTRUCTION_ERROR_METRICS]
+        for score in scores.values()
+    ])
+    component_labels = ["Node labels", "Degree", "Edge labels"]
+
+    figure, axes = plt.subplots(
+        1,
+        3,
+        figsize=figsize,
+        gridspec_kw={"width_ratios": [1.0, 1.25, 1.0]},
+    )
+
+    bars = axes[0].bar(
+        labels,
+        composite_values,
+        color=["#4c78a8", "#f58518", "#54a24b", "#e45756"],
+    )
+    axes[0].axhline(
+        targets["max_seen_error"],
+        color="#b42318",
+        linestyle="--",
+        linewidth=1.5,
+        label=f"max seen = {targets['max_seen_error']:.2f}",
+    )
+    axes[0].set_title("Composite reconstruction error\n(lower is better)")
+    axes[0].set_ylabel("mean L1 error")
+    axes[0].tick_params(axis="x", rotation=35)
+    axes[0].legend(fontsize=8)
+    axes[0].bar_label(bars, fmt="%.2f", padding=3, fontsize=8)
+
+    image = axes[1].imshow(
+        component_values,
+        cmap="YlOrRd",
+        aspect="auto",
+        vmin=0.0,
+        vmax=max(1.0, float(component_values.max())),
+    )
+    axes[1].set_title("Error by reconstruction component\n(lower is better)")
+    axes[1].set_xticks(
+        range(len(component_labels)),
+        component_labels,
+        rotation=25,
+        ha="right",
+    )
+    axes[1].set_yticks(range(len(labels)), labels)
+    for row in range(component_values.shape[0]):
+        for column in range(component_values.shape[1]):
+            axes[1].text(
+                column,
+                row,
+                f"{component_values[row, column]:.2f}",
+                ha="center",
+                va="center",
+                fontsize=9,
+            )
+    figure.colorbar(image, ax=axes[1], fraction=0.046, pad=0.04)
+
+    gap_labels = ["Held-out gap", "Shuffled gap"]
+    gap_values = [metrics["heldout_gap"], metrics["shuffled_gap"]]
+    gap_targets = [targets["min_heldout_gap"], targets["min_shuffled_gap"]]
+    gap_colors = [
+        "#16803c" if value >= target else "#b42318"
+        for value, target in zip(gap_values, gap_targets)
+    ]
+    bars = axes[2].bar(gap_labels, gap_values, color=gap_colors)
+    axes[2].axhline(0.0, color="black", linewidth=0.8)
+    axes[2].plot(range(len(gap_targets)), gap_targets, "k--", label="required gap")
+    axes[2].set_title("Generalization gaps\n(higher is better)")
+    axes[2].set_ylabel("gap relative to seen error")
+    axes[2].tick_params(axis="x", rotation=25)
+    axes[2].legend(fontsize=8)
+    axes[2].bar_label(bars, fmt="%.2f", padding=3, fontsize=8)
+
+    figure.suptitle(
+        f"Seen error={metrics['seen_error']:.2f} | "
+        f"Held-out gap={metrics['heldout_gap']:+.2f} | "
+        f"Shuffled gap={metrics['shuffled_gap']:+.2f}",
+        fontsize=14,
+        fontweight="bold",
+    )
+    figure.tight_layout(rect=[0, 0, 1, 0.92])
+    display(figure)
+    plt.close(figure)
 
 
 def plot_overfit_reconstructions(
@@ -299,6 +447,7 @@ __all__ = [
     "evaluate_overfit_generalization",
     "histogram_l1",
     "normalized_histogram",
+    "plot_overfit_summary",
     "plot_overfit_reconstructions",
     "relaxed_graph_errors",
     "same_labeled_graph",
