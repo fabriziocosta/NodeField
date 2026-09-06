@@ -240,14 +240,12 @@ class MetricsLogger(pl.callbacks.Callback):
                             next_output_eta_label = self._format_duration(
                                 next_output_epochs * float(recent_epoch_seconds)
                             )
-                        previous_eta = getattr(pl_module, "_last_eta_seconds", None)
-                        previous_eta_logged_at = getattr(pl_module, "_last_eta_logged_at", None)
-                        if previous_eta is not None and previous_eta_logged_at is not None:
-                            elapsed_since_eta = max(0.0, now - float(previous_eta_logged_at))
-                            eta_seconds = min(
-                                eta_seconds,
-                                max(0.0, float(previous_eta) - elapsed_since_eta),
-                            )
+                        # Do not clamp against the previous estimate.  A transient
+                        # zero (for example while a very short epoch is being
+                        # timed) would otherwise pin every subsequent ETA at zero.
+                        # The recent-epoch median above is already robust to timing
+                        # noise and lets the estimate recover when epoch duration
+                        # changes.
                         pl_module._last_eta_seconds = eta_seconds
                         pl_module._last_eta_logged_at = now
                         eta_label = self._format_duration(eta_seconds)
